@@ -10,7 +10,7 @@
  * @module @deepseek-ai/dsh-loop-engine/client
  */
 
-import { useId, useState, type CSSProperties, type JSX } from 'react'
+import { useId, useRef, useState, type CSSProperties, type JSX } from 'react'
 import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
@@ -100,6 +100,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   const { status, engine, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
   const navId = useId()
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
 
   if (status === 'unavailable') {
     return (
@@ -130,14 +131,15 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         items={ENGINE_OPTIONS.map(option => ({ id: option.value, label: t(option.key) }))}
         selectedId={engine}
         onSelect={onSelect}
-        align="end"
+        align="start"
         portal
+        getAnchorRect={() => triggerRef.current?.getBoundingClientRect() ?? null}
         anchor={(
           <button
             type="button"
+            ref={triggerRef}
             aria-haspopup="menu"
             aria-expanded={open}
-            aria-controls={undefined}
             disabled={disabled}
             style={disabled ? triggerDisabled : trigger}
             onClick={() => { setOpen(!open) }}
