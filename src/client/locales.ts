@@ -19,6 +19,14 @@ export interface LoopEngineKey {
   switchNotice: string
   /** Saving state label. */
   saving: string
+  /** Confirmation dialog title. */
+  confirmTitle: string
+  /** Confirmation dialog body. */
+  confirmBody: string
+  /** Confirmation action label. */
+  confirmAction: string
+  /** Cancel action label. */
+  cancelAction: string
 }
 
 /** Simplified Chinese copy. */
@@ -30,6 +38,10 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   unavailable: '循环引擎设置不可用',
   switchNotice: '切换引擎会中断当前使用旧引擎运行中的会话。',
   saving: '保存中…',
+  confirmTitle: '切换循环引擎？',
+  confirmBody: '切换会中断当前使用旧引擎运行中的会话，新对话将使用新引擎。确认切换吗？',
+  confirmAction: '切换',
+  cancelAction: '取消',
 }
 
 /** English copy. */
@@ -41,4 +53,8 @@ export const en: Record<keyof LoopEngineKey, string> = {
   unavailable: 'Loop engine settings are unavailable',
   switchNotice: 'Switching engines interrupts sessions currently running on the previous engine.',
   saving: 'Saving…',
+  confirmTitle: 'Switch loop engine?',
+  confirmBody: 'Switching interrupts sessions currently running on the previous engine; new turns use the new engine. Switch now?',
+  confirmAction: 'Switch',
+  cancelAction: 'Cancel',
 }
