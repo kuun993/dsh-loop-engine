@@ -1,17 +1,24 @@
 /**
  * Loop engine settings section component: one dropdown choosing the agent
  * loop engine, backed by the duplicated settings scope through the inject face.
+ * Changing the engine asks for confirmation first, because the switch
+ * interrupts sessions still running on the previous engine.
  *
  * Styling is token-driven like the rest of the settings shell (`--dsw-*`
- * aliases), with the picker itself rendered through the shared `Menu`
- * primitive so the dropdown matches the app's other settings pickers. The
- * client-module bundle is esbuild-built without a CSS loader, so the section
- * shell uses token-based inline styles instead of a CSS module.
+ * aliases), with the picker rendered through the shared `Menu` primitive and
+ * the confirmation through `Modal`. The client-module bundle is esbuild-built
+ * without a CSS loader, so the section shell uses token-based inline styles
+ * instead of a CSS module.
  * @module @deepseek-ai/dsh-loop-engine/client
  */
 
 import { useId, useRef, useState, type CSSProperties, type JSX } from 'react'
-import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button,
+  IconChevronDownOutline14,
+  Menu,
+  Modal,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
@@ -49,7 +56,7 @@ const shell: CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
 }
 
-const title: CSSProperties = {
+const titleStyle: CSSProperties = {
   margin: 0,
   fontSize: 18,
   fontWeight: 600,
@@ -94,18 +101,26 @@ const error: CSSProperties = {
   color: 'var(--dsw-alias-state-error-primary)',
 }
 
-/** Render the engine dropdown plus the interrupt notice. */
+const confirmBody: CSSProperties = {
+  margin: 0,
+  fontSize: 13,
+  lineHeight: 1.55,
+  color: 'var(--dsw-alias-label-secondary)',
+}
+
+/** Render the engine dropdown plus the interrupt notice and the switch confirmation. */
 export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   const { controller, useSnapshot, t } = props as SectionFace
   const { status, engine, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
+  const [pending, setPending] = useState<LoopEngineId | null>(null)
   const navId = useId()
   const triggerRef = useRef<HTMLButtonElement | null>(null)
 
   if (status === 'unavailable') {
     return (
       <section aria-labelledby={navId} style={shell}>
-        <h3 id={navId} style={title}>{t('nav')}</h3>
+        <h3 id={navId} style={titleStyle}>{t('nav')}</h3>
         <p style={intro}>{t('description')}</p>
         <p role="alert" style={error}>{t('unavailable')}</p>
       </section>
@@ -114,16 +129,23 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
 
   const disabled = status === 'saving' || !writable
   const label = t(engine === 'in-process' ? 'engineInProcess' : 'engineClaudeCode')
+  // Pick only stages the choice; the switch itself waits for confirmation.
   const onSelect = (next: string): void => {
     setOpen(false)
     const value = next as LoopEngineId
     if (value === engine) return
-    void controller.setEngine(value)
+    setPending(value)
   }
+  const confirmSwitch = (): void => {
+    const value = pending
+    setPending(null)
+    if (value !== null) void controller.setEngine(value)
+  }
+  const cancelSwitch = (): void => { setPending(null) }
 
   return (
     <section aria-labelledby={navId} style={shell}>
-      <h3 id={navId} style={title}>{t('nav')}</h3>
+      <h3 id={navId} style={titleStyle}>{t('nav')}</h3>
       <p style={intro}>{t('description')}</p>
       <Menu
         open={open}
@@ -150,6 +172,19 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         )}
       />
       {status === 'saving' ? <p style={notice}>{t('saving')}</p> : <p style={notice}>{t('switchNotice')}</p>}
+      <Modal
+        open={pending !== null}
+        onClose={cancelSwitch}
+        title={t('confirmTitle')}
+        footer={(
+          <>
+            <Button variant="outline" onClick={cancelSwitch}>{t('cancelAction')}</Button>
+            <Button variant="primary" onClick={confirmSwitch}>{t('confirmAction')}</Button>
+          </>
+        )}
+      >
+        <p style={confirmBody}>{t('confirmBody')}</p>
+      </Modal>
     </section>
   )
 }
