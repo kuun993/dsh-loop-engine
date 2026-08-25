@@ -22,6 +22,11 @@ changing anything in the main repository.
 - dsh `0.1.1-rc.2` (or a build whose peer packages match).
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
   the host.
+- When the harness runs from a **source checkout** (e.g. `pnpm dsh` inside the
+  `deepseek-harness` repository), the profile must resolve this plugin's
+  harness peer packages to the monorepo **sources** via local `file:` shims
+  (the profile's `shims/` directory). A deployed install with one published
+  `node_modules` needs no shims.
 
 ## Configuration
 
@@ -59,13 +64,21 @@ changing anything in the main repository.
 
    Restart `dsh web` once so the plugin is picked up.
 
+> Switching engines rewrites a small managed block in `cordis.patch.yml`.
+> Everything else you wrote in that file is preserved; only the plugin's own
+> span changes.
+
 ## Usage
 
 1. Open **Settings → Loop engine**.
 2. Choose an engine:
    - **In-process** (default) — the built-in loop driver;
    - **Claude Code CLI** — the Claude Code driver.
-3. Switching between these two applies after restarting `dsh web`.
+3. Switching between these two applies after restarting `dsh web`. To return
+   to the default, pick **In-process** and restart again.
+4. To remove the plugin: delete the `loop-engine` row from
+   `cordis.patch.yml`, drop the dependency from `package.json`, then
+   `pnpm install` and restart `dsh web`.
 
 ## License
 
