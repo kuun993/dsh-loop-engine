@@ -26,10 +26,12 @@
 
    ```json
    "dependencies": {
-     "@deepseek-ai/dsh-loop-engine": "file:D:/workspace/github/dsh-loop-engine",
+     "@deepseek-ai/dsh-loop-engine": "0.1.1-rc.2",
      "...保留其余依赖"
    }
    ```
+
+   在包发布到 registry 之前,请改用指向你本地代码副本的 `file:` 引用,而非版本号。
 
 3. 在 `$DSH_HOME/profiles/web/cordis.patch.yml` 追加一行组合:
 

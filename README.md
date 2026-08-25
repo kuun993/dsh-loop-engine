@@ -35,10 +35,13 @@ changing anything in the main repository.
 
    ```json
    "dependencies": {
-     "@deepseek-ai/dsh-loop-engine": "file:D:/workspace/github/dsh-loop-engine",
+     "@deepseek-ai/dsh-loop-engine": "0.1.1-rc.2",
      "...keep existing deps"
    }
    ```
+
+   Until the package is published, use a local `file:` reference to your
+   checkout instead of the version string.
 
 3. Append one composition row in `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
