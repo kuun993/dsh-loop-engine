@@ -24,7 +24,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -166,10 +166,31 @@ export function apply(ctx: Context, config: Config): void {
   // Only the non-default engines live here. Their managed block disables the
   // base `agent-loop` row, freeing the single AgentFactory slot for the
   // Claude Code loop's own registration; `in-process` mounts no factory here
-  // and the base loop stays the slot owner.
-  if (fileEngine !== 'in-process') {
-    void new ClaudeCodeLoop(ctx, claudeCodeConfig(config))
+  // and the base loop stays the slot owner. The Claude Code factory is hosted
+  // as a plugin fiber so a runtime switch can mount and unmount it — the
+  // AgentFactory is a single slot, so the active engine must own it in the
+  // same process, not only at the next boot.
+  let claudeFiber: (Fiber & PromiseLike<Fiber>) | undefined
+  const mountClaude = (): void => {
+    if (claudeFiber !== undefined) return
+    const fiber = ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config))
+    claudeFiber = fiber
+    // Touch the fiber so it starts now: Cordis starts plugin fibers lazily on
+    // await, and the settings watch is a synchronous callback with no await
+    // of its own. Report a start failure; a factory that never mounted leaves
+    // the slot null, which surface errors describe correctly.
+    void fiber.then(() => undefined, (error: unknown) => {
+      claudeFiber = undefined
+      ctx.logger.error(`loop-engine: claude-code factory failed to start: ${String(error)}`)
+    })
   }
+  const unmountClaude = (): void => {
+    const fiber = claudeFiber
+    if (fiber === undefined) return
+    claudeFiber = undefined
+    void fiber.then((resolved) => { void resolved.dispose() }, () => undefined)
+  }
+  if (fileEngine === 'claude-code') mountClaude()
   // installSettingsSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
@@ -178,6 +199,11 @@ export function apply(ctx: Context, config: Config): void {
     onChange: () => {
       const next = source!().engine
       if (next === fileEngine) return
+      // Runtime engines follow the selection in the same process: switching
+      // to claude-code mounts its factory, switching back to in-process
+      // unmounts it so the base loop regains the single AgentFactory slot.
+      if (next === 'claude-code') mountClaude()
+      else unmountClaude()
       // Synchronous: the settings watch has no await, and a user may restart
       // `dsh web` immediately after switching — the managed block must be on
       // disk before the commit returns, or the restart reads the old engine.

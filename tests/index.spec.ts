@@ -238,9 +238,13 @@ describe('apply', () => {
       disposeGraceMs: 1000,
       maxTurns: 4,
     })
-    const loop = ctx.get('agentLoopClaudeCode')
-    expect(loop).toBeDefined()
-    expect(loop!.config).toMatchObject({
+    // The Claude Code factory mounts as a plugin fiber, which starts
+    // asynchronously after apply() returns.
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+    const loop = ctx.get('agentLoopClaudeCode')!
+    expect(loop.config).toMatchObject({
       permissionMode: 'plan',
       env: { ANTHROPIC_AUTH_TOKEN: 'x' },
       model: 'claude-opus-4-6',

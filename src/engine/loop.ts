@@ -211,6 +211,9 @@ declare module '@deepseek-ai/cordis' {
  * announce, and emit `agent/session-start`.
  */
 export class ClaudeCodeLoop extends Service implements AgentFactory {
+  /** Services the loop resolves through its own fiber; blessed identically to the package-level entry inject. */
+  static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
+
   /** Validated configuration owned by the loop plugin. */
   readonly config: ResolvedConfig
   private readonly ownership: FactoryOwnership
