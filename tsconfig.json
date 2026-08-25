@@ -1,0 +1,12 @@
+{
+  "extends": "../deepseek-harness/tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["es2024", "dom"],
+    "types": ["node"]
+  },
+  "include": ["src", "tests"]
+}
