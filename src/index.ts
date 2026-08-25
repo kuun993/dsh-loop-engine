@@ -20,7 +20,7 @@
  * @module @deepseek-ai/dsh-loop-engine
  */
 
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -102,6 +102,21 @@ export async function writePatchFile(path: string, text: string): Promise<void> 
 }
 
 /**
+ * Synchronously atomically replace the patch file. The engine-selection
+ * onChange is a synchronous hook with no await, and the write MUST land before
+ * the caller is told the switch committed — otherwise a user who restarts
+ * `dsh web` immediately reads the stale file and the previous engine boots.
+ * @param path - the profile's patch file.
+ * @param text - the next file content.
+ */
+export function writePatchFileSync(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.tmp-${randomUUID()}`
+  writeFileSync(tmp, text, 'utf8')
+  renameSync(tmp, path)
+}
+
+/**
  * Rewrite the managed block for a target engine, preserving the rest of the
  * file byte for byte. Only writes when the file actually differs.
  * @param path - the profile's patch file.
@@ -163,15 +178,16 @@ export function apply(ctx: Context, config: Config): void {
     onChange: () => {
       const next = source!().engine
       if (next === fileEngine) return
-      // Fire-and-forget: the settings watch is synchronous; report write
-      // failures instead of letting the caller hang on an HMR-visible file.
-      // A no-op sync (file already matches the target) is still authoritative:
-      // the file is the ground truth, so the local mirror follows it either way.
-      void syncManagedBlock(patchPath, next).then(() => {
+      // Synchronous: the settings watch has no await, and a user may restart
+      // `dsh web` immediately after switching — the managed block must be on
+      // disk before the commit returns, or the restart reads the old engine.
+      try {
+        const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
+        writePatchFileSync(patchPath, updated)
         fileEngine = next
-      }).catch((error: unknown) => {
+      } catch (error: unknown) {
         ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
-      })
+      }
     },
   })
 }
