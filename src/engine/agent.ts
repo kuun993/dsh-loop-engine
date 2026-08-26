@@ -18,7 +18,7 @@ import type {
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -582,6 +582,10 @@ export class ClaudeCodeAgent implements Agent {
       const chunkSeqs: number[] = []
       /** Per-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
       const toolCalls = new Map<number, StreamToolCall>()
+      /** Accumulated reasoning per block index, for the durable-message fallback below. */
+      const reasoningByIndex = new Map<number, string>()
+      /** Usage stashed from a suppressed reasoning-only message, used when the next message lacks its own. */
+      let pendingUsage: TokenUsage | undefined
       signal.throwIfAborted()
       for await (const message of query) {
         signal.throwIfAborted()
@@ -589,20 +593,54 @@ export class ClaudeCodeAgent implements Agent {
           case 'stream_event': {
             for (const chunk of mapStreamEvent(message.event, toolCalls)) {
               chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
+              if (chunk.type === 'reasoning-delta') {
+                reasoningByIndex.set(chunk.index, (reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
+              }
             }
             break
           }
           case 'assistant': {
             const mapped = mapAssistantMessage(message.message)
-            if (mapped.content.length > 0) {
+            const isReasoningOnly = mapped.content.length > 0
+              && mapped.content.every(block => block.type === 'reasoning')
+            if (isReasoningOnly) {
+              // Providers may split thinking into its own assistant message:
+              // hold it instead of appending, and fold it into the following
+              // message — otherwise the step's final projection (the last
+              // assistant message wins) would drop the thinking entirely.
+              // isReasoningOnly proved every block is reasoning; the cast is that proof.
+              const reasoning = mapped.content as readonly { type: 'reasoning'; text: string }[]
+              reasoningByIndex.clear()
+              reasoning.forEach((block, index) => { reasoningByIndex.set(index, block.text) })
+              pendingUsage = mapped.usage
+              break
+            }
+            // Thinking fallback: some providers stream thinking deltas but
+            // omit thinking blocks from the final assistant message. Retain
+            // the streamed reasoning as content blocks so it survives the
+            // step's final projection.
+            let content = mapped.content
+            if (reasoningByIndex.size > 0 && !content.some(block => block.type === 'reasoning')) {
+              const synthesized: ContentBlock[] = [...reasoningByIndex.entries()]
+                .sort((a, b) => a[0] - b[0])
+                .map(([, text]) => ({ type: 'reasoning' as const, text }))
+              content = [...synthesized, ...content]
+            }
+            if (content.length > 0) {
+              // The message just appended is authoritative for its thinking:
+              // drop the chunk accumulation so a later message cannot
+              // synthesize a duplicate.
+              reasoningByIndex.clear()
+              const usage = mapped.usage ?? pendingUsage
+              pendingUsage = undefined
               this.session.append('assistant/message', {
                 turn,
                 step,
                 message: createAssistantMessage({
-                  content: mapped.content,
+                  content,
                   source: { provider: PROVIDER, model: mapped.model },
                 }),
-                ...mapped.usage === undefined ? {} : { usage: mapped.usage },
+                ...usage === undefined ? {} : { usage },
               }, {
                 surfaceOp: 'append',
                 // Link the durable message to the chunks that streamed it, so
@@ -624,6 +662,25 @@ export class ClaudeCodeAgent implements Agent {
             break
           }
           case 'result': {
+            // A step that ends on a reasoning-only message: flush the held
+            // thinking as its own durable message so trailing thinking is
+            // not lost.
+            if (reasoningByIndex.size > 0) {
+              const trailing: ContentBlock[] = [...reasoningByIndex.entries()]
+                .sort((a, b) => a[0] - b[0])
+                .map(([, text]) => ({ type: 'reasoning' as const, text }))
+              reasoningByIndex.clear()
+              this.session.append('assistant/message', {
+                turn,
+                step,
+                message: createAssistantMessage({
+                  content: trailing,
+                  source: { provider: PROVIDER, model: NATIVE_MODEL_LABEL },
+                }),
+                ...pendingUsage === undefined ? {} : { usage: pendingUsage },
+              }, { surfaceOp: 'append' })
+              pendingUsage = undefined
+            }
             if (message.subtype === 'success') {
               finished = true
             } else {
