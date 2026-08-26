@@ -39,7 +39,11 @@ import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec }
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'claude-code'
-/** Model label used when neither the agent options nor the deployment pins one. */
+/**
+ * Model label logged when the deployment pins no model: Claude Code owns its
+ * model natively, so the web session's advisory model selection is deliberately
+ * not mirrored into the header (it never drives a query).
+ */
 const NATIVE_MODEL_LABEL = 'claude-code-native'
 
 // ── Skill-injection helpers (inline to avoid a peer dep on @deepseek-ai/dsh-skill) ──
@@ -511,7 +515,7 @@ export class ClaudeCodeAgent implements Agent {
 
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
-    return this.options.model ?? this.config.model ?? NATIVE_MODEL_LABEL
+    return this.config.model ?? NATIVE_MODEL_LABEL
   }
 
   /** Append the request header snapshot once per loop instance. */
