@@ -106,14 +106,18 @@ describe('mapAssistantMessage', () => {
     }])
   })
 
-  it('drops thinking/unknown blocks', () => {
+  it('maps thinking blocks to reasoning blocks and drops redacted/unknown blocks', () => {
     const mapped = mapAssistantMessage(assistantMessage({
       content: [
         { type: 'thinking', thinking: 'internal reasoning', signature: 'sig' },
         { type: 'text', text: 'visible', citations: null },
+        { type: 'redacted_thinking', data: 'x' },
       ],
     }))
-    expect(mapped.content).toEqual([{ type: 'text', text: 'visible' }])
+    expect(mapped.content).toEqual([
+      { type: 'reasoning', text: 'internal reasoning' },
+      { type: 'text', text: 'visible' },
+    ])
   })
 
   it('omits cache counters that are null', () => {
@@ -228,12 +232,12 @@ describe('mapStreamEvent', () => {
     expect(tools.get(1)).toEqual({ callId: CallId('toolu_1'), name: 'Read' })
   })
 
-  it('ignores thinking block starts', () => {
+  it('maps thinking block starts to reasoning block starts', () => {
     expect(mapStreamEvent(event({
       type: 'content_block_start',
       index: 0,
       content_block: { type: 'thinking', thinking: 'inner', signature: 'sig' },
-    }), calls())).toEqual([])
+    }), calls())).toEqual([{ type: 'block-start', index: 0, blockType: 'reasoning' }])
   })
 
   it('maps a text delta to a text-delta chunk', () => {
@@ -272,11 +276,24 @@ describe('mapStreamEvent', () => {
     }])
   })
 
+  it('maps a thinking delta to a reasoning-delta chunk', () => {
+    expect(mapStreamEvent(event({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'deeper', signature: 'sig' },
+    }), calls())).toEqual([{ type: 'reasoning-delta', index: 0, text: 'deeper' }])
+  })
+
   it('ignores non-text, non-json deltas', () => {
     expect(mapStreamEvent(event({
       type: 'content_block_delta',
       index: 0,
       delta: { type: 'citations_delta', citation: null },
+    }), calls())).toEqual([])
+    expect(mapStreamEvent(event({
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'redacted_thinking_delta', data: 'x' },
     }), calls())).toEqual([])
   })
 
@@ -284,6 +301,11 @@ describe('mapStreamEvent', () => {
     const tools = calls()
     expect(mapStreamEvent(event({ type: 'message_start', message: {} }), tools)).toEqual([])
     expect(mapStreamEvent(event({ type: 'content_block_stop', index: 0 }), tools)).toEqual([])
+    expect(mapStreamEvent(event({
+      type: 'content_block_start',
+      index: 2,
+      content_block: { type: 'redacted_thinking', data: 'x' },
+    }), tools)).toEqual([])
     expect(mapStreamEvent(event({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null, container: null, stop_details: null },
