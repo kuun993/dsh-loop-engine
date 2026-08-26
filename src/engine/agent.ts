@@ -19,7 +19,7 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { LlmError, createAssistantMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -34,12 +34,105 @@ import {
   type StreamToolCall,
 } from './mapping.ts'
 import { serializeHistory } from './prompt.ts'
-import { claudeQueryOptions } from './sdk.ts'
+import { approvalReason, resolveSessionPermission } from './permission.ts'
+import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'claude-code'
 /** Model label used when neither the agent options nor the deployment pins one. */
 const NATIVE_MODEL_LABEL = 'claude-code-native'
+
+// ── Skill-injection helpers (inline to avoid a peer dep on @deepseek-ai/dsh-skill) ──
+
+/** Kebab-case skill name regex. */
+const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/** Whitespace-bounded `/name` gesture in user text. */
+const SKILL_GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
+
+function isSkillName(name: string): boolean {
+  return SKILL_NAME_RE.test(name)
+}
+
+/** Minimal shape of a loaded skill definition. */
+interface SkillDefinition {
+  readonly name: string
+  readonly description: string
+  readonly whenToUse?: string
+  readonly invocation: { readonly modelInvocable: boolean; readonly userInvocable: boolean }
+  readonly source: string
+  readonly provider: string
+  readonly content: string
+  readonly path?: string
+  readonly resourceBase?: { readonly kind: string; readonly path: string }
+}
+
+/** Durable source for an injected user-explicit skill invocation (mirrors dsh-skill's). */
+interface SkillInvocationSource {
+  readonly kind: 'skill-invocation'
+  readonly name: string
+  readonly form: 'instructions'
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** A user-explicit skill invocation injected by this driver. */
+    'skill-invocation': SkillInvocationSource
+  }
+}
+
+/** Minimal shape of the SkillRegistry service. */
+interface SkillsService {
+  get(name: string, options: { cwd?: string; signal?: AbortSignal; scope?: unknown }): Promise<SkillDefinition | undefined>
+}
+
+/** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
+interface ApprovalService {
+  request(req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
+}
+
+/** Escape text for inclusion in XML-like skill markup. */
+function escapeText(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
+
+/** Escape an XML-like attribute value. */
+function escapeAttr(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
+}
+
+/** Render the `<skill_content>` block for a loaded skill. */
+function renderSkillContent(skill: SkillDefinition): string {
+  return [
+    `<skill_content name="${escapeAttr(skill.name)}">`,
+    '<skill_resources>',
+    skill.resourceBase !== undefined && skill.resourceBase.kind === 'directory'
+      ? `Base directory for this skill: ${escapeText(skill.resourceBase.path)}. Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.`
+      : `Resources for this skill are managed by provider "${escapeText(skill.provider)}". Load referenced resources only as needed.`,
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    skill.content,
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+}
+
+/** Collect `/name` gesture tokens from direct user messages, in first-seen order. */
+function invokedSkillNames(messages: readonly UserMessage[]): string[] {
+  const names: string[] = []
+  for (const message of messages) {
+    if ((message.source as { kind?: unknown }).kind !== 'user') continue
+    for (const block of message.content) {
+      if (block.type !== 'text') continue
+      for (const match of block.text.matchAll(SKILL_GESTURE)) {
+        const name = match[2]
+        if (name !== undefined && !names.includes(name)) names.push(name)
+      }
+    }
+  }
+  return names
+}
 
 /* jscpd:ignore-start -- mirrors default agent-loop driver; depending on agent-loop is forbidden. */
 type Phase =
@@ -256,7 +349,86 @@ export class ClaudeCodeAgent implements Agent {
       (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({ kind: 'enter', messages: claimed }),
     )
     signal.throwIfAborted()
-    return decision.kind === 'reject' ? decision : { ...decision }
+    if (decision.kind === 'reject') return decision
+    // Inject skill content for user-invoked skills.  The dsh-tool-skill
+    // handler that normally does this lives on the agent-preset context
+    // chain, which the Claude Code agent's context does not descend from,
+    // so we replicate the gesture-scan and injection here.
+    const injected = await this.injectSkills(decision.messages, signal)
+    signal.throwIfAborted()
+    return injected !== decision.messages
+      ? { kind: 'enter', messages: [...injected] }
+      : { ...decision }
+  }
+
+  /**
+   * Scan the step's user messages for `/name` skill gestures, load each
+   * matching skill, and inject the rendered skill content into the message
+   * batch.  This mirrors what dsh-tool-skill does for the in-process engine.
+   * @param messages - the current step's message batch.
+   * @param signal - cancellation signal (aborted loads are silently dropped).
+   * @returns the original batch when no skill was invoked, or an extended
+   *   batch with injected skill-content messages appended.
+   */
+  private async injectSkills(messages: readonly UserMessage[], signal: AbortSignal): Promise<readonly UserMessage[]> {
+    const names = invokedSkillNames(messages)
+    if (names.length === 0) return messages
+    const skills = this.loopCtx.get('skills') as SkillsService | undefined
+    if (skills === undefined) return messages
+    const cwd = this.session.header.cwd
+    const injections: UserMessage[] = []
+    for (const name of names) {
+      /* v8 ignore start -- SKILL_GESTURE only captures kebab-case names, so this guard never fires */
+      /* v8 ignore next -- SKILL_GESTURE only captures kebab-case names, so this guard never fires */
+      if (!isSkillName(name)) continue
+      /* v8 ignore stop */
+      let skill: SkillDefinition | undefined
+      try {
+        skill = await skills.get(name, { signal, scope: this, ...(cwd === undefined ? {} : { cwd }) })
+      } catch {
+        continue // load failure → silently skip
+      }
+      if (skill === undefined || !skill.invocation.userInvocable) continue
+      if (signal.aborted) return messages
+      injections.push(createUserMessage({
+        content: [{ type: 'text', text: renderSkillContent(skill) }],
+        source: { kind: 'skill-invocation', name, form: 'instructions' },
+      }))
+    }
+    return injections.length > 0 ? [...messages, ...injections] : messages
+  }
+
+  /**
+   * Resolve the native permission handling for one query. A deployment-pinned
+   * mode wins outright; otherwise the session's durable dsh permission knobs
+   * decide per query (mid-session preset switches included): full access
+   * bypasses native checks, an `ask` policy forwards each native permission
+   * request to the dsh approval seam, and anything else fails closed with the
+   * unattended deny-all stance.
+   * @returns the permission fields of the query spec.
+   */
+  private queryPermission(): Pick<ClaudeCodeQuerySpec, 'permissionMode' | 'onToolPermission'> {
+    if (this.config.permissionMode !== undefined) return { permissionMode: this.config.permissionMode }
+    const permission = resolveSessionPermission(this.session.events)
+    if (permission.kind === 'bypass') return { permissionMode: 'bypassPermissions' }
+    if (permission.kind === 'ask') {
+      const approval = this.loopCtx.get('approval') as ApprovalService | undefined
+      if (approval !== undefined) {
+        return {
+          permissionMode: 'default',
+          onToolPermission: async (toolName, input, signal) => {
+            const outcome = await approval.request({
+              agent: this,
+              toolName,
+              reason: approvalReason(toolName, input),
+              signal,
+            })
+            return outcome === 'allowed-once' ? 'allow' : 'deny'
+          },
+        }
+      }
+    }
+    return { permissionMode: DEFAULT_PERMISSION_MODE }
   }
 
   /** Open one turn before claiming its first proposed step. */
@@ -392,7 +564,7 @@ export class ClaudeCodeAgent implements Agent {
     try {
       const options = claudeQueryOptions({
         cwd,
-        permissionMode: this.config.permissionMode,
+        ...this.queryPermission(),
         env: this.config.env,
         disposeGraceMs: this.config.disposeGraceMs,
         ...this.config.model === undefined ? {} : { model: this.config.model },
