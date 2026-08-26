@@ -64,7 +64,8 @@ export function stringifyToolInput(input: unknown): string {
 /**
  * Translate one SDK assistant message into dsh content blocks and tool calls.
  * Text blocks map verbatim; tool_use blocks map to tool-call blocks and
- * surfaced calls; thinking and unknown blocks are dropped.
+ * surfaced calls; thinking blocks map to reasoning blocks; redacted-thinking
+ * and unknown blocks are dropped.
  * @param message - the SDK assistant message.
  * @returns the mapped content, calls, usage, and model.
  */
@@ -91,8 +92,13 @@ export function mapAssistantMessage(message: BetaMessage): MappedAssistantMessag
         })
         break
       }
+      case 'thinking':
+        // Claude Code thinking surfaces as a dsh reasoning block, matching
+        // what the native adapters produce for thinking models.
+        content.push({ type: 'reasoning', text: block.thinking })
+        break
       default:
-        // thinking, redacted-thinking, and unknown blocks are not transcribed.
+        // redacted-thinking and unknown blocks are not transcribed.
         break
     }
   }
@@ -189,10 +195,11 @@ export interface StreamToolCall {
 /**
  * Translate one SDK raw stream event into the dsh assistant chunks that drive
  * the live partial projection. Text blocks yield `block-start`/`text-delta`;
- * tool_use blocks yield `block-start`/`tool-call-delta`. Thinking, non-text
- * deltas, `content_block_stop`, and transport events yield nothing — the
- * durable `assistant/message` is appended separately from the SDK's complete
- * message, so the streamed chunks never have to carry the whole block.
+ * thinking blocks yield `block-start`/`reasoning-delta`; tool_use blocks yield
+ * `block-start`/`tool-call-delta`. Redacted thinking, signature deltas,
+ * `content_block_stop`, and transport events yield nothing — the durable
+ * `assistant/message` is appended separately from the SDK's complete message,
+ * so the streamed chunks never have to carry the whole block.
  * @param event - one raw stream event from an `includePartialMessages` query.
  * @param toolCalls - per-block-index tool identity, mutated here at a tool
  *   `content_block_start` so later `input_json_delta` can name the call.
@@ -208,6 +215,9 @@ export function mapStreamEvent(
       if (block.type === 'text') {
         return [{ type: 'block-start', index: event.index, blockType: 'text' }]
       }
+      if (block.type === 'thinking') {
+        return [{ type: 'block-start', index: event.index, blockType: 'reasoning' }]
+      }
       if (block.type === 'tool_use') {
         toolCalls.set(event.index, { callId: CallId(block.id), name: block.name })
         return [{ type: 'block-start', index: event.index, blockType: 'tool-call' }]
@@ -218,6 +228,9 @@ export function mapStreamEvent(
       const delta = event.delta
       if (delta.type === 'text_delta') {
         return [{ type: 'text-delta', index: event.index, text: delta.text }]
+      }
+      if (delta.type === 'thinking_delta') {
+        return [{ type: 'reasoning-delta', index: event.index, text: delta.thinking }]
       }
       if (delta.type === 'input_json_delta') {
         const call = toolCalls.get(event.index)
