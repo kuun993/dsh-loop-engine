@@ -123,4 +123,28 @@ describe('runtime switch direction symmetry', () => {
 
     await fiber.dispose()
   })
+
+  it('in-process -> codex mounts the Codex loop and codex -> in-process unmounts it', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n') // file = in-process
+    const { ctx, fiber } = await boot({})
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // No codex factory before the switch.
+    expect(ctx.get('agentLoopCodex')).toBeUndefined()
+
+    // UI switch: in-process -> codex.
+    await ctx.settings.update(NS, { engine: 'codex' })
+    await waitFor(() => ctx.get('agentLoopCodex') !== undefined)
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('codex')
+
+    // UI switch: codex -> in-process.
+    await ctx.settings.update(NS, { engine: 'in-process' })
+    await waitFor(() => ctx.get('agentLoopCodex') === undefined)
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+
+    await fiber.dispose()
+  })
 })

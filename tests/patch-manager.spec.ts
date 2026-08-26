@@ -29,6 +29,13 @@ describe('renderManagedBlock', () => {
     expect(block).not.toContain('agent-loop-claude-code')
     expect(block.endsWith(`${MANAGED_BLOCK_END}\n`)).toBe(true)
   })
+
+  it('renders the swap span for the codex engine', () => {
+    const block = renderManagedBlock('codex')
+    expect(block.startsWith(`${MANAGED_BLOCK_BEGIN}codex --\n`)).toBe(true)
+    expect(block).toContain('- id: agent-loop\n  disabled: true')
+    expect(block.endsWith(`${MANAGED_BLOCK_END}\n`)).toBe(true)
+  })
 })
 
 describe('block presence and engine derivation', () => {
@@ -42,6 +49,18 @@ describe('block presence and engine derivation', () => {
     const text = `${SEED}\n${renderManagedBlock('claude-code')}`
     expect(hasManagedBlock(text)).toBe(true)
     expect(currentEngineOf(text)).toBe('claude-code')
+  })
+
+  it('detects presence and derives codex', () => {
+    const text = `${SEED}\n${renderManagedBlock('codex')}`
+    expect(hasManagedBlock(text)).toBe(true)
+    expect(currentEngineOf(text)).toBe('codex')
+  })
+
+  it('reads an unknown engine marker as in-process', () => {
+    const text = `${SEED}\n${MANAGED_BLOCK_BEGIN}future-engine --\n- id: agent-loop\n  disabled: true\n${MANAGED_BLOCK_END}\n`
+    expect(hasManagedBlock(text)).toBe(true)
+    expect(currentEngineOf(text)).toBe('in-process')
   })
 })
 
@@ -94,11 +113,18 @@ describe('applyManagedBlock', () => {
   })
 
   it('fixed point: reading back a block and re-applying that engine is stable', () => {
-    for (const engine of ['in-process', 'claude-code'] as const) {
+    for (const engine of ['in-process', 'claude-code', 'codex'] as const) {
       const applied = applyManagedBlock(SEED, engine)
       const reborn = applyManagedBlock(applied, currentEngineOf(applied))
       expect(reborn).toBe(applied)
     }
+  })
+
+  it('replaces a claude-code block with a codex block', () => {
+    const once = applyManagedBlock(SEED, 'claude-code')
+    const switched = applyManagedBlock(once, 'codex')
+    expect(currentEngineOf(switched)).toBe('codex')
+    expect(switched).toBe(`${SEED}\n${renderManagedBlock('codex')}`)
   })
 
   it('starts a missing-block read for the claude-code engine from a plain seed', () => {

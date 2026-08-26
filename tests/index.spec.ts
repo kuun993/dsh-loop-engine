@@ -518,3 +518,95 @@ describe('apply mount registrations', () => {
     await fiber.dispose()
   })
 })
+
+describe('apply codex engine', () => {
+  it('mounts the codex factory and forwards the codex driver configuration', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, {
+      patchPath: path,
+      sandboxMode: 'workspace-write',
+      approvalPolicy: 'on-failure',
+      env: { CX_ENV: '1' },
+      model: 'gpt-5.2-codex',
+      apiKey: 'sk-x',
+      baseUrl: 'https://codex.example.test/v1',
+      networkAccessEnabled: true,
+      disposeGraceMs: 1000,
+      maxTurns: 4,
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+    const loop = ctx.get('agentLoopCodex')!
+    expect(loop.config).toMatchObject({
+      sandboxMode: 'workspace-write',
+      approvalPolicy: 'on-failure',
+      env: { CX_ENV: '1' },
+      model: 'gpt-5.2-codex',
+      apiKey: 'sk-x',
+      baseUrl: 'https://codex.example.test/v1',
+      networkAccessEnabled: true,
+      disposeGraceMs: 1000,
+      maxTurns: 4,
+    })
+    // The codex engine registers no commands or skill provider in this version.
+    expect(commands.registered).toHaveLength(0)
+    expect(skills.creates).toHaveLength(0)
+    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+
+    await fiber.dispose()
+  })
+
+  it('switches between hosted engines in the same process', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+
+    // claude-code -> codex: the claude fiber unmounts and the codex fiber mounts.
+    await ctx.settings.update(NS_BRANDED, { engine: 'codex' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('codex')
+
+    // codex -> in-process: the codex fiber unmounts and the block leaves the file.
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+
+    await fiber.dispose()
+  })
+
+  it('reports the failure when the codex factory fails to start', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('codex factory failed to start'))).toBe(true)
+    })
+    expect(ctx.get('agentLoopCodex')).toBeUndefined()
+
+    await fiber.dispose()
+  })
+})

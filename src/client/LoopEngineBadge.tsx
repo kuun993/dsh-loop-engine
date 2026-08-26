@@ -57,7 +57,11 @@ export function LoopEngineBadge(props: LoopEngineBadgeProps): JSX.Element | null
   const { useSnapshot, t } = props as BadgeFace
   const { status, engine } = useSnapshot((state: LoopEngineState) => state)
   if (status !== 'ready') return null
-  const label = t(engine === 'claude-code' ? 'engineClaudeCode' : 'engineInProcess')
+  const label = t(
+    engine === 'claude-code' ? 'engineClaudeCode'
+      : engine === 'codex' ? 'engineCodex'
+        : 'engineInProcess',
+  )
   return (
     <span style={pill} title={t('description')}>
       {t('nav')} · {label}
