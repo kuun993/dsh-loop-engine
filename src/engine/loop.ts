@@ -26,7 +26,7 @@ import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ClaudeCodeAgent } from './agent.ts'
-import { DEFAULT_DISPOSE_GRACE_MS, DEFAULT_PERMISSION_MODE } from './sdk.ts'
+import { DEFAULT_DISPOSE_GRACE_MS } from './sdk.ts'
 import type { ClaudeCodePermissionMode, ResolvedConfig } from './types.ts'
 
 /** Fiber states that cannot own or serve a new lifecycle. */
@@ -48,9 +48,13 @@ export const CLAUDE_CODE_PERMISSION_MODES: readonly ClaudeCodePermissionMode[] =
 /** Deployment-owned configuration for the Claude Code loop plugin. */
 export interface Config {
   /**
-   * Native non-interactive permission handling for every query. Defaults to
-   * `dontAsk`; `acceptEdits` accepts edits, `auto` uses the native classifier,
-   * `plan` returns a plan without approving execution, and `bypassPermissions`
+   * Native non-interactive permission handling for every query. When omitted,
+   * each query follows the session's dsh permission knobs (`sandbox/mode` and
+   * `approval/policy`): full access bypasses native checks, an `ask` policy
+   * forwards requests to the dsh approval seam, and anything else auto-denies.
+   * A pinned mode overrides the session for every query: `dontAsk` auto-denies,
+   * `acceptEdits` accepts edits, `auto` uses the native classifier, `plan`
+   * returns a plan without approving execution, and `bypassPermissions`
    * explicitly skips permission checks.
    */
   permissionMode?: ClaudeCodePermissionMode
@@ -66,7 +70,7 @@ export interface Config {
 
 /** Schema of the Claude Code loop plugin configuration. */
 export const Config: z<Config> = z.object({
-  permissionMode: z.union([...CLAUDE_CODE_PERMISSION_MODES]).default(DEFAULT_PERMISSION_MODE),
+  permissionMode: z.union([...CLAUDE_CODE_PERMISSION_MODES]),
   env: z.dict(z.string()).default({}),
   model: z.string(),
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
@@ -189,7 +193,7 @@ function resolveConfig(config: Config): ResolvedConfig {
     )
   }
   return {
-    permissionMode: config.permissionMode ?? DEFAULT_PERMISSION_MODE,
+    permissionMode: config.permissionMode,
     env: config.env ?? {},
     model: config.model,
     disposeGraceMs,

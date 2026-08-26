@@ -24,6 +24,8 @@ import {
 } from '../src/index.ts'
 import { applyManagedBlock, currentEngineOf } from '../src/patch-manager.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
+import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts'
+import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -293,3 +295,135 @@ async function safeRead(path: string): Promise<string | undefined> {
     return undefined
   }
 }
+
+/** The loop-engine namespace branded for settings writes (the bare literal is not a SettingsNamespace). */
+const NS_BRANDED = NS as SettingsNamespace
+
+/** Fake host commands service: records registrations and hands out recording disposers. */
+function fakeCommandsService() {
+  const registered: CommandDefinition[] = []
+  const disposers: Array<ReturnType<typeof vi.fn>> = []
+  const register = vi.fn((def: CommandDefinition) => {
+    registered.push(def)
+    const dispose = vi.fn()
+    disposers.push(dispose)
+    return dispose
+  })
+  return { registered, disposers, register }
+}
+
+/** Fake host skills service: records provider factories and hands out a recording disposer. */
+function fakeSkillsService() {
+  const creates: Array<(control: SkillProviderControl) => SkillProvider> = []
+  const disposer = vi.fn()
+  const registerProvider = vi.fn((create: (control: SkillProviderControl) => SkillProvider) => {
+    creates.push(create)
+    return disposer
+  })
+  return { creates, disposer, registerProvider }
+}
+
+describe('apply mount registrations', () => {
+  it('registers commands and the skill provider while claude-code is mounted, and disposes them on unmount', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(commands.registered.map(def => def.name)).toEqual(CLAUDE_CODE_COMMANDS.map(def => def.name))
+    expect(skills.creates).toHaveLength(1)
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(ClaudeCodeSkillProvider)
+
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+    })
+    expect(commands.disposers).toHaveLength(CLAUDE_CODE_COMMANDS.length)
+    for (const dispose of commands.disposers) expect(dispose).toHaveBeenCalledTimes(1)
+    expect(skills.disposer).toHaveBeenCalledTimes(1)
+
+    await fiber.dispose()
+  })
+
+  it('cleans up registrations when the factory fails to start, and tolerates a later unmount', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    // A non-finite grace makes the loop's config boundary throw, so the
+    // plugin fiber rejects and mountClaude rolls its registrations back.
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
+    })
+    for (const dispose of commands.disposers) expect(dispose).toHaveBeenCalledTimes(1)
+    expect(skills.disposer).toHaveBeenCalledTimes(1)
+
+    // The failed mount cleared its slot: a later switch back to in-process
+    // runs the unmount path with nothing left to tear down.
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(async () => {
+      expect(currentEngineOf((await safeRead(path)) ?? '')).toBe('in-process')
+    })
+
+    await fiber.dispose()
+  })
+
+  it('reports the failure when the factory fails to start without host services', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
+    })
+    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+
+    await fiber.dispose()
+  })
+
+  it('keeps the mounted factory when a failed block write re-enters the mount path', async () => {
+    const dir = await tempDir()
+    // Point the file write at a path whose parent is a file: the managed
+    // block write keeps failing, so fileEngine stays pinned to in-process.
+    const blocker = join(dir, 'blocker')
+    await writeFile(blocker, 'x')
+    const badPath = join(blocker, 'cordis.patch.yml')
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: badPath })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // First switch mounts the factory but cannot persist the selection.
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+    // Bouncing the settings value re-enters the mount path while the fiber
+    // is already mounted: the second mount must be a no-op, not a duplicate.
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.filter(call => String(call[0]).includes('managed block write failed'))).toHaveLength(2)
+    })
+    expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+
+    await fiber.dispose()
+  })
+})

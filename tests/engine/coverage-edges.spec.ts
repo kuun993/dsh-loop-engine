@@ -36,7 +36,7 @@ const loopPlugin = {
     void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
   },
 }
-import { DEFAULT_DISPOSE_GRACE_MS, DEFAULT_PERMISSION_MODE } from '../../src/engine/sdk.ts'
+import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine/sdk.ts'
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
 
@@ -639,10 +639,11 @@ describe('configuration and assembly surfaces', () => {
     try {
       const loop = new ClaudeCodeLoop(ctx, {})
       expect(loop.config).toMatchObject({
-        permissionMode: DEFAULT_PERMISSION_MODE,
         env: {},
         disposeGraceMs: DEFAULT_DISPOSE_GRACE_MS,
       })
+      // An unpinned permission mode follows the session's dsh permission knobs.
+      expect(loop.config.permissionMode).toBeUndefined()
       expect(loop.config.model).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
