@@ -45,7 +45,17 @@ type SectionFace = InjectFace<LoopEngineSectionInjected>
 const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] = [
   { value: 'in-process', key: 'engineInProcess' },
   { value: 'claude-code', key: 'engineClaudeCode' },
+  { value: 'codex', key: 'engineCodex' },
 ]
+
+/** Locale key of one engine's option label. */
+function engineLabelKey(engine: LoopEngineId): keyof typeof en {
+  switch (engine) {
+    case 'claude-code': return 'engineClaudeCode'
+    case 'codex': return 'engineCodex'
+    default: return 'engineInProcess'
+  }
+}
 
 /** Token-colored section shell (settings modal: column, 720px, label-primary). */
 const shell: CSSProperties = {
@@ -128,7 +138,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   }
 
   const disabled = status === 'saving' || !writable
-  const label = t(engine === 'in-process' ? 'engineInProcess' : 'engineClaudeCode')
+  const label = t(engineLabelKey(engine))
   // Pick only stages the choice; the switch itself waits for confirmation.
   const onSelect = (next: string): void => {
     setOpen(false)

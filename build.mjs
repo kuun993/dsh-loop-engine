@@ -49,6 +49,9 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/dsh-timeout',
   '@anthropic-ai/claude-agent-sdk',
   '@anthropic-ai/sdk',
+  // Codex engine SDK + CLI: resolved through node_modules at runtime.
+  '@openai/codex-sdk',
+  '@openai/codex',
 ]
 
 // Module-table specifiers the browser bundle must NOT inline: the baseline

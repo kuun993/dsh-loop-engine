@@ -1,7 +1,7 @@
 /**
  * Web-switchable agent loop engine, node half.
  *
- * Hosts the non-default agent-loop engines (Claude Code, later Codex) and
+ * Hosts the non-default agent-loop engines (Claude Code, Codex) and
  * bridges them with the harness's single AgentFactory slot. The engine is
  * selected by the `agent-loop-engine` settings section; the selection is
  * realized by a managed block in the profile's `cordis.patch.yml` that
@@ -29,6 +29,8 @@ import z from '@deepseek-ai/schemastery'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine/loop.ts'
+import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
+import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
 import {
   applyManagedBlock,
   currentEngineOf,
@@ -48,10 +50,10 @@ export const name = 'loop-engine'
 export const inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
 
 /** Bounded retry window for the AgentFactory slot race on runtime switches. */
-const MAX_CLAUDE_MOUNT_ATTEMPTS = 40
-const CLAUDE_MOUNT_RETRY_MS = 50
+const MAX_MOUNT_ATTEMPTS = 40
+const MOUNT_RETRY_MS = 50
 
-/** Composition entry for the loop engine selection and the Claude Code driver. */
+/** Composition entry for the loop engine selection and the hosted engine drivers. */
 export interface Config extends ClaudeCodeConfig {
   /** Profile whose `cordis.patch.yml` carries the managed block; defaults to `web`. */
   profile?: string
@@ -59,6 +61,16 @@ export interface Config extends ClaudeCodeConfig {
   patchFilename?: string
   /** Explicit absolute path to the patch file, overriding profile + filename. */
   patchPath?: string
+  /** Pinned Codex sandbox mode; falls back to the session's dsh permission knobs. */
+  sandboxMode?: CodexSandboxMode
+  /** Pinned Codex approval policy; falls back to the session's dsh permission knobs. */
+  approvalPolicy?: CodexApprovalPolicy
+  /** Codex API key injected as CODEX_API_KEY into the CLI environment. */
+  apiKey?: string
+  /** Codex API base URL override. */
+  baseUrl?: string
+  /** Whether the Codex sandbox may reach the network. */
+  networkAccessEnabled?: boolean
 }
 
 /** Schema of the loop engine composition entry. */
@@ -71,6 +83,11 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   disposeGraceMs: z.number(),
   maxTurns: z.number(),
+  sandboxMode: z.union(CODEX_SANDBOX_MODES.map(mode => z.const(mode))),
+  approvalPolicy: z.union(CODEX_APPROVAL_POLICIES.map(policy => z.const(policy))),
+  apiKey: z.string(),
+  baseUrl: z.string(),
+  networkAccessEnabled: z.boolean(),
 })
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
@@ -158,6 +175,21 @@ function claudeCodeConfig(config: Config): ClaudeCodeConfig {
   }
 }
 
+/** Forward the engine-driver fields of the composition entry to the Codex loop. */
+function codexConfig(config: Config): CodexConfig {
+  return {
+    ...config.sandboxMode === undefined ? {} : { sandboxMode: config.sandboxMode },
+    ...config.approvalPolicy === undefined ? {} : { approvalPolicy: config.approvalPolicy },
+    ...config.env === undefined ? {} : { env: config.env },
+    ...config.model === undefined ? {} : { model: config.model },
+    ...config.apiKey === undefined ? {} : { apiKey: config.apiKey },
+    ...config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl },
+    ...config.networkAccessEnabled === undefined ? {} : { networkAccessEnabled: config.networkAccessEnabled },
+    ...config.disposeGraceMs === undefined ? {} : { disposeGraceMs: config.disposeGraceMs },
+    ...config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns },
+  }
+}
+
 /**
  * Apply the plugin: seed the settings section from the managed block, host
  * the non-default engine factory when the block says so, and translate
@@ -171,8 +203,8 @@ export function apply(ctx: Context, config: Config): void {
   let fileEngine = currentEngineOf(readPatchFileSync(patchPath))
   // Only the non-default engines live here. Their managed block disables the
   // base `agent-loop` row, freeing the single AgentFactory slot for the
-  // Claude Code loop's own registration; `in-process` mounts no factory here
-  // and the base loop stays the slot owner. The Claude Code factory is hosted
+  // selected loop's own registration; `in-process` mounts no factory here
+  // and the base loop stays the slot owner. The selected factory is hosted
   // as a plugin fiber so a runtime switch can mount and unmount it — the
   // AgentFactory is a single slot, so the active engine must own it in the
   // same process, not only at the next boot.
@@ -186,22 +218,80 @@ export function apply(ctx: Context, config: Config): void {
     registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void
   }
 
-  let claudeFiber: (Fiber & PromiseLike<Fiber>) | undefined
+  let engineFiber: (Fiber & PromiseLike<Fiber>) | undefined
+  /** The engine whose fiber is currently mounted (or mounting), if any. */
+  let mountedEngine: LoopEngineId | undefined
   let commandDisposers: (() => void)[] | undefined
   let skillDisposer: (() => void) | undefined
   /** Bounded retry bookkeeping for the AgentFactory slot race described below. */
-  let claudeMountAttempts = 0
-  let claudeMountRetry: ReturnType<typeof setTimeout> | undefined
+  let mountAttempts = 0
+  let mountRetry: ReturnType<typeof setTimeout> | undefined
 
   const CLEAR_RETRY = (): void => {
-    if (claudeMountRetry !== undefined) {
-      clearTimeout(claudeMountRetry)
-      claudeMountRetry = undefined
+    if (mountRetry !== undefined) {
+      clearTimeout(mountRetry)
+      mountRetry = undefined
     }
   }
 
+  /** Dispose the claude-specific command and skill registrations. */
+  const cleanupClaudeRegistrations = (): void => {
+    if (commandDisposers !== undefined) {
+      for (const dispose of commandDisposers) dispose()
+      commandDisposers = undefined
+    }
+    if (skillDisposer !== undefined) {
+      skillDisposer()
+      skillDisposer = undefined
+    }
+  }
+
+  /**
+   * Host one engine factory as a plugin fiber and touch it so it starts now:
+   * Cordis starts plugin fibers lazily on await, and the settings watch is a
+   * synchronous callback with no await of its own. Report a start failure; a
+   * factory that never mounted leaves the slot null, which surface errors
+   * describe correctly.
+   * @param engine - the engine being mounted (for diagnostics and retry).
+   * @param mount - the engine-specific fiber construction.
+   */
+  const hostFactory = (engine: LoopEngineId, mount: () => (Fiber & PromiseLike<Fiber>)): void => {
+    /* v8 ignore start -- mountEngine only fires when no fiber is live (onChange's mountedEngine check and the rejection handler's cleanup); defensive re-entrancy backstop */
+    /* v8 ignore next -- see above */
+    if (engineFiber !== undefined) return
+    /* v8 ignore stop */
+    const fiber = mount()
+    engineFiber = fiber
+    mountedEngine = engine
+    void fiber.then(() => undefined, (error: unknown) => {
+      // Cleanup claude-specific registrations on failure (a no-op for codex).
+      cleanupClaudeRegistrations()
+      engineFiber = undefined
+      mountedEngine = undefined
+      // A runtime switch to a hosted engine races the patch-layer reload that
+      // disables the base `agent-loop` row: until that reload lands, the base
+      // factory still owns the single AgentFactory slot and `setFactory`
+      // rejects. Retry on exactly that collision — bounded — so the hosted
+      // factory registers right after the reload frees the slot; any other
+      // failure is deployment trouble and fails loud once.
+      if (
+        error instanceof Error
+        && error.message.includes('an agent factory is already registered')
+        && mountAttempts < MAX_MOUNT_ATTEMPTS
+      ) {
+        mountAttempts += 1
+        mountRetry = setTimeout(() => { mountEngine(engine) }, MOUNT_RETRY_MS)
+        return
+      }
+      ctx.logger.error(`loop-engine: ${engine} factory failed to start: ${String(error)}`)
+    })
+  }
+
   const mountClaude = (): void => {
-    if (claudeFiber !== undefined) return
+    /* v8 ignore start -- hostFactory owns the live-fiber backstop; this guard additionally protects the command/skill registrations from doubling */
+    /* v8 ignore next -- see above */
+    if (engineFiber !== undefined) return
+    /* v8 ignore stop */
 
     // Register Claude Code commands alongside the DSH-native ones.
     const commands = ctx.get('commands') as CommandsService | undefined
@@ -220,61 +310,33 @@ export function apply(ctx: Context, config: Config): void {
       skillDisposer = skills.registerProvider(control => new ClaudeCodeSkillProvider(control))
     }
 
-    const fiber = ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config))
-    claudeFiber = fiber
-    // Touch the fiber so it starts now: Cordis starts plugin fibers lazily on
-    // await, and the settings watch is a synchronous callback with no await
-    // of its own. Report a start failure; a factory that never mounted leaves
-    // the slot null, which surface errors describe correctly.
-    void fiber.then(() => undefined, (error: unknown) => {
-      // Cleanup commands and skills on failure.
-      if (commandDisposers !== undefined) {
-        for (const dispose of commandDisposers) dispose()
-        commandDisposers = undefined
-      }
-      if (skillDisposer !== undefined) {
-        skillDisposer()
-        skillDisposer = undefined
-      }
-      claudeFiber = undefined
-      // A runtime switch to claude-code races the patch-layer reload that
-      // disables the base `agent-loop` row: until that reload lands, the base
-      // factory still owns the single AgentFactory slot and `setFactory`
-      // rejects. Retry on exactly that collision — bounded — so the hosted
-      // factory registers right after the reload frees the slot; any other
-      // failure is deployment trouble and fails loud once.
-      if (
-        error instanceof Error
-        && error.message.includes('an agent factory is already registered')
-        && claudeMountAttempts < MAX_CLAUDE_MOUNT_ATTEMPTS
-      ) {
-        claudeMountAttempts += 1
-        claudeMountRetry = setTimeout(mountClaude, CLAUDE_MOUNT_RETRY_MS)
-        return
-      }
-      ctx.logger.error(`loop-engine: claude-code factory failed to start: ${String(error)}`)
-    })
+    hostFactory('claude-code', () => ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config)))
   }
-  const unmountClaude = (): void => {
-    const fiber = claudeFiber
-    claudeMountAttempts = 0
+
+  /** Mount the Codex loop factory (no engine-specific commands or skills in this version). */
+  const mountCodex = (): void => {
+    hostFactory('codex', () => ctx.plugin(CodexLoop, codexConfig(config)))
+  }
+
+  /** Mount the factory of a non-default engine; `in-process` mounts nothing here. */
+  const mountEngine = (engine: LoopEngineId): void => {
+    if (engine === 'claude-code') mountClaude()
+    else if (engine === 'codex') mountCodex()
+  }
+
+  const unmountEngine = (): void => {
+    const fiber = engineFiber
+    mountAttempts = 0
     CLEAR_RETRY()
+    cleanupClaudeRegistrations()
+    mountedEngine = undefined
     if (fiber === undefined) return
-    claudeFiber = undefined
-    // Cleanup commands and skills before tearing down the fiber.
-    if (commandDisposers !== undefined) {
-      for (const dispose of commandDisposers) dispose()
-      commandDisposers = undefined
-    }
-    if (skillDisposer !== undefined) {
-      skillDisposer()
-      skillDisposer = undefined
-    }
-    /* v8 ignore start -- a fiber that failed already cleared claudeFiber in mountClaude's rejection handler, so this rejection arm is unreachable */
+    engineFiber = undefined
+    /* v8 ignore start -- a fiber that failed already cleared engineFiber in hostFactory's rejection handler, so this rejection arm is unreachable */
     void fiber.then((resolved) => { void resolved.dispose() }, () => undefined)
     /* v8 ignore stop */
   }
-  if (fileEngine === 'claude-code') mountClaude()
+  mountEngine(fileEngine)
   // A pending slot-collision retry must not outlive the plugin: mounting after
   // this fiber is gone would fail on the inactive context and log noise.
   ctx.effect(() => () => CLEAR_RETRY(), 'loop-engine: mount retry cleanup')
@@ -287,10 +349,13 @@ export function apply(ctx: Context, config: Config): void {
       const next = source!().engine
       if (next === fileEngine) return
       // Runtime engines follow the selection in the same process: switching
-      // to claude-code mounts its factory, switching back to in-process
+      // to a hosted engine mounts its factory, switching back to in-process
       // unmounts it so the base loop regains the single AgentFactory slot.
-      if (next === 'claude-code') mountClaude()
-      else unmountClaude()
+      // Re-entering the already-mounted engine is a no-op, not a churn.
+      if (mountedEngine !== next) {
+        unmountEngine()
+        mountEngine(next)
+      }
       // Synchronous: the settings watch has no await, and a user may restart
       // `dsh web` immediately after switching — the managed block must be on
       // disk before the commit returns, or the restart reads the old engine.
