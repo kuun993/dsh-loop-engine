@@ -172,6 +172,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         )}
       />
       {status === 'saving' ? <p style={notice}>{t('saving')}</p> : <p style={notice}>{t('switchNotice')}</p>}
+      {engine === 'claude-code' ? <p style={notice}>{t('claudeModelNotice')}</p> : null}
       <Modal
         open={pending !== null}
         onClose={cancelSwitch}
