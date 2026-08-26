@@ -75,8 +75,40 @@ function assistantText(text: string): SDKMessage {
   } as unknown as SDKMessage
 }
 
-function successResult(): SDKMessage {
+/** A thinking-only assistant message, as emitted by providers that split thinking into its own message. */
+function thinkingOnlyMessage(thinking: string | readonly string[], outputTokens: number): SDKMessage {
+  const blocks = (typeof thinking === 'string' ? [thinking] : thinking)
   return {
+    type: 'assistant',
+    parent_tool_use_id: null,
+    uuid: 'u-thinking',
+    session_id: 's-thinking',
+    message: {
+      id: 'msg-thinking',
+      container: null,
+      context_management: null,
+      role: 'assistant',
+      type: 'message',
+      content: blocks.map(text => ({ type: 'thinking', thinking: text, signature: 'sig' })),
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      stop_details: null,
+      model: 'claude-sonnet-4-5',
+      usage: {
+        cache_creation: null,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        inference_geo: null,
+        input_tokens: 12,
+        iterations: null,
+        output_tokens: outputTokens,
+        server_tool_use: null,
+      },
+    },
+  } as unknown as SDKMessage
+}
+
+function successResult(): SDKMessage {  return {
     type: 'result',
     subtype: 'success',
     duration_ms: 10,
@@ -240,6 +272,173 @@ describe('ClaudeCodeAgent turn mapping', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('retains streamed reasoning when the final assistant message omits thinking blocks', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: 'sig' } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'first ', signature: 'sig' } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'second', signature: 'sig' } }),
+        streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '', citations: null } }),
+        streamEvent({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'answer' } }),
+        streamEvent({ type: 'content_block_delta', index: 2, delta: { type: 'thinking_delta', thinking: 'later', signature: 'sig' } }),
+        // The final message carries no thinking block (provider strips it).
+        assistantText('answer'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-retain-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      expect(assistant?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'first second' },
+        { type: 'reasoning', text: 'later' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('prefers the final message thinking block over the streamed fallback', async () => {
+    const ctx = await harness()
+    try {
+      const withThinking = {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        uuid: 'u-think',
+        session_id: 's-think',
+        message: {
+          id: 'msg-think',
+          container: null,
+          context_management: null,
+          role: 'assistant',
+          type: 'message',
+          content: [
+            { type: 'thinking', thinking: 'from message', signature: 'sig' },
+            { type: 'text', text: 'answer', citations: null },
+          ],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          stop_details: null,
+          model: 'claude-sonnet-4-5',
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            inference_geo: null,
+            input_tokens: 5,
+            iterations: null,
+            output_tokens: 5,
+            server_tool_use: null,
+          },
+        },
+      } as unknown as SDKMessage
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'streamed ', signature: 'sig' } }),
+        withThinking,
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-dup-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      expect(assistant?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'from message' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('folds a reasoning-only assistant message into the following message', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        thinkingOnlyMessage('split thinking', 3),
+        assistantText('answer'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-split-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // The reasoning-only message was held, not appended: exactly one
+      // durable assistant message carries both the thinking and the answer.
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'split thinking' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('flushes trailing streamed reasoning without a usage stash', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'chunked', signature: 'sig' } }),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-chunk-trailing-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'reasoning', text: 'chunked' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('flushes trailing reasoning-only content at the step result', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        thinkingOnlyMessage(['trailing thinking', 'second thought'], 4),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-trailing-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'trailing thinking' },
+        { type: 'reasoning', text: 'second thought' },
+      ])
+      // The suppressed message's usage survived on the flushed one.
+      expect(assistants[0]?.data.usage).toMatchObject({ outputTokens: 4 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
 
   it('records tool calls and tool results beside the assistant message', async () => {
     const ctx = await harness()
