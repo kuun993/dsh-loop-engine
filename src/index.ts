@@ -47,6 +47,10 @@ export const name = 'loop-engine'
 /** Services the hosted engine factory resolves through the plugin fiber. */
 export const inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
 
+/** Bounded retry window for the AgentFactory slot race on runtime switches. */
+const MAX_CLAUDE_MOUNT_ATTEMPTS = 40
+const CLAUDE_MOUNT_RETRY_MS = 50
+
 /** Composition entry for the loop engine selection and the Claude Code driver. */
 export interface Config extends ClaudeCodeConfig {
   /** Profile whose `cordis.patch.yml` carries the managed block; defaults to `web`. */
@@ -185,6 +189,16 @@ export function apply(ctx: Context, config: Config): void {
   let claudeFiber: (Fiber & PromiseLike<Fiber>) | undefined
   let commandDisposers: (() => void)[] | undefined
   let skillDisposer: (() => void) | undefined
+  /** Bounded retry bookkeeping for the AgentFactory slot race described below. */
+  let claudeMountAttempts = 0
+  let claudeMountRetry: ReturnType<typeof setTimeout> | undefined
+
+  const CLEAR_RETRY = (): void => {
+    if (claudeMountRetry !== undefined) {
+      clearTimeout(claudeMountRetry)
+      claudeMountRetry = undefined
+    }
+  }
 
   const mountClaude = (): void => {
     if (claudeFiber !== undefined) return
@@ -223,11 +237,28 @@ export function apply(ctx: Context, config: Config): void {
         skillDisposer = undefined
       }
       claudeFiber = undefined
+      // A runtime switch to claude-code races the patch-layer reload that
+      // disables the base `agent-loop` row: until that reload lands, the base
+      // factory still owns the single AgentFactory slot and `setFactory`
+      // rejects. Retry on exactly that collision — bounded — so the hosted
+      // factory registers right after the reload frees the slot; any other
+      // failure is deployment trouble and fails loud once.
+      if (
+        error instanceof Error
+        && error.message.includes('an agent factory is already registered')
+        && claudeMountAttempts < MAX_CLAUDE_MOUNT_ATTEMPTS
+      ) {
+        claudeMountAttempts += 1
+        claudeMountRetry = setTimeout(mountClaude, CLAUDE_MOUNT_RETRY_MS)
+        return
+      }
       ctx.logger.error(`loop-engine: claude-code factory failed to start: ${String(error)}`)
     })
   }
   const unmountClaude = (): void => {
     const fiber = claudeFiber
+    claudeMountAttempts = 0
+    CLEAR_RETRY()
     if (fiber === undefined) return
     claudeFiber = undefined
     // Cleanup commands and skills before tearing down the fiber.
@@ -244,6 +275,9 @@ export function apply(ctx: Context, config: Config): void {
     /* v8 ignore stop */
   }
   if (fileEngine === 'claude-code') mountClaude()
+  // A pending slot-collision retry must not outlive the plugin: mounting after
+  // this fiber is gone would fail on the inactive context and log noise.
+  ctx.effect(() => () => CLEAR_RETRY(), 'loop-engine: mount retry cleanup')
   // installSettingsSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined

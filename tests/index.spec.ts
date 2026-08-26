@@ -12,9 +12,9 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import SessionStore from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type AgentFactory } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import {
   apply,
@@ -299,6 +299,14 @@ async function safeRead(path: string): Promise<string | undefined> {
 /** The loop-engine namespace branded for settings writes (the bare literal is not a SettingsNamespace). */
 const NS_BRANDED = NS as SettingsNamespace
 
+/** A stand-in for the base agent-loop's factory while it owns the slot. */
+function fakeAgentFactory(): AgentFactory {
+  return {
+    createAgent: vi.fn(async () => { throw new Error('base factory must not serve claude sessions') }),
+    resume: vi.fn(async () => { throw new Error('base factory must not serve claude sessions') }),
+  } as unknown as AgentFactory
+}
+
 /** Fake host commands service: records registrations and hands out recording disposers. */
 function fakeCommandsService() {
   const registered: CommandDefinition[] = []
@@ -423,6 +431,89 @@ describe('apply mount registrations', () => {
       expect(errorSpy.mock.calls.filter(call => String(call[0]).includes('managed block write failed'))).toHaveLength(2)
     })
     expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+
+    await fiber.dispose()
+  })
+
+  it('recovers the factory slot when a runtime switch races the base loop disposal', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    // Boot with the base row active (in-process): the plugin mounts nothing.
+    await writeFile(path, '# seed\n')
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
+    // The base agent-loop owns the single AgentFactory slot, like a real boot.
+    const releaseBase = ctx.agents.setFactory(fakeAgentFactory())
+    apply(ctx, { patchPath: path })
+    // installSettingsSection registers the namespace inside a dependency
+    // inject callback; settle it before driving the settings scope.
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // Switching to claude-code mounts the factory while the base still owns
+    // the slot: setFactory rejects, so the hosted factory stays unmounted
+    // until the patch-layer reload (which disables the base row) releases it.
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+
+    // The reload lands: the base loop's factory is released, and the bounded
+    // retry registers the Claude Code factory in its place.
+    releaseBase()
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopClaudeCode')).toBeDefined()
+    })
+
+    // The slot is served again: a create reaches the Claude Code factory
+    // instead of failing with "no agent factory registered".
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('runtime-switch-s'),
+      meta: { cwd: process.cwd() },
+    })
+    expect(handle.agent).toBeDefined()
+    await handle.dispose()
+
+    await fiber.dispose()
+  })
+
+  it('clears a pending slot retry when the plugin is disposed', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n')
+    const { ctx } = await boot({ [NS]: { engine: 'in-process' } })
+    ctx.agents.setFactory(fakeAgentFactory()) // never released
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    // Let the first collision land and the retry be scheduled, then tear the
+    // plugin down while the retry is still pending.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await ctx.fiber.dispose()
+
+    // The pending retry was cleared: no late failure log after disposal.
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(false)
+  })
+
+  it('fails loud when the base loop never releases the factory slot', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n')
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'in-process' } })
+    const releaseBase = ctx.agents.setFactory(fakeAgentFactory())
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+    // Settle the settings-section registration before driving the switch.
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    await ctx.settings.update(NS_BRANDED, { engine: 'claude-code' })
+    // The retry window exhausts without the slot ever freeing: one loud
+    // failure instead of an endless mount loop.
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('claude-code factory failed to start'))).toBe(true)
+    }, { timeout: 5000 })
+    expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
+    releaseBase()
 
     await fiber.dispose()
   })
