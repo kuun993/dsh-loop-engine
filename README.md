@@ -2,18 +2,20 @@
 
 Switch the agent loop engine of **dsh web** the same way you switch a model: a
 "Loop engine" dropdown in Settings chooses which driver runs your agents — the
-built-in in-process loop, the Claude Code CLI, or (future) Codex — without
+built-in in-process loop, the Claude Code CLI, or the Codex CLI — without
 changing anything in the main repository.
 
 ## What it does
 
-- **Engine chosen from Settings, not from code.** Pick `in-process` (default)
-  or `claude-code` in the settings page; the choice is stored durably and
-  survives profile edits.
+- **Engine chosen from Settings, not from code.** Pick `in-process` (default),
+  `claude-code`, or `codex` in the settings page; the choice is stored durably
+  and survives profile edits.
 - **Claude Code execution.** The Claude Code CLI drives agents, with token
   streaming forwarded into the session log.
-- **Extensible.** Adding an engine (e.g. Codex) is one driver module plus one
-  entry in the settings schema.
+- **Codex execution.** The OpenAI Codex CLI drives agents through
+  `@openai/codex-sdk`, one stateless thread per step.
+- **Extensible.** Adding an engine is one driver module plus one entry in the
+  settings schema.
 - **Zero main-repo changes.** Installed purely as a profile dependency plus one
   composition row.
 
@@ -22,6 +24,8 @@ changing anything in the main repository.
 - dsh `0.1.1-rc.2` (or a build whose peer packages match).
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
   the host.
+- For the Codex engine: authenticated either via `codex login` on the host, a
+  `CODEX_API_KEY` environment entry, or the plugin's `apiKey` config field.
 - When the harness runs from a **source checkout** (e.g. `pnpm dsh` inside the
   `deepseek-harness` repository), the profile must resolve this plugin's
   harness peer packages to the monorepo **sources** via local `file:` shims
@@ -73,12 +77,30 @@ changing anything in the main repository.
 1. Open **Settings → Loop engine**.
 2. Choose an engine:
    - **In-process** (default) — the built-in loop driver;
-   - **Claude Code CLI** — the Claude Code driver.
-3. Switching between these two applies after restarting `dsh web`. To return
+   - **Claude Code CLI** — the Claude Code driver;
+   - **Codex CLI** — the OpenAI Codex driver.
+3. Switching between these applies after restarting `dsh web`. To return
    to the default, pick **In-process** and restart again.
 4. To remove the plugin: delete the `loop-engine` row from
    `cordis.patch.yml`, drop the dependency from `package.json`, then
    `pnpm install` and restart `dsh web`.
+
+### Codex engine limitations
+
+The Codex SDK differs from the Claude Agent SDK in ways the driver surfaces
+honestly:
+
+- **No incremental streaming.** Codex emits whole items, not token deltas, so
+  each agent message appears in the session as one full-text chunk.
+- **No interactive tool approval.** Permissions are the declarative
+  `sandboxMode` + `approvalPolicy` pair resolved per query from the session's
+  permission knobs (or pinned via the plugin's `sandboxMode`/`approvalPolicy`
+  config). A session `ask` policy maps to `on-request`, whose CLI prompt
+  degrades to a denial in the unattended dsh runtime.
+- **No dsh subprocess sandbox integration.** The Codex SDK spawns its own CLI
+  binary; the dsh subprocess service (and its sandbox) does not wrap it.
+- **No engine-specific commands or skills** are registered for Codex in this
+  version.
 
 ## License
 

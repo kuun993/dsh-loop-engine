@@ -43,7 +43,7 @@ const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure): void
     const reborn = applyManagedBlock(applied, currentEngineOf(applied))
     if (reborn !== applied) fail(`managed-block round trip for ${engine} is not a fixed point`)
     if (engine === 'in-process' && applied !== seed) fail('in-process engine must leave the file text unchanged')
-    if (engine === 'claude-code' && currentEngineOf(renderManagedBlock(engine)) !== 'claude-code') fail('claude-code block must read back as the claude-code engine')
+    if (engine !== 'in-process' && currentEngineOf(renderManagedBlock(engine)) !== engine) fail(`${engine} block must read back as the ${engine} engine`)
   }
   /* v8 ignore stop */
 }

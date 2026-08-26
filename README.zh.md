@@ -1,18 +1,20 @@
 # dsh-loop-engine
 
-像切换模型一样切换 **dsh web** 的 agent 循环引擎:设置页的「Loop engine」下拉选择运行 agent 的驱动——内置 in-process 循环、Claude Code CLI,或(未来)Codex——**无需改动主仓库**。
+像切换模型一样切换 **dsh web** 的 agent 循环引擎:设置页的「Loop engine」下拉选择运行 agent 的驱动——内置 in-process 循环、Claude Code CLI,或 Codex CLI——**无需改动主仓库**。
 
 ## 能做什么
 
-- **引擎由设置决定,而非改代码。** 在设置页选 `in-process`(默认)或 `claude-code`,选择持久保存,编辑 profile 也不丢失。
+- **引擎由设置决定,而非改代码。** 在设置页选 `in-process`(默认)、`claude-code` 或 `codex`,选择持久保存,编辑 profile 也不丢失。
 - **Claude Code 执行。** 由 Claude Code CLI 驱动 agent,并把 token 流式转发进会话日志。
-- **可扩展。** 新增引擎(如 Codex)只需加一个驱动模块 + 设置 schema 里加一个枚举值。
+- **Codex 执行。** 由 OpenAI Codex CLI 通过 `@openai/codex-sdk` 驱动 agent,每一步一个无状态线程。
+- **可扩展。** 新增引擎只需加一个驱动模块 + 设置 schema 里加一个枚举值。
 - **零主仓改动。** 仅作为 profile 依赖 + 一行组合配置安装。
 
 ## 环境要求
 
 - dsh `0.1.1-rc.2`(或 peer 包版本匹配的构建)。
 - 使用 Claude Code 引擎时需要本机已安装并登录 Claude Code CLI。
+- 使用 Codex 引擎时需要完成认证:本机执行过 `codex login`,或配置 `CODEX_API_KEY` 环境变量,或设置插件的 `apiKey` 配置项。
 - 当 harness 以**源码方式**运行(如在 `deepseek-harness` 仓库内执行 `pnpm dsh`)时,profile 需要把本插件的 harness peer 包解析到主仓 **源码**,通过 profile 的 `shims/` 目录里的本地 `file:` 垫片实现;正式部署(单一发布版 `node_modules`)则无需垫片。
 
 ## 配置方法
@@ -57,9 +59,19 @@
 1. 打开 **Settings → Loop engine**。
 2. 选择引擎:
    - **In-process**(默认)——内置循环驱动;
-   - **Claude Code CLI** —— Claude Code 驱动。
-3. 二者之间切换在**重启 `dsh web` 后生效**;切回默认时选择 **In-process** 并再次重启即可。
+   - **Claude Code CLI** —— Claude Code 驱动;
+   - **Codex CLI** —— OpenAI Codex 驱动。
+3. 引擎之间切换在**重启 `dsh web` 后生效**;切回默认时选择 **In-process** 并再次重启即可。
 4. 卸载插件:从 `cordis.patch.yml` 删除 `loop-engine` 行,并从 `package.json` 移除依赖,然后 `pnpm install` 并重启 `dsh web`。
+
+### Codex 引擎的限制
+
+Codex SDK 与 Claude Agent SDK 的差异,驱动如实呈现:
+
+- **无增量流式。** Codex 以整条 item 为单位产出,没有 token 增量,因此每条 agent 消息在会话里以一整段文本块出现。
+- **无交互式工具审批。** 权限是声明式的 `sandboxMode` + `approvalPolicy` 组合,每次查询按会话的权限开关解析(也可通过插件的 `sandboxMode`/`approvalPolicy` 配置固定)。会话的 `ask` 策略映射为 `on-request`,其 CLI 交互提示在无人值守的 dsh 运行时会退化为拒绝。
+- **不接入 dsh subprocess 沙箱。** Codex SDK 自行 spawn 自己的 CLI 二进制,dsh 的 subprocess 服务(及其沙箱)不会包裹它。
+- **本版本不为 Codex 注册引擎专属命令或技能。**
 
 ## License
 

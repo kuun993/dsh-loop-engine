@@ -17,7 +17,7 @@
  * `in-process` renders an absent block (the base bundle's `agent-loop` row
  * stays active and supplies the factory), so switching back removes the span
  * entirely. Engine ids other than `in-process` render the same disable block
- * — the specific engine (claude-code, later codex) is chosen by the stored
+ * — the specific engine (claude-code, codex) is chosen by the stored
  * setting, and the block only records that a non-default engine owns the
  * factory. All functions here are pure string transforms — file I/O and
  * durability live in the plugin's apply.
@@ -26,6 +26,7 @@
  */
 
 import type { LoopEngineId } from './settings.ts'
+import { LOOP_ENGINE_IDS } from './settings.ts'
 
 /** Begin marker of the plugin-managed span inside a profile patch file. */
 export const MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block: '
@@ -52,9 +53,15 @@ export function hasManagedBlock(text: string): boolean {
   return text.includes(MANAGED_BLOCK_BEGIN)
 }
 
-/** Derive the current engine from a patch-file text by managed-block presence. */
+/** Begin-marker line pattern carrying the engine name (`<name>` is the engine id). */
+const BEGIN_MARKER_RE = /^# -- dsh-loop-engine managed block: (\S+) --$/m
+
+/** Derive the current engine from a patch-file text by the managed block's begin marker. */
 export function currentEngineOf(text: string): LoopEngineId {
-  return hasManagedBlock(text) ? 'claude-code' : 'in-process'
+  const engine = BEGIN_MARKER_RE.exec(text)?.[1]
+  return (LOOP_ENGINE_IDS as readonly string[]).includes(engine ?? '')
+    ? engine as LoopEngineId
+    : 'in-process'
 }
 
 /** Split a patch-file text at the managed span; absent span means it appends. */
