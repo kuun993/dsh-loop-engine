@@ -41,6 +41,11 @@ export interface ClaudeCodeQuerySpec {
   readonly model?: string
   /** Cap on the number of conversation turns before the query stops. */
   readonly maxTurns?: number
+  /**
+   * Decide one native permission request through the dsh approval seam.
+   * When present, `canUseTool` forwards to it instead of auto-denying.
+   */
+  readonly onToolPermission?: (toolName: string, input: Record<string, unknown>, signal: AbortSignal) => Promise<'allow' | 'deny'>
   /** Spawn the Claude Code child under the shared process owner. */
   readonly spawn: SpawnCapability
   /** Receive a human-readable denial or decline for one unattended interaction. */
@@ -75,6 +80,7 @@ export function claudeQueryOptions(
   controller: AbortController,
 ): Options {
   const report = spec.onUnattended ?? (() => {})
+  const forward = spec.onToolPermission
   return {
     abortController: controller,
     cwd: spec.cwd,
@@ -97,18 +103,25 @@ export function claudeQueryOptions(
     ...spec.permissionMode === 'bypassPermissions'
       ? { allowDangerouslySkipPermissions: true }
       : {
-        canUseTool: (): Promise<{ behavior: 'deny'; message: string }> => {
-          report(unattendedDiagnostic(
-            spec.permissionMode,
-            'tool permission',
-            'denied',
-            'the Claude Code driver does not request human approval',
-          ))
-          return Promise.resolve({
-            behavior: 'deny',
-            message: 'This unattended Claude Code driver cannot request human approval.',
-          })
-        },
+        canUseTool: forward === undefined
+          ? (): Promise<{ behavior: 'deny'; message: string }> => {
+            report(unattendedDiagnostic(
+              spec.permissionMode,
+              'tool permission',
+              'denied',
+              'the Claude Code driver does not request human approval',
+            ))
+            return Promise.resolve({
+              behavior: 'deny',
+              message: 'This unattended Claude Code driver cannot request human approval.',
+            })
+          }
+          : async (toolName, input, { signal }) => {
+            const verdict = await forward(toolName, input, signal)
+            return verdict === 'allow'
+              ? { behavior: 'allow' as const, updatedInput: input }
+              : { behavior: 'deny' as const, message: 'The dsh user rejected this action.' }
+          },
       },
     onElicitation: (): Promise<{ action: 'decline' }> => {
       report(unattendedDiagnostic(

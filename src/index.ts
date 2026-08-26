@@ -39,6 +39,8 @@ import {
   type LoopEngineId,
   type LoopEngineSettings,
 } from './settings.ts'
+import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from './commands.ts'
+import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
 
 export const name = 'loop-engine'
 
@@ -170,9 +172,40 @@ export function apply(ctx: Context, config: Config): void {
   // as a plugin fiber so a runtime switch can mount and unmount it — the
   // AgentFactory is a single slot, so the active engine must own it in the
   // same process, not only at the next boot.
+
+  // Minimal shape of the host commands service (avoiding a direct peer dep).
+  interface CommandsService {
+    register(def: CommandDefinition): () => void
+  }
+  // Minimal shape of the host skills service.
+  interface SkillsService {
+    registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void
+  }
+
   let claudeFiber: (Fiber & PromiseLike<Fiber>) | undefined
+  let commandDisposers: (() => void)[] | undefined
+  let skillDisposer: (() => void) | undefined
+
   const mountClaude = (): void => {
     if (claudeFiber !== undefined) return
+
+    // Register Claude Code commands alongside the DSH-native ones.
+    const commands = ctx.get('commands') as CommandsService | undefined
+    if (commands !== undefined) {
+      const disposers: (() => void)[] = []
+      for (const cmd of CLAUDE_CODE_COMMANDS) {
+        disposers.push(commands.register(cmd))
+      }
+      commandDisposers = disposers
+    }
+
+    // Register the Claude Code skill provider so skills from .claude/skills/
+    // and CLAUDE.md are available alongside DSH skills.
+    const skills = ctx.get('skills') as SkillsService | undefined
+    if (skills !== undefined) {
+      skillDisposer = skills.registerProvider(control => new ClaudeCodeSkillProvider(control))
+    }
+
     const fiber = ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config))
     claudeFiber = fiber
     // Touch the fiber so it starts now: Cordis starts plugin fibers lazily on
@@ -180,6 +213,15 @@ export function apply(ctx: Context, config: Config): void {
     // of its own. Report a start failure; a factory that never mounted leaves
     // the slot null, which surface errors describe correctly.
     void fiber.then(() => undefined, (error: unknown) => {
+      // Cleanup commands and skills on failure.
+      if (commandDisposers !== undefined) {
+        for (const dispose of commandDisposers) dispose()
+        commandDisposers = undefined
+      }
+      if (skillDisposer !== undefined) {
+        skillDisposer()
+        skillDisposer = undefined
+      }
       claudeFiber = undefined
       ctx.logger.error(`loop-engine: claude-code factory failed to start: ${String(error)}`)
     })
@@ -188,7 +230,18 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = claudeFiber
     if (fiber === undefined) return
     claudeFiber = undefined
+    // Cleanup commands and skills before tearing down the fiber.
+    if (commandDisposers !== undefined) {
+      for (const dispose of commandDisposers) dispose()
+      commandDisposers = undefined
+    }
+    if (skillDisposer !== undefined) {
+      skillDisposer()
+      skillDisposer = undefined
+    }
+    /* v8 ignore start -- a fiber that failed already cleared claudeFiber in mountClaude's rejection handler, so this rejection arm is unreachable */
     void fiber.then((resolved) => { void resolved.dispose() }, () => undefined)
+    /* v8 ignore stop */
   }
   if (fileEngine === 'claude-code') mountClaude()
   // installSettingsSection always calls setSource before the first onChange,

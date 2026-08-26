@@ -10,8 +10,8 @@ import type {
   Query,
   SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -548,6 +548,346 @@ describe('configuration validation', () => {
       })
     } finally {
       await fresh.fiber.dispose()
+    }
+  })
+})
+
+/** Append a durable permission knob whose event key is augmented by packages this compilation does not depend on. */
+function appendKnob(session: Session, type: string, data: unknown): void {
+  const append = session.append.bind(session) as unknown as (type: string, data: unknown) => void
+  append(type, data)
+}
+
+/** Extract the text of a single-block user message for content assertions. */
+function textOf(message: UserMessage): string {
+  const block = message.content[0]
+  return block?.type === 'text' ? block.text : ''
+}
+
+/** Collect the durable user messages injected by the skill-invocation seam. */
+function injectedSkillMessages(session: Session): UserMessage[] {
+  return session.events
+    .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
+    .map(event => event.data)
+    .filter(message => (message.source as { kind: string }).kind === 'skill-invocation')
+}
+
+/** Minimal fake skill definition matching the driver's inline shape. */
+function fakeSkill(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: 'fake-skill',
+    description: 'a fake skill',
+    invocation: { modelInvocable: true, userInvocable: true },
+    source: 'custom',
+    provider: 'test-provider',
+    content: 'SKILL INSTRUCTIONS',
+    ...overrides,
+  }
+}
+
+describe('ClaudeCodeAgent session permission mapping', () => {
+  it('forwards native permission requests to the approval service under an ask policy', async () => {
+    const ctx = await harness()
+    try {
+      const requests: Array<{ agent: unknown; toolName: string; reason?: string; signal?: AbortSignal }> = []
+      let outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' = 'allowed-once'
+      ctx.provide('approval', {
+        request: (req: { agent: unknown; toolName: string; reason?: string; signal?: AbortSignal }) => {
+          requests.push(req)
+          return Promise.resolve(outcome)
+        },
+      })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('perm-ask-s'),
+        meta: { cwd: process.cwd() },
+      })
+      appendKnob(agent.session, 'approval/policy', { policy: 'ask' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const options = queryMock.mock.calls[0]?.[0].options
+      expect(options).toBeDefined()
+      expect(options!.permissionMode).toBe('default')
+      expect('allowDangerouslySkipPermissions' in options!).toBe(false)
+
+      const signal = new AbortController().signal
+      const allowed = await options!.canUseTool!('Bash', { command: 'ls' }, { signal, toolUseID: 't1', requestId: 'r1' })
+      expect(allowed).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } })
+      expect(requests).toHaveLength(1)
+      expect(requests[0]!.agent).toBe(agent)
+      expect(requests[0]!.toolName).toBe('Bash')
+      expect(requests[0]!.signal).toBe(signal)
+      expect(requests[0]!.reason).toContain('Bash')
+      expect(requests[0]!.reason).toContain('ls')
+
+      outcome = 'rejected'
+      const denied = await options!.canUseTool!('Write', { path: 'x' }, { signal, toolUseID: 't2', requestId: 'r2' })
+      expect(denied).toMatchObject({ behavior: 'deny' })
+      expect(requests).toHaveLength(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails closed with dontAsk under an ask policy when no approval service exists', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('perm-ask-absent-s'),
+        meta: { cwd: process.cwd() },
+      })
+      appendKnob(agent.session, 'approval/policy', { policy: 'ask' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const options = queryMock.mock.calls[0]?.[0].options
+      expect(options!.permissionMode).toBe('dontAsk')
+      const denied = await options!.canUseTool!('Bash', {}, {
+        signal: new AbortController().signal,
+        toolUseID: 't1',
+        requestId: 'r1',
+      })
+      expect(denied).toMatchObject({ behavior: 'deny' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-folds the session permission knobs for every query, including mid-session switches', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('perm-switch-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryMock.mock.calls[0]?.[0].options.permissionMode).toBe('dontAsk')
+
+      appendKnob(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      const switched = queryMock.mock.calls[1]?.[0].options
+      expect(switched).toBeDefined()
+      expect(switched!.permissionMode).toBe('bypassPermissions')
+      expect(switched!.allowDangerouslySkipPermissions).toBe(true)
+      expect(switched!.canUseTool).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('ClaudeCodeAgent skill injection', () => {
+  it('injects rendered skill content for /name gestures into the session log', async () => {
+    const ctx = await harness()
+    try {
+      const skills: Record<string, Record<string, unknown>> = {
+        'dir-skill': fakeSkill({
+          name: 'dir&"<skill',
+          content: 'DIRECTORY INSTRUCTIONS',
+          resourceBase: { kind: 'directory', path: '/base/<dir>&' },
+        }),
+        'prov-skill': fakeSkill({
+          name: 'prov-skill',
+          provider: 'acme&<co>',
+          content: 'PROVIDER INSTRUCTIONS',
+        }),
+        'file-skill': fakeSkill({
+          name: 'file-skill',
+          provider: 'file-provider',
+          content: 'FILE INSTRUCTIONS',
+          resourceBase: { kind: 'file', path: '/x/file.md' },
+        }),
+      }
+      const get = vi.fn((name: string) => Promise.resolve(skills[name]))
+      ctx.provide('skills', { get })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-inject-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'run /dir-skill then /prov-skill and /file-skill plus /dir-skill again' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      // First-seen order, deduplicated across repeated gestures.
+      expect(get).toHaveBeenCalledTimes(3)
+      expect(get).toHaveBeenCalledWith('dir-skill', expect.objectContaining({ cwd: process.cwd() }))
+
+      const injected = injectedSkillMessages(agent.session)
+      expect(injected.map(message => (message.source as { name: string }).name))
+        .toEqual(['dir-skill', 'prov-skill', 'file-skill'])
+      expect(injected[0]).toMatchObject({
+        source: { kind: 'skill-invocation', name: 'dir-skill', form: 'instructions' },
+      })
+
+      const texts = injected.map(textOf)
+      expect(texts[0]).toContain('<skill_content name="dir&amp;&quot;&lt;skill">')
+      expect(texts[0]).toContain('Base directory for this skill: /base/&lt;dir&gt;&amp;.')
+      expect(texts[0]).toContain('DIRECTORY INSTRUCTIONS')
+      expect(texts[1]).toContain('Resources for this skill are managed by provider "acme&amp;&lt;co&gt;".')
+      expect(texts[1]).toContain('PROVIDER INSTRUCTIONS')
+      expect(texts[2]).toContain('Resources for this skill are managed by provider "file-provider".')
+
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('skips skills that fail to load, are unknown, or are not user-invocable', async () => {
+    const ctx = await harness()
+    try {
+      const get = vi.fn((name: string): Promise<Record<string, unknown> | undefined> => {
+        if (name === 'boom-skill') return Promise.reject(new Error('load failed'))
+        if (name === 'ghost-skill') return Promise.resolve(undefined)
+        return Promise.resolve(fakeSkill({ name, invocation: { modelInvocable: true, userInvocable: false } }))
+      })
+      ctx.provide('skills', { get })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-skip-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'try /boom-skill /ghost-skill /hidden-skill' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(get).toHaveBeenCalledTimes(3)
+      expect(injectedSkillMessages(agent.session)).toEqual([])
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves the batch untouched when no skills service is provided', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-unserved-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'run /unserved-skill' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(injectedSkillMessages(agent.session)).toEqual([])
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignores gestures in non-user sources and non-text blocks', async () => {
+    const ctx = await harness()
+    try {
+      const get = vi.fn()
+      ctx.provide('skills', { get })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-filter-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // Queue without waking so both messages land in the same claimed batch.
+      agent.send(createUserMessage({
+        content: [{ type: 'text', text: '/trapped-skill' }],
+        source: { kind: 'skill-invocation', name: 'trapped-skill', form: 'instructions' },
+      }), 'next-turn', false)
+      agent.followup(createUserMessage({
+        content: [{ type: 'reasoning', text: '/shadow-skill' }, { type: 'text', text: 'plain text' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(get).not.toHaveBeenCalled()
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops the whole injection when the step is cancelled while a skill loads', async () => {
+    const ctx = await harness()
+    try {
+      let cancel: (() => void) | undefined
+      const get = vi.fn(() => {
+        cancel?.()
+        return Promise.resolve(fakeSkill({ name: 'dir-skill' }))
+      })
+      ctx.provide('skills', { get })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-cancel-s'),
+        meta: { cwd: process.cwd() },
+      })
+      cancel = () => { agent.cancel({ kind: 'user' }) }
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'run /dir-skill' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(get).toHaveBeenCalledTimes(1)
+      expect(injectedSkillMessages(agent.session)).toEqual([])
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'aborted' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('looks skills up without a cwd hint when the session has no working directory', async () => {
+    const ctx = await harness()
+    try {
+      const get = vi.fn((_name: string, _options?: Record<string, unknown>) => Promise.resolve(fakeSkill({ name: 'dir-skill' })))
+      ctx.provide('skills', { get })
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('skill-nocwd-s'),
+      })
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'run /dir-skill' }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(get).toHaveBeenCalledTimes(1)
+      expect(get.mock.calls[0]?.[1]).not.toHaveProperty('cwd')
+      // Injection happens at pre-step, before the step itself fails on the
+      // missing working directory.
+      expect(injectedSkillMessages(agent.session)).toHaveLength(1)
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
     }
   })
 })

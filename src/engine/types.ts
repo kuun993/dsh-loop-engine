@@ -16,7 +16,8 @@ export type ClaudeCodePermissionMode = Extract<PermissionMode,
 
 /** Driver configuration after defaults and load-time validation. */
 export interface ResolvedConfig {
-  readonly permissionMode: ClaudeCodePermissionMode
+  /** Pinned native mode; `undefined` follows the session's dsh permission knobs per query. */
+  readonly permissionMode: ClaudeCodePermissionMode | undefined
   readonly env: Record<string, string>
   readonly model: string | undefined
   readonly disposeGraceMs: number

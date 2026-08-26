@@ -105,6 +105,23 @@ describe('claudeQueryOptions', () => {
     expect(options.canUseTool).toBeUndefined()
   })
 
+  it('forwards permission requests to onToolPermission when provided', async () => {
+    const seen: Array<[string, Record<string, unknown>]> = []
+    const options = claudeQueryOptions(spec({
+      permissionMode: 'default' as ClaudeCodeQuerySpec['permissionMode'],
+      onToolPermission: (toolName, input) => {
+        seen.push([toolName, input])
+        return Promise.resolve(toolName === 'Bash' ? 'allow' : 'deny')
+      },
+    }), new AbortController())
+    expect('allowDangerouslySkipPermissions' in options).toBe(false)
+    const allowed = await options.canUseTool!('Bash', { command: 'ls' }, { signal: new AbortController().signal, toolUseID: 't1', requestId: 'r1' })
+    expect(allowed).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } })
+    const denied = await options.canUseTool!('Write', { path: 'x' }, { signal: new AbortController().signal, toolUseID: 't2', requestId: 'r2' })
+    expect(denied).toMatchObject({ behavior: 'deny', message: 'The dsh user rejected this action.' })
+    expect(seen).toEqual([['Bash', { command: 'ls' }], ['Write', { path: 'x' }]])
+  })
+
   it('auto-answers interactions without an onUnattended reporter', async () => {
     const options = claudeQueryOptions(spec(), new AbortController())
     const denied = await options.canUseTool!('Bash', {}, { signal: new AbortController().signal, toolUseID: 't1', requestId: 'r1' })
