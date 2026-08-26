@@ -13,12 +13,15 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { LoopEngineSection } from './LoopEngineSection.tsx'
 import type { LoopEngineSectionInjected } from './LoopEngineSection.tsx'
+import { LoopEngineBadge } from './LoopEngineBadge.tsx'
+import type { LoopEngineBadgeInjected } from './LoopEngineBadge.tsx'
 import { LoopEngineStore, decodeLoopEngine } from './store.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
 import type { LoopEngineSettings } from '../settings.ts'
 
 export type { LoopEngineSectionInjected, LoopEngineSectionProps } from './LoopEngineSection.tsx'
+export type { LoopEngineBadgeInjected, LoopEngineBadgeProps } from './LoopEngineBadge.tsx'
 export type { LoopEngineState } from './store.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -67,4 +70,26 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: injected,
   }, LoopEngineSection))
+
+  // The conversation header badge shares the same controller: the engine is a
+  // deployment choice, so one snapshot feeds the settings picker and the
+  // per-session chip. Registered in the conversation scope so it exists only
+  // where a session header is rendered.
+  ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
+    const badgeInjected = (): LoopEngineBadgeInjected => ({
+      hooks: { snapshot: controller.store },
+      t,
+    })
+    scope.effect(() => {
+      return scope.slots.register({
+        name: 'conversation.session.header.actions',
+        id: 'loop-engine',
+        // Static session context precedes interactive actions (agent-preset's
+        // label sits at -10, so the engine chip leads the header).
+        order: -20,
+        locale: NS,
+        inject: badgeInjected,
+      }, LoopEngineBadge)
+    }, 'loop-engine: session header engine badge')
+  })
 }
