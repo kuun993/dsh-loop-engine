@@ -139,7 +139,14 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   const confirmSwitch = (): void => {
     const value = pending
     setPending(null)
-    if (value !== null) void controller.setEngine(value)
+    if (value !== null) {
+      void controller.setEngine(value).then((landed) => {
+        // Session views established under the previous engine's factory do
+        // not migrate: a committed switch reloads the page so every session
+        // re-attaches against the new composition.
+        if (landed) window.location.reload()
+      })
+    }
   }
   const cancelSwitch = (): void => { setPending(null) }
 
