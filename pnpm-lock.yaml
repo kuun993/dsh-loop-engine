@@ -50,9 +50,6 @@ importers:
       '@openai/codex':
         specifier: 0.149.1
         version: 0.149.1
-      '@openai/codex-sdk':
-        specifier: 0.149.1
-        version: 0.149.1
     devDependencies:
       '@deepseek-ai/dsh-attachment':
         specifier: 0.1.1-rc.2
@@ -585,10 +582,6 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
-
-  '@openai/codex-sdk@0.149.1':
-    resolution: {integrity: sha512-R00Rz5327LefZggAxl28r7vFQq1vxa91OxtjZJOsQfAM/MyH8InW5qwwRu6pzUmRGp1E29XrOzm7u1TeV5Yz2A==}
-    engines: {node: '>=18'}
 
   '@openai/codex@0.149.1':
     resolution: {integrity: sha512-6q5pbcpFbJbqOpkubSDBwXmktQ55aD8eUzGzBF1zASob2DjwhBKDSNGtdZKalfrNJUdTDTPDMmzCXEXs5tMBYA==}
@@ -1802,10 +1795,6 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
-
-  '@openai/codex-sdk@0.149.1':
-    dependencies:
-      '@openai/codex': 0.149.1
 
   '@openai/codex@0.149.1':
     optionalDependencies:

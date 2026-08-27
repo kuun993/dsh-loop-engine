@@ -9,12 +9,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, symbols, type EffectMeta, type Fiber } from '@deepseek-ai/cordis'
-import type { ThreadEvent, ThreadItem, Usage } from '@openai/codex-sdk'
 import SessionStore, { SessionId, type SessionEvent, type SessionPreparation } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
+import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
@@ -24,17 +24,36 @@ const loopPlugin = {
   },
 }
 
-type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => Promise<{ events: AsyncGenerator<ThreadEvent> }>
+type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => AsyncGenerator<AppServerEvent>
 
 const mock = vi.hoisted(() => ({
   runStreamed: vi.fn<RunStreamed>(),
 }))
 
-vi.mock('@openai/codex-sdk', () => ({
-  Codex: class FakeCodex {
-    startThread(): { runStreamed: RunStreamed } {
-      return { runStreamed: mock.runStreamed }
-    }
+vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
+  AppServerClient: {
+    create: async () => ({
+      threadStart: async () => ({ thread: { id: 'mock-thread-1' } }),
+      threadResume: async () => ({ thread: { id: 'mock-thread-1' } }),
+      turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
+      turnInterrupt: async () => ({}),
+      onNotification: () => {},
+      onStderr: () => {},
+      dispose: () => {},
+    }),
+  },
+}))
+
+vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
+  AppServerThread: {
+    create: async (_client: unknown, _threadParams: Record<string, unknown>) => ({
+      threadId: 'mock-thread-1',
+      async *turn(_input: unknown, _options: unknown): AsyncGenerator<AppServerEvent> {
+        for await (const event of mock.runStreamed(_input, _options)) {
+          yield event
+        }
+      },
+    }),
   },
 }))
 
@@ -42,23 +61,19 @@ beforeEach(() => {
   mock.runStreamed.mockReset()
 })
 
-const USAGE: Usage = {
-  input_tokens: 3,
-  cached_input_tokens: 0,
-  cache_write_input_tokens: 0,
-  output_tokens: 2,
-  reasoning_output_tokens: 0,
+const USAGE = {
+  inputTokens: 3,
+  cachedInputTokens: 0,
+  outputTokens: 2,
+  reasoningOutputTokens: 0,
 }
 
-function okStream(): ReturnType<RunStreamed> {
-  const events: ThreadEvent[] = [
-    { type: 'item.completed', item: { id: 'msg-ok', type: 'agent_message', text: 'ok' } as ThreadItem },
-    { type: 'turn.completed', usage: USAGE },
-  ]
-  async function* inner(): AsyncGenerator<ThreadEvent, void> {
-    for (const event of events) yield event
+function okStream(): RunStreamed {
+  async function* inner(): AsyncGenerator<AppServerEvent, void> {
+    yield { kind: 'item-completed', item: { id: 'msg-ok', type: 'agentMessage', text: 'ok' } as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
+    yield { kind: 'turn-completed', turn: { id: 'turn-1', status: 'completed', error: null, items: [], usage: USAGE } }
   }
-  return Promise.resolve({ events: inner() })
+  return inner()
 }
 
 async function harness(): Promise<Context> {
