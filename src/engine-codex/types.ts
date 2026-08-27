@@ -4,13 +4,11 @@
  * @module @deepseek-ai/dsh-loop-engine/engine-codex/types
  */
 
-import type { ApprovalMode, SandboxMode } from '@openai/codex-sdk'
+/** Codex CLI sandbox modes, as spoken by the app-server `sandbox` field. */
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
-/** Codex CLI sandbox modes, re-exported under the driver's own name. */
-export type CodexSandboxMode = SandboxMode
-
-/** Codex CLI approval policies, re-exported under the driver's own name. */
-export type CodexApprovalPolicy = ApprovalMode
+/** Codex CLI approval policies, as spoken by the app-server `approvalPolicy` field. */
+export type CodexApprovalPolicy = 'never' | 'on-request' | 'on-failure' | 'untrusted'
 
 /** Driver configuration after defaults and load-time validation. */
 export interface ResolvedConfig {

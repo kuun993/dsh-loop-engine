@@ -43,6 +43,7 @@ import {
 } from './settings.ts'
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from './commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
+import { CodexSkillProvider } from './engine-codex/skills.ts'
 
 export const name = 'loop-engine'
 
@@ -234,8 +235,8 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** Dispose the claude-specific command and skill registrations. */
-  const cleanupClaudeRegistrations = (): void => {
+  /** Dispose the engine-specific command and skill registrations. */
+  const cleanupEngineRegistrations = (): void => {
     if (commandDisposers !== undefined) {
       for (const dispose of commandDisposers) dispose()
       commandDisposers = undefined
@@ -265,7 +266,7 @@ export function apply(ctx: Context, config: Config): void {
     mountedEngine = engine
     void fiber.then(() => undefined, (error: unknown) => {
       // Cleanup claude-specific registrations on failure (a no-op for codex).
-      cleanupClaudeRegistrations()
+      cleanupEngineRegistrations()
       engineFiber = undefined
       mountedEngine = undefined
       // A runtime switch to a hosted engine races the patch-layer reload that
@@ -313,8 +314,15 @@ export function apply(ctx: Context, config: Config): void {
     hostFactory('claude-code', () => ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config)))
   }
 
-  /** Mount the Codex loop factory (no engine-specific commands or skills in this version). */
+  /** Mount the Codex loop factory plus its AGENTS.md skill provider. */
   const mountCodex = (): void => {
+    // Register the Codex skill provider so AGENTS.md instruction files are
+    // available through the same dsh skill-injection seam as Claude skills.
+    const skills = ctx.get('skills') as SkillsService | undefined
+    if (skills !== undefined) {
+      skillDisposer = skills.registerProvider(control => new CodexSkillProvider(control))
+    }
+
     hostFactory('codex', () => ctx.plugin(CodexLoop, codexConfig(config)))
   }
 
@@ -328,7 +336,7 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = engineFiber
     mountAttempts = 0
     CLEAR_RETRY()
-    cleanupClaudeRegistrations()
+    cleanupEngineRegistrations()
     mountedEngine = undefined
     if (fiber === undefined) return
     engineFiber = undefined

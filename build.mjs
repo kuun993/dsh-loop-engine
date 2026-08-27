@@ -49,8 +49,7 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/dsh-timeout',
   '@anthropic-ai/claude-agent-sdk',
   '@anthropic-ai/sdk',
-  // Codex engine SDK + CLI: resolved through node_modules at runtime.
-  '@openai/codex-sdk',
+  // Codex engine CLI: spawned as the app-server child process at runtime.
   '@openai/codex',
 ]
 

@@ -1,16 +1,16 @@
 /**
- * Lifecycle tests for the Codex driver: a mocked Codex SDK serves the thread
+ * Lifecycle tests for the Codex driver: a mocked app-server serves the turn
  * event stream, and the session log records the mapped transcript.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { ThreadEvent, ThreadItem, Usage } from '@openai/codex-sdk'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
+import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
@@ -20,21 +20,45 @@ const loopPlugin = {
   },
 }
 
-type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => Promise<{ events: AsyncGenerator<ThreadEvent> }>
+type RunStreamed = (
+  input: string,
+  turnOptions?: { signal?: AbortSignal; params?: Record<string, unknown> },
+) => AsyncGenerator<AppServerEvent>
 
-/** Hoisted mock state: every constructed fake Codex plus the runStreamed implementation. */
+/** Hoisted mock state: every constructed fake client plus the runStreamed implementation. */
 const mock = vi.hoisted(() => ({
-  constructed: [] as Array<{ codexOptions: unknown; threadOptions: Record<string, unknown> }>,
+  constructed: [] as Array<{ threadParams: Record<string, unknown> }>,
   runStreamed: vi.fn<RunStreamed>(),
 }))
 
-vi.mock('@openai/codex-sdk', () => ({
-  Codex: class FakeCodex {
-    constructor(private readonly codexOptions: unknown) {}
-    startThread(threadOptions: Record<string, unknown>): { runStreamed: RunStreamed } {
-      mock.constructed.push({ codexOptions: this.codexOptions, threadOptions })
-      return { runStreamed: mock.runStreamed }
-    }
+vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
+  AppServerClient: {
+    create: async () => ({
+      threadStart: async () => ({ thread: { id: 'mock-thread-1' } }),
+      threadResume: async () => ({ thread: { id: 'mock-thread-1' } }),
+      turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
+      turnInterrupt: async () => ({}),
+      onNotification: () => {},
+      onStderr: () => {},
+      dispose: () => {},
+    }),
+  },
+}))
+
+vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
+  AppServerThread: {
+    create: async (_client: unknown, threadParams: Record<string, unknown>) => {
+      mock.constructed.push({ threadParams })
+      return {
+        threadId: 'mock-thread-1',
+        async *turn(_input: unknown, _options: unknown): AsyncGenerator<AppServerEvent> {
+          for await (const event of mock.runStreamed(_input, _options)) {
+            yield event
+          }
+        },
+        async dispose() {},
+      }
+    },
   },
 }))
 
@@ -43,51 +67,90 @@ beforeEach(() => {
   mock.runStreamed.mockReset()
 })
 
-function stream(events: ThreadEvent[]): ReturnType<RunStreamed> {
-  async function* inner(): AsyncGenerator<ThreadEvent, void> {
+function stream(events: AppServerEvent[]): RunStreamed {
+  async function* inner(): AsyncGenerator<AppServerEvent, void> {
     for (const event of events) yield event
   }
-  return Promise.resolve({ events: inner() })
+  return inner()
 }
 
-const TURN_USAGE: Usage = {
-  input_tokens: 12,
-  cached_input_tokens: 5,
-  cache_write_input_tokens: 2,
-  output_tokens: 7,
-  reasoning_output_tokens: 3,
+const TURN_USAGE = {
+  inputTokens: 12,
+  cachedInputTokens: 5,
+  outputTokens: 7,
+  reasoningOutputTokens: 3,
 }
 
-function itemCompleted(item: ThreadItem): ThreadEvent {
-  return { type: 'item.completed', item }
+function itemCompleted(item: { type: string; id: string; text?: string; [key: string]: unknown }): AppServerEvent {
+  return { kind: 'item-completed', item: item as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
 }
 
-function itemStarted(item: ThreadItem): ThreadEvent {
-  return { type: 'item.started', item }
+function itemStarted(itemType: string, itemId: string): AppServerEvent {
+  return { kind: 'item-started', itemType, itemId }
 }
 
-function agentMessage(text: string): ThreadItem {
-  return { id: `msg-${text}`, type: 'agent_message', text }
+function agentMessage(text: string): { type: string; id: string; text: string } {
+  return { type: 'agentMessage', id: `msg-${text}`, text }
 }
 
-function reasoningItem(text: string): ThreadItem {
-  return { id: `reason-${text}`, type: 'reasoning', text }
+function agentDelta(itemId: string, delta: string): AppServerEvent {
+  return { kind: 'agent-delta', itemId, delta }
 }
 
-function commandItem(overrides: Record<string, unknown> = {}): ThreadItem {
+function reasoningItem(text: string): { type: string; id: string; summary: string[]; content: string[] } {
+  return { type: 'reasoning', id: `reason-${text}`, summary: [text], content: [] }
+}
+
+function reasoningSummaryDelta(itemId: string, delta: string): AppServerEvent {
+  return { kind: 'reasoning-summary-delta', itemId, delta, summaryIndex: 0 }
+}
+
+function commandItem(overrides: Record<string, unknown> = {}): { type: string; id: string; [key: string]: unknown } {
   return {
+    type: 'commandExecution',
     id: 'cmd-1',
-    type: 'command_execution',
     command: 'ls -la',
-    aggregated_output: 'total 0',
-    exit_code: 0,
-    status: 'in_progress',
+    aggregatedOutput: 'total 0',
+    exitCode: 0,
+    status: 'completed',
     ...overrides,
-  } as ThreadItem
+  }
 }
 
-function turnCompleted(usage: Usage = TURN_USAGE): ThreadEvent {
-  return { type: 'turn.completed', usage }
+function mcpToolCall(overrides: Record<string, unknown> = {}): { type: string; id: string; [key: string]: unknown } {
+  return {
+    type: 'mcpToolCall',
+    id: 'mcp-1',
+    server: 'docs',
+    tool: 'search',
+    arguments: { q: 'cordis' },
+    result: { content: [{ type: 'text', text: 'ok' }] },
+    status: 'completed',
+    ...overrides,
+  }
+}
+
+function fileChange(overrides: Record<string, unknown> = {}): { type: string; id: string; [key: string]: unknown } {
+  return {
+    type: 'fileChange',
+    id: 'patch-1',
+    changes: [{ path: 'src/a.ts', kind: 'update' }],
+    status: 'completed',
+    ...overrides,
+  }
+}
+
+function turnCompleted(usage: typeof TURN_USAGE = TURN_USAGE): AppServerEvent {
+  return {
+    kind: 'turn-completed',
+    turn: {
+      id: 'turn-1',
+      status: 'completed',
+      error: null,
+      items: [],
+      usage,
+    },
+  }
 }
 
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
@@ -142,8 +205,7 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
-        { type: 'thread.started', thread_id: 'thread-1' },
-        { type: 'turn.started' },
+        { kind: 'turn-started', turnId: 'turn-1' },
         itemCompleted(agentMessage('hello world')),
         turnCompleted(),
       ]))
@@ -174,7 +236,6 @@ describe('CodexAgent turn mapping', () => {
             inputTokens: 12,
             outputTokens: 7,
             cacheReadTokens: 5,
-            cacheWriteTokens: 2,
             reasoningTokens: 3,
           },
         },
@@ -183,15 +244,17 @@ describe('CodexAgent turn mapping', () => {
 
       expect(mock.runStreamed).toHaveBeenCalledTimes(1)
       const [input, turnOptions] = mock.runStreamed.mock.calls[0]!
-      expect(input).toContain('<user>')
-      expect(input).toContain('hi')
+      const inputText = Array.isArray(input) ? input.map((item: { text?: string }) => item.text ?? '').join('') : String(input)
+      expect(inputText).toContain('<user>')
+      expect(inputText).toContain('hi')
       expect(turnOptions?.signal).toBeInstanceOf(AbortSignal)
+      expect(turnOptions?.params).toEqual({ approvalPolicy: 'never' })
+      expect(turnOptions?.params).not.toHaveProperty('sandboxPolicy')
 
       const constructed = mock.constructed[0]!
-      expect(constructed.threadOptions).toMatchObject({
-        workingDirectory: process.cwd(),
-        skipGitRepoCheck: true,
-        sandboxMode: 'read-only',
+      expect(constructed.threadParams).toMatchObject({
+        cwd: process.cwd(),
+        sandbox: 'read-only',
         approvalPolicy: 'never',
       })
     } finally {
@@ -203,6 +266,8 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-hello'),
+        agentDelta('msg-hello', 'hello world'),
         itemCompleted(agentMessage('hello world')),
         turnCompleted(),
       ]))
@@ -235,7 +300,11 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'split thinking'),
         itemCompleted(reasoningItem('split thinking')),
+        itemStarted('agentMessage', 'msg-answer'),
+        agentDelta('msg-answer', 'answer'),
         itemCompleted(agentMessage('answer')),
         turnCompleted(),
       ]))
@@ -268,7 +337,11 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-answer'),
+        agentDelta('msg-answer', 'answer'),
         itemCompleted(agentMessage('answer')),
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'trailing thought'),
         itemCompleted(reasoningItem('trailing thought')),
         turnCompleted(),
       ]))
@@ -294,7 +367,11 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-first'),
+        agentDelta('msg-first', 'first'),
         itemCompleted(agentMessage('first')),
+        itemStarted('agentMessage', 'msg-second'),
+        agentDelta('msg-second', 'second'),
         itemCompleted(agentMessage('second')),
         turnCompleted(),
       ]))
@@ -316,12 +393,190 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
+  it('streams multiple deltas into one text block (no duplicate block-start)', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-multi'),
+        agentDelta('msg-multi', 'hello '),
+        agentDelta('msg-multi', 'world'),
+        itemCompleted(agentMessage('hello world')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('multi-delta-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const chunks = agent.session.events.filter(
+        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
+      )
+      expect(chunks.map(event => event.data.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'hello ' },
+        { type: 'text-delta', index: 0, text: 'world' },
+      ])
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('streams multiple reasoning deltas into one reasoning block', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'think '),
+        reasoningSummaryDelta('reason-1', 'more'),
+        itemCompleted(reasoningItem('think more')),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('multi-reason-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const chunks = agent.session.events.filter(
+        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
+      )
+      expect(chunks.map(event => event.data.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'think ' },
+        { type: 'reasoning-delta', index: 0, text: 'more' },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'answer' },
+      ])
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'think more' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('handles a reasoning item with no summary or content', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'think'),
+        itemCompleted({ type: 'reasoning', id: 'reason-1' }),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('empty-reason-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: '' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('handles an agent message item with no text', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-empty'),
+        agentDelta('msg-empty', 'x'),
+        itemCompleted({ type: 'agentMessage', id: 'msg-empty' }),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('empty-msg-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: '' }])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('handles a turn completed without usage', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        { kind: 'turn-completed', turn: { id: 'turn-1', status: 'completed', error: null, items: [] } },
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('no-usage-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignores unknown item types in the item-completed handler', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        itemCompleted({ type: 'webSearch', id: 'ws-1', query: 'x' }),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('unknown-item-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(agent.session.events.filter(event => event.type === 'tool/call')).toHaveLength(0)
+      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('records a command execution started/completed pair as tool/call and tool/result', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
-        itemStarted(commandItem()),
-        itemCompleted(commandItem({ status: 'completed', aggregated_output: 'file.txt' })),
+        itemStarted('commandExecution', 'cmd-1'),
+        itemCompleted(commandItem({ status: 'completed', aggregatedOutput: 'file.txt' })),
+        itemStarted('agentMessage', 'msg-done'),
+        agentDelta('msg-done', 'done'),
         itemCompleted(agentMessage('done')),
         turnCompleted(),
       ]))
@@ -361,7 +616,7 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
-        itemCompleted(commandItem({ status: 'completed', exit_code: 3 })),
+        itemCompleted(commandItem({ status: 'completed', exitCode: 3 })),
         turnCompleted(),
       ]))
       const { agent } = await ctx.agents.create({
@@ -383,25 +638,13 @@ describe('CodexAgent turn mapping', () => {
   it('records MCP tool calls and file changes beside the assistant message', async () => {
     const ctx = await harness()
     try {
-      const mcp: ThreadItem = {
-        id: 'mcp-1',
-        type: 'mcp_tool_call',
-        server: 'docs',
-        tool: 'search',
-        arguments: { q: 'cordis' },
-        result: { content: [], structured_content: { hits: 2 } },
-        status: 'in_progress',
-      } as ThreadItem
-      const patch: ThreadItem = {
-        id: 'patch-1',
-        type: 'file_change',
-        changes: [{ path: 'src/a.ts', kind: 'update' }],
-        status: 'completed',
-      }
       mock.runStreamed.mockImplementation(() => stream([
-        itemStarted(mcp),
-        itemCompleted({ ...mcp, status: 'completed' } as ThreadItem),
-        itemCompleted(patch),
+        itemStarted('mcpToolCall', 'mcp-1'),
+        itemCompleted(mcpToolCall({ status: 'completed' })),
+        itemStarted('fileChange', 'patch-1'),
+        itemCompleted(fileChange()),
+        itemStarted('agentMessage', 'msg-done'),
+        agentDelta('msg-done', 'done'),
         itemCompleted(agentMessage('done')),
         turnCompleted(),
       ]))
@@ -426,13 +669,9 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
-        { type: 'thread.started', thread_id: 'thread-1' },
-        { type: 'turn.started' },
-        { type: 'item.updated', item: agentMessage('partial') },
-        itemStarted(agentMessage('answer')),
-        itemCompleted({ id: 'ws-1', type: 'web_search', query: 'cordis' }),
-        itemCompleted({ id: 'todo-1', type: 'todo_list', items: [{ text: 'x', completed: false }] }),
-        itemCompleted({ id: 'err-1', type: 'error', message: 'non-fatal' }),
+        { kind: 'turn-started', turnId: 'turn-1' },
+        itemStarted('agentMessage', 'msg-answer'),
+        agentDelta('msg-answer', 'answer'),
         itemCompleted(agentMessage('answer')),
         turnCompleted(),
       ]))
@@ -456,8 +695,10 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-partial'),
+        agentDelta('msg-partial', 'partial answer'),
         itemCompleted(agentMessage('partial answer')),
-        { type: 'turn.failed', error: { message: 'model overloaded' } },
+        { kind: 'error', error: { message: 'model overloaded' }, willRetry: false },
       ]))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('failed-s'),
@@ -470,7 +711,7 @@ describe('CodexAgent turn mapping', () => {
         data: {
           reason: {
             kind: 'error',
-            error: { message: 'model overloaded', code: 'CODEX_TURN_FAILED' },
+            error: { message: 'model overloaded', code: 'CODEX_ERROR' },
           },
         },
       })
@@ -485,7 +726,7 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
-        { type: 'error', message: 'stream broke' },
+        { kind: 'error', error: { message: 'stream broke' }, willRetry: false },
       ]))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('error-s'),
@@ -506,6 +747,8 @@ describe('CodexAgent turn mapping', () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'dangling thought'),
         itemCompleted(reasoningItem('dangling thought')),
       ]))
       const { agent } = await ctx.agents.create({
@@ -590,26 +833,24 @@ describe('CodexAgent cancellation and pre-step interception', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      // Arm a query that blocks until released; the SDK cancels a running
-      // turn through the TurnOptions signal, so the mock races its gate
+      // Arm a query that blocks until released; the app-server cancels a
+      // running turn through the abort signal, so the mock races its gate
       // against it.
       let release: (() => void) | undefined
       const gate = new Promise<void>((resolve) => { release = resolve })
-      mock.runStreamed.mockImplementation((_input, turnOptions) => Promise.resolve({
-        events: (async function* (): AsyncGenerator<ThreadEvent> {
-          yield itemCompleted(agentMessage('starting'))
-          await Promise.race([
-            gate,
-            new Promise<never>((_, reject) => {
-              turnOptions?.signal?.addEventListener('abort', () => {
-                reject(new Error('query aborted'))
-              }, { once: true })
-            }),
-          ])
-          yield itemCompleted(agentMessage('after gate'))
-          yield turnCompleted()
-        })(),
-      }))
+      mock.runStreamed.mockImplementation((_input, turnOptions) => (async function* (): AsyncGenerator<AppServerEvent> {
+        yield itemCompleted(agentMessage('starting'))
+        await Promise.race([
+          gate,
+          new Promise<never>((_, reject) => {
+            turnOptions?.signal?.addEventListener('abort', () => {
+              reject(new Error('query aborted'))
+            }, { once: true })
+          }),
+        ])
+        yield itemCompleted(agentMessage('after gate'))
+        yield turnCompleted()
+      })())
 
       agent.followup(message('second'))
       await new Promise<void>((resolve) => { setImmediate(resolve) })
@@ -665,16 +906,16 @@ describe('CodexAgent session permission mapping', () => {
       })
       agent.followup(message('one'))
       await agent.whenIdle()
-      expect(mock.constructed[0]?.threadOptions).toMatchObject({
-        sandboxMode: 'read-only',
+      expect(mock.constructed[0]?.threadParams).toMatchObject({
+        sandbox: 'read-only',
         approvalPolicy: 'never',
       })
 
       appendKnob(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
       agent.followup(message('two'))
       await agent.whenIdle()
-      expect(mock.constructed[1]?.threadOptions).toMatchObject({
-        sandboxMode: 'danger-full-access',
+      expect(mock.constructed[1]?.threadParams).toMatchObject({
+        sandbox: 'danger-full-access',
         approvalPolicy: 'never',
       })
 
@@ -682,8 +923,8 @@ describe('CodexAgent session permission mapping', () => {
       appendKnob(agent.session, 'approval/policy', { policy: 'ask' })
       agent.followup(message('three'))
       await agent.whenIdle()
-      expect(mock.constructed[2]?.threadOptions).toMatchObject({
-        sandboxMode: 'workspace-write',
+      expect(mock.constructed[2]?.threadParams).toMatchObject({
+        sandbox: 'workspace-write',
         approvalPolicy: 'on-request',
       })
     } finally {
@@ -703,8 +944,8 @@ describe('CodexAgent session permission mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       // The pinned sandbox mode wins; the unpinned policy still follows the session.
-      expect(mock.constructed[0]?.threadOptions).toMatchObject({
-        sandboxMode: 'workspace-write',
+      expect(mock.constructed[0]?.threadParams).toMatchObject({
+        sandbox: 'workspace-write',
         approvalPolicy: 'never',
       })
     } finally {
@@ -714,12 +955,9 @@ describe('CodexAgent session permission mapping', () => {
 })
 
 describe('CodexAgent deployment pinning', () => {
-  it('forwards model, apiKey, baseUrl, and network access to the SDK', async () => {
+  it('forwards model to the app-server thread params', async () => {
     const ctx = await harness({
       model: 'gpt-5.2-codex',
-      apiKey: 'sk-pinned',
-      baseUrl: 'https://codex.example.test/v1',
-      networkAccessEnabled: false,
     })
     try {
       mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
@@ -731,13 +969,9 @@ describe('CodexAgent deployment pinning', () => {
       await agent.whenIdle()
 
       const constructed = mock.constructed[0]!
-      expect(constructed.threadOptions).toMatchObject({
+      expect(constructed.threadParams).toMatchObject({
         model: 'gpt-5.2-codex',
-        networkAccessEnabled: false,
       })
-      const codexOptions = constructed.codexOptions as { env: Record<string, string>; baseUrl: string }
-      expect(codexOptions.env.CODEX_API_KEY).toBe('sk-pinned')
-      expect(codexOptions.baseUrl).toBe('https://codex.example.test/v1')
 
       expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'codex', model: 'gpt-5.2-codex' } } },

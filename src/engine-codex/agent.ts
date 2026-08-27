@@ -1,11 +1,13 @@
 /**
- * Codex loop Agent: drives one session through turn and step boundaries with
- * one Codex SDK thread per step. Codex owns its prompt, tools, and sandbox;
- * the durable session log remains the source of truth and the thread input is
- * a pure serialization of it. Codex streams at item granularity (no
- * incremental text deltas) and offers no interactive approval callback, so
- * permissions are folded declaratively into each thread's
- * `sandboxMode`/`approvalPolicy`.
+ * Codex loop Agent: drives one session through turn and step boundaries by
+ * spawning a `codex app-server` child process and speaking JSON-RPC over stdio.
+ * Codex owns its prompt, tools, and sandbox; the durable session log remains
+ * the source of truth and the thread input is a pure serialization of it.
+ * The app-server streams token-level deltas via `item/agentMessage/delta` and
+ * `item/reasoning/summaryTextDelta`, so the visible partial paints
+ * progressively as the model generates — not all at once at the end. It offers
+ * no interactive approval callback, so permissions are folded declaratively
+ * into each thread's `sandboxMode`/`approvalPolicy`.
  *
  * @module @deepseek-ai/dsh-loop-engine/engine-codex/agent
  */
@@ -28,20 +30,14 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
-import { Codex } from '@openai/codex-sdk'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ResolvedConfig } from './types.ts'
-import {
-  mapAgentMessage,
-  mapCommandExecution,
-  mapFileChange,
-  mapMcpToolCall,
-  mapReasoning,
-  mapUsage,
-} from './mapping.ts'
 import { serializeHistory } from '../engine/prompt.ts'
 import { resolveSessionPermission, type CodexPermission } from './permission.ts'
-import { codexQueryOptions, type CodexQuerySpec } from './sdk.ts'
+import { AppServerClient } from './appserver/client.ts'
+import { AppServerThread } from './appserver/thread.ts'
+import { mapCommandExecution, mapFileChange, mapMcpToolCall, mapUsage } from './appserver/mapping.ts'
+import type { ThreadStartParams, TurnInput } from './appserver/types.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'codex'
@@ -159,7 +155,8 @@ type PreparedStep =
 /** An assistant message held until the step knows whether turn usage attaches to it. */
 interface HeldMessage {
   readonly content: ContentBlock[]
-  readonly chunks: StreamChunk[]
+  /** Durable seqs of the chunks that already streamed this message's live partial. */
+  readonly refs: number[]
 }
 
 /** Drives one session through turn and step boundaries on Codex. */
@@ -178,6 +175,9 @@ export class CodexAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
 
+  /** Lazily created app-server client, reused across steps and released on scope teardown. */
+  private appServer: AppServerClient | undefined
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -195,6 +195,18 @@ export class CodexAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
+    // Release the shared app-server client when the agent scope is unwound.
+    this.scope.ctx.effect(() => () => {
+      this.appServer?.dispose()
+      this.appServer = undefined
+    }, 'codex.appServerClient()')
+  }
+
+  /** Return the cached app-server client, spawning one on first use or after a dead process. */
+  private async appServerClient(): Promise<AppServerClient> {
+    if (this.appServer !== undefined && !this.appServer.closed) return this.appServer
+    this.appServer = await AppServerClient.create()
+    return this.appServer
   }
 
   get status(): AgentStatus {
@@ -541,168 +553,192 @@ export class CodexAgent implements Agent {
     }
     signal.addEventListener('abort', cancel, { once: true })
     try {
-      const spec: CodexQuerySpec = {
-        cwd,
-        permission: this.queryPermission(),
-        env: this.config.env,
-        ...this.config.model === undefined ? {} : { model: this.config.model },
-        ...this.config.apiKey === undefined ? {} : { apiKey: this.config.apiKey },
-        ...this.config.baseUrl === undefined ? {} : { baseUrl: this.config.baseUrl },
-        ...this.config.networkAccessEnabled === undefined
-          ? {}
-          : { networkAccessEnabled: this.config.networkAccessEnabled },
-      }
-      const options = codexQueryOptions(spec, controller.signal)
-      const thread = new Codex(options.codexOptions).startThread(options.threadOptions)
-      const streamed = await thread.runStreamed(prompt, { signal: options.signal })
-      let finished = false
-      /** The latest agent message, held until the step knows whether turn usage attaches to it. */
-      let held: HeldMessage | undefined
-      /** Reasoning texts accumulated since the last agent message, folded into the next one. */
-      const pendingReasoning: string[] = []
-      /** Reasoning chunks accumulated alongside {@link pendingReasoning}, for replay linking. */
-      const pendingReasoningChunks: StreamChunk[] = []
-      /** Item ids whose tool/call already streamed at `item.started`. */
-      const seenCalls = new Set<string>()
-
-      /** Append the held assistant message (plus its chunks) with optional turn usage. */
-      const flushHeld = (usage?: TokenUsage): void => {
-        if (held === undefined) return
-        const chunkSeqs = held.chunks.map(chunk => this.session.append('assistant/chunk', { turn, step, chunk }).seq)
-        this.session.append('assistant/message', {
-          turn,
-          step,
-          message: createAssistantMessage({
-            content: held.content,
-            source: { provider: PROVIDER, model: this.modelLabel() },
-          }),
-          ...usage === undefined ? {} : { usage },
-        }, {
-          surfaceOp: 'append',
-          // Link the durable message to the chunks that streamed it, so replay
-          // can reconstruct the partial exactly as shown.
-          sourceEventSeqs: chunkSeqs,
-        })
-        held = undefined
-      }
-      /** Flush trailing accumulated reasoning as its own durable message. */
-      const flushReasoning = (usage?: TokenUsage): void => {
-        if (pendingReasoning.length === 0) return
-        flushHeld()
-        held = {
-          content: pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
-          chunks: [...pendingReasoningChunks],
+      const permission = this.queryPermission()
+      const client = await this.appServerClient()
+      const threadParams: ThreadStartParams = {
+          cwd,
+          sandbox: permission.sandboxMode,
+          approvalPolicy: permission.approvalPolicy,
+          ...this.config.model === undefined ? {} : { model: this.config.model },
         }
-        pendingReasoning.length = 0
-        pendingReasoningChunks.length = 0
-        flushHeld(usage)
-      }
+        const thread = await AppServerThread.create(client, threadParams)
+        const input: TurnInput[] = [{ type: 'text', text: prompt }]
+        const events = thread.turn(input, {
+          signal: controller.signal,
+          params: {
+            approvalPolicy: permission.approvalPolicy,
+            ...this.config.model === undefined ? {} : { model: this.config.model },
+          },
+        })
 
-      signal.throwIfAborted()
-      for await (const event of streamed.events) {
-        signal.throwIfAborted()
-        switch (event.type) {
-          case 'item.started': {
-            const item = event.item
-            if (item.type === 'command_execution' || item.type === 'mcp_tool_call') {
-              flushReasoning()
-              flushHeld()
-              seenCalls.add(item.id)
-              const call = item.type === 'command_execution'
-                ? mapCommandExecution(item).call
-                : mapMcpToolCall(item).call
-              this.session.append('tool/call', {
-                turn, step, callId: call.callId, name: call.name, arguments: call.arguments,
-              })
-            }
-            break
+        let finished = false
+        /** Reasoning texts accumulated since the last flush, folded into the next agent message or flushed as a trailing reasoning message. */
+        const pendingReasoning: string[] = []
+        /** Seq refs of reasoning chunks already streamed for {@link pendingReasoning}. */
+        const pendingReasoningSeqs: number[] = []
+        /** Seq refs of text chunks already streamed for the current agent message. */
+        const textSeqs: number[] = []
+        /** The assistant message being assembled; its chunks stream live as items complete. */
+        let held: HeldMessage | undefined
+        /** Whether a reasoning block has been started (block-start emitted). */
+        let reasoningBlockStarted = false
+        /** Whether a text block has been started (block-start emitted). */
+        let textBlockStarted = false
+        /** Block index for the current text block. */
+        let textBlockIndex = 0
+
+        /** Emit one live partial chunk and return its durable seq. */
+        const emitChunk = (chunk: StreamChunk): number =>
+          this.session.append('assistant/chunk', { turn, step, chunk }).seq
+
+        /** Append the held assistant message, optionally carrying the turn's usage. */
+        const flushHeld = (usage?: TokenUsage): void => {
+          if (held === undefined) return
+          this.session.append('assistant/message', {
+            turn,
+            step,
+            message: createAssistantMessage({
+              content: held.content,
+              source: { provider: PROVIDER, model: this.modelLabel() },
+            }),
+            ...usage === undefined ? {} : { usage },
+          }, {
+            surfaceOp: 'append',
+            // Link the durable message to the chunks that streamed it, so replay
+            // can reconstruct the partial exactly as shown.
+            sourceEventSeqs: held.refs,
+          })
+          held = undefined
+        }
+        /** Flush accumulated reasoning as its own durable message; an agent message folds it instead. */
+        const flushReasoning = (usage?: TokenUsage): void => {
+          if (pendingReasoning.length === 0) return
+          flushHeld()
+          held = {
+            content: pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
+            refs: [...pendingReasoningSeqs],
           }
-          case 'item.completed': {
-            const item = event.item
-            switch (item.type) {
-              case 'reasoning': {
-                const index = pendingReasoning.length
-                pendingReasoning.push(mapReasoning(item))
-                pendingReasoningChunks.push(
-                  { type: 'block-start', index, blockType: 'reasoning' },
-                  { type: 'reasoning-delta', index, text: item.text },
-                )
-                break
+          pendingReasoning.length = 0
+          pendingReasoningSeqs.length = 0
+          flushHeld(usage)
+        }
+
+        signal.throwIfAborted()
+        for await (const event of events) {
+          signal.throwIfAborted()
+          switch (event.kind) {
+            case 'turn-started':
+              break
+            case 'item-started': {
+              // item-started carries the item type; block-start is emitted on the first delta.
+              if (event.itemType === 'agentMessage') {
+                textBlockStarted = false
+                textBlockIndex = pendingReasoning.length
               }
-              case 'agent_message': {
+              break
+            }
+            case 'agent-delta': {
+              // Token-level streaming of the agent's reply — live.
+              if (!textBlockStarted) {
+                textBlockStarted = true
+                textSeqs.push(emitChunk({ type: 'block-start', index: textBlockIndex, blockType: 'text' }))
+              }
+              textSeqs.push(emitChunk({ type: 'text-delta', index: textBlockIndex, text: event.delta }))
+              break
+            }
+            case 'reasoning-summary-delta':
+            case 'reasoning-text-delta':
+            case 'plan-delta': {
+              // Token-level streaming of the model's thinking — live.
+              const index = pendingReasoning.length
+              if (!reasoningBlockStarted) {
+                reasoningBlockStarted = true
+                pendingReasoningSeqs.push(emitChunk({ type: 'block-start', index, blockType: 'reasoning' }))
+              }
+              pendingReasoningSeqs.push(emitChunk({ type: 'reasoning-delta', index, text: event.delta }))
+              break
+            }
+            case 'item-completed': {
+              const item = event.item
+              if (item.type === 'reasoning') {
+                // Reasoning item completed — accumulate for the fold.
+                const summary = (item as { summary?: string[] }).summary
+                const content = (item as { content?: string[] }).content
+                const text = summary?.join('\n') ?? content?.join('\n') ?? ''
+                pendingReasoning.push(text)
+                reasoningBlockStarted = false
+              } else if (item.type === 'agentMessage') {
+                // Agent message completed — fold reasoning + text into one message.
                 flushHeld()
-                const textIndex = pendingReasoning.length
                 held = {
-                  content: [...pendingReasoning.map(text => ({ type: 'reasoning' as const, text })), ...mapAgentMessage(item)],
-                  chunks: [
-                    ...pendingReasoningChunks,
-                    { type: 'block-start', index: textIndex, blockType: 'text' },
-                    { type: 'text-delta', index: textIndex, text: item.text },
+                  content: [
+                    ...pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
+                    { type: 'text' as const, text: item.text ?? '' },
                   ],
+                  refs: [...pendingReasoningSeqs, ...textSeqs],
                 }
                 pendingReasoning.length = 0
-                pendingReasoningChunks.length = 0
-                break
-              }
-              case 'command_execution':
-              case 'mcp_tool_call':
-              case 'file_change': {
+                pendingReasoningSeqs.length = 0
+                textSeqs.length = 0
+                reasoningBlockStarted = false
+                textBlockStarted = false
+              } else if (item.type === 'commandExecution') {
                 flushReasoning()
                 flushHeld()
-                const activity = item.type === 'command_execution'
-                  ? mapCommandExecution(item)
-                  : item.type === 'mcp_tool_call'
-                    ? mapMcpToolCall(item)
-                    : mapFileChange(item)
-                if (!seenCalls.has(item.id)) {
-                  this.session.append('tool/call', {
-                    turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
-                  })
-                }
+                const activity = mapCommandExecution(item as { id: string; command?: string; aggregatedOutput?: string | null; exitCode?: number | null; status?: string })
+                this.session.append('tool/call', {
+                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                })
                 this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
-                break
+              } else if (item.type === 'fileChange') {
+                flushReasoning()
+                flushHeld()
+                const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
+                this.session.append('tool/call', {
+                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                })
+                this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
+              } else if (item.type === 'mcpToolCall') {
+                flushReasoning()
+                flushHeld()
+                const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
+                this.session.append('tool/call', {
+                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                })
+                this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
               }
-              default:
-                // web_search, todo_list, and non-fatal error items carry no
-                // model-visible transcript content for the durable log.
-                break
+              break
             }
-            break
+            case 'turn-completed': {
+              const usage = event.turn.usage
+                ? mapUsage(event.turn.usage)
+                : undefined
+              // Turn usage attaches to the step's final durable message: the
+              // trailing reasoning-only message when thinking closed the turn,
+              // otherwise the last held agent message.
+              if (pendingReasoning.length > 0) flushReasoning(usage)
+              else flushHeld(usage)
+              finished = true
+              break
+            }
+            case 'error':
+              flushReasoning()
+              flushHeld()
+              throw new LlmError(event.error.message, 'CODEX_ERROR')
+            /* v8 ignore next -- AppServerEvent is a closed union; no unknown kinds */
+            default:
+              break
           }
-          case 'turn.completed': {
-            const usage = mapUsage(event.usage)
-            // Turn usage attaches to the step's final durable message: the
-            // trailing reasoning-only message when thinking closed the turn,
-            // otherwise the last held agent message.
-            if (pendingReasoning.length > 0) flushReasoning(usage)
-            else flushHeld(usage)
-            finished = true
-            break
-          }
-          case 'turn.failed':
-            flushReasoning()
-            flushHeld()
-            throw new LlmError(event.error.message, 'CODEX_TURN_FAILED')
-          case 'error':
-            flushReasoning()
-            flushHeld()
-            throw new LlmError(event.message, 'CODEX_ERROR')
-          default:
-            // thread.started / turn.started / item.updated are transport
-            // progress; the durable log records only the model-visible
-            // transcript (there are no incremental deltas to forward).
-            break
         }
-      }
-      flushReasoning()
-      flushHeld()
-      if (!finished) {
-        throw new LlmError(
-          `agent "${this.id}": codex query ended without a completed turn`,
-          'CODEX_NO_RESULT',
-        )
-      }
-      return { kind: 'completed' }
+        flushReasoning()
+        flushHeld()
+        if (!finished) {
+          throw new LlmError(
+            `agent "${this.id}": codex query ended without a completed turn`,
+            'CODEX_NO_RESULT',
+          )
+        }
+        return { kind: 'completed' }
     } finally {
       signal.removeEventListener('abort', cancel)
       controller.abort()

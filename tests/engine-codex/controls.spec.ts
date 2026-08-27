@@ -6,7 +6,6 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { ThreadEvent, ThreadItem, Usage } from '@openai/codex-sdk'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -14,6 +13,7 @@ import AgentRegistry, { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES } from '../../src/engine-codex/loop.ts'
 import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-codex/sdk.ts'
+import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
@@ -23,17 +23,37 @@ const loopPlugin = {
   },
 }
 
-type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => Promise<{ events: AsyncGenerator<ThreadEvent> }>
+type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => AsyncGenerator<AppServerEvent>
 
 const mock = vi.hoisted(() => ({
   runStreamed: vi.fn<RunStreamed>(),
 }))
 
-vi.mock('@openai/codex-sdk', () => ({
-  Codex: class FakeCodex {
-    startThread(): { runStreamed: RunStreamed } {
-      return { runStreamed: mock.runStreamed }
-    }
+vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
+  AppServerClient: {
+    create: async () => ({
+      threadStart: async () => ({ thread: { id: 'mock-thread-1' } }),
+      threadResume: async () => ({ thread: { id: 'mock-thread-1' } }),
+      turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
+      turnInterrupt: async () => ({}),
+      onNotification: () => {},
+      onStderr: () => {},
+      dispose: () => {},
+    }),
+  },
+}))
+
+vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
+  AppServerThread: {
+    create: async (_client: unknown, _threadParams: Record<string, unknown>) => ({
+      threadId: 'mock-thread-1',
+      async *turn(_input: unknown, _options: unknown): AsyncGenerator<AppServerEvent> {
+        for await (const event of mock.runStreamed(_input, _options)) {
+          yield event
+        }
+      },
+      async dispose() {},
+    }),
   },
 }))
 
@@ -41,29 +61,28 @@ beforeEach(() => {
   mock.runStreamed.mockReset()
 })
 
-function stream(events: ThreadEvent[]): ReturnType<RunStreamed> {
-  async function* inner(): AsyncGenerator<ThreadEvent, void> {
+function stream(events: AppServerEvent[]): RunStreamed {
+  async function* inner(): AsyncGenerator<AppServerEvent, void> {
     for (const event of events) yield event
   }
-  return Promise.resolve({ events: inner() })
+  return inner()
 }
 
-const USAGE: Usage = {
-  input_tokens: 3,
-  cached_input_tokens: 0,
-  cache_write_input_tokens: 0,
-  output_tokens: 2,
-  reasoning_output_tokens: 0,
+const USAGE = {
+  inputTokens: 3,
+  cachedInputTokens: 0,
+  outputTokens: 2,
+  reasoningOutputTokens: 0,
 }
 
-function agentMessage(text: string): ThreadItem {
-  return { id: `msg-${text}`, type: 'agent_message', text }
+function agentMessage(text: string): { type: string; id: string; text: string } {
+  return { type: 'agentMessage', id: `msg-${text}`, text }
 }
 
-function ok(text: string): ThreadEvent[] {
+function ok(text: string): AppServerEvent[] {
   return [
-    { type: 'item.completed', item: agentMessage(text) },
-    { type: 'turn.completed', usage: USAGE },
+    { kind: 'item-completed', item: agentMessage(text) as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never },
+    { kind: 'turn-completed', turn: { id: 'turn-1', status: 'completed', error: null, items: [], usage: USAGE } },
   ]
 }
 
@@ -85,15 +104,13 @@ function gatedQuery(): { release: () => void; entered: Promise<void>; run: RunSt
   let release: (() => void) | undefined
   let markEntered: (() => void) | undefined
   const entered = new Promise<void>((resolve) => { markEntered = resolve })
-  const run: RunStreamed = () => Promise.resolve({
-    events: (async function* (): AsyncGenerator<ThreadEvent> {
-      yield { type: 'item.completed', item: agentMessage('first') }
-      markEntered?.()
-      await new Promise<void>((resolve) => { release = resolve })
-      yield { type: 'item.completed', item: agentMessage('late') }
-      yield { type: 'turn.completed', usage: USAGE }
-    })(),
-  })
+  const run: RunStreamed = () => (async function* (): AsyncGenerator<AppServerEvent> {
+    yield { kind: 'item-completed', item: agentMessage('first') as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
+    markEntered?.()
+    await new Promise<void>((resolve) => { release = resolve })
+    yield { kind: 'item-completed', item: agentMessage('late') as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
+    yield { kind: 'turn-completed', turn: { id: 'turn-1', status: 'completed', error: null, items: [], usage: USAGE } }
+  })()
   return { release: () => { release?.() }, entered, run }
 }
 
@@ -240,21 +257,19 @@ describe('cancellation during a running turn', () => {
     try {
       let release: (() => void) | undefined
       const gate = new Promise<void>((resolve) => { release = resolve })
-      mock.runStreamed.mockImplementation((_input, turnOptions) => Promise.resolve({
-        events: (async function* (): AsyncGenerator<ThreadEvent> {
-          yield { type: 'item.completed', item: agentMessage('first') }
-          await Promise.race([
-            gate,
-            new Promise<never>((_, reject) => {
-              turnOptions?.signal?.addEventListener('abort', () => {
-                reject(new Error('query aborted'))
-              }, { once: true })
-            }),
-          ])
-          yield { type: 'item.completed', item: agentMessage('late') }
-          yield { type: 'turn.completed', usage: USAGE }
-        })(),
-      }))
+      mock.runStreamed.mockImplementation((_input, turnOptions) => (async function* (): AsyncGenerator<AppServerEvent> {
+        yield { kind: 'item-completed', item: agentMessage('first') as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
+        await Promise.race([
+          gate,
+          new Promise<never>((_, reject) => {
+            turnOptions?.signal?.addEventListener('abort', () => {
+              reject(new Error('query aborted'))
+            }, { once: true })
+          }),
+        ])
+        yield { kind: 'item-completed', item: agentMessage('late') as AppServerEvent extends { kind: 'item-completed'; item: infer T } ? T : never }
+        yield { kind: 'turn-completed', turn: { id: 'turn-1', status: 'completed', error: null, items: [], usage: USAGE } }
+      })())
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('running-cancel'),
         meta: { cwd: process.cwd() },

@@ -26,6 +26,7 @@ import { applyManagedBlock, currentEngineOf } from '../src/patch-manager.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
+import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -556,9 +557,11 @@ describe('apply codex engine', () => {
       disposeGraceMs: 1000,
       maxTurns: 4,
     })
-    // The codex engine registers no commands or skill provider in this version.
+    // The codex engine registers no commands but does mount its AGENTS.md skill provider.
     expect(commands.registered).toHaveLength(0)
-    expect(skills.creates).toHaveLength(0)
+    expect(skills.creates).toHaveLength(1)
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(CodexSkillProvider)
     expect(ctx.get('agentLoopClaudeCode')).toBeUndefined()
 
     await fiber.dispose()
