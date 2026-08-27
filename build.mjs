@@ -46,7 +46,6 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/dsh-session',
   '@deepseek-ai/dsh-session-persistence',
   '@deepseek-ai/dsh-subprocess',
-  '@deepseek-ai/dsh-system-prompt',
   '@deepseek-ai/dsh-timeout',
   '@anthropic-ai/claude-agent-sdk',
   '@anthropic-ai/sdk',

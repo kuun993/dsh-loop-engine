@@ -126,7 +126,8 @@ The driver spawns `pi --mode rpc` as a child process and speaks the strict-LF
 (`\n`) JSONL protocol over stdio — never a generic line reader, because Pi
 allows Unicode separators like U+2028 inside JSON strings. It runs **one
 stateless session per dsh step**: a fresh `new_session`, then a single `prompt`
-carrying the assembled dsh system prompt plus the serialized session history, so
+carrying the serialized session history. Like the Codex/Claude drivers, Pi owns
+its own system prompt natively, so the dsh system-prompt assembly is not run —
 the durable session log remains the sole source of model context.
 
 - **Streaming.** `message_update` deltas (`text_delta` / `thinking_delta`) are
