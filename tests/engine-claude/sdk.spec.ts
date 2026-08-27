@@ -16,12 +16,12 @@ import {
   unattendedDiagnostic,
   claudeQueryOptions,
   type ClaudeCodeQuerySpec,
-} from '../../src/engine/sdk.ts'
+} from '../../src/engine-claude/sdk.ts'
 import {
   claudeSpawnSpec,
   ManagedClaudeCodeProcess,
   sdkEnvironmentOverlay,
-} from '../../src/engine/process.ts'
+} from '../../src/engine-claude/process.ts'
 
 interface FakeChild {
   readonly handle: SubprocessHandle

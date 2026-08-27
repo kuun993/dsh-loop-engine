@@ -2,7 +2,7 @@
  * Projection from the shared managed-process handle to the official Claude
  * Agent SDK's custom-spawn process interface.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine/process
+ * @module @deepseek-ai/dsh-loop-engine/engine-claude/process
  */
 
 import { EventEmitter } from 'node:events'

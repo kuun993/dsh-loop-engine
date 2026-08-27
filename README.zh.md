@@ -1,5 +1,7 @@
 # dsh-loop-engine
 
+[![npm version](https://img.shields.io/npm/v/@kuun993/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@kuun993/dsh-loop-engine)
+
 像切换模型一样切换 **dsh web** 的 agent 循环引擎:设置页的「Loop engine」下拉选择运行 agent 的驱动——内置 in-process 循环、Claude Code CLI,或 Codex CLI——**无需改动主仓库**。
 
 ## 能做什么
@@ -29,19 +31,19 @@
 
    ```json
    "dependencies": {
-     "@deepseek-ai/dsh-loop-engine": "0.1.1-rc.2",
+     "@kuun993/dsh-loop-engine": "1.0.0-rc1",
      "...保留其余依赖"
    }
    ```
 
-   在包发布到 registry 之前,请改用指向你本地代码副本的 `file:` 引用,而非版本号。
+   包已发布到 npm,名称 `@kuun993/dsh-loop-engine`。本地开发时改用指向你本地代码副本的 `file:` 引用。
 
 3. 在 `$DSH_HOME/profiles/web/cordis.patch.yml` 追加一行组合:
 
    ```yaml
    - insert:
        - id: loop-engine
-         name: '@deepseek-ai/dsh-loop-engine'
+         name: '@kuun993/dsh-loop-engine'
    ```
 
 4. 安装并重启:
