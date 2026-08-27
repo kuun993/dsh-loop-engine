@@ -9,7 +9,7 @@
  * no interactive approval callback, so permissions are folded declaratively
  * into each thread's `sandboxMode`/`approvalPolicy`.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex/agent
+ * @module @kuun993/dsh-loop-engine/engine-codex/agent
  */
 
 import type {

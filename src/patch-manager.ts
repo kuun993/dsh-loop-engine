@@ -22,7 +22,7 @@
  * factory. All functions here are pure string transforms — file I/O and
  * durability live in the plugin's apply.
  *
- * @module @deepseek-ai/dsh-loop-engine/patch-manager
+ * @module @kuun993/dsh-loop-engine/patch-manager
  */
 
 import type { LoopEngineId } from './settings.ts'

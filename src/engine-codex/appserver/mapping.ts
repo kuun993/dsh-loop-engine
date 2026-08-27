@@ -3,7 +3,7 @@
  * Token deltas become live partial chunks; completed items become durable
  * messages; tool calls/results become tool/call and tool/result events.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex/appserver/mapping
+ * @module @kuun993/dsh-loop-engine/engine-codex/appserver/mapping
  */
 
 import type { ContentBlock, StreamChunk, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'

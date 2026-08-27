@@ -3,7 +3,7 @@
  * the headless interaction policy. The driver runs exactly one query per dsh
  * step; this module owns no session state.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-claude/sdk
+ * @module @kuun993/dsh-loop-engine/engine-claude/sdk
  */
 
 import type {

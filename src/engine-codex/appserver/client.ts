@@ -3,7 +3,7 @@
  * `codex app-server` as a child process, sends JSON-RPC 2.0 requests over
  * stdin, and reads newline-delimited JSON responses/notifications from stdout.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex/appserver/client
+ * @module @kuun993/dsh-loop-engine/engine-codex/appserver/client
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
