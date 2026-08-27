@@ -16,7 +16,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { ClaudeCodeLoop } from '../../src/engine/loop.ts'
+import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 /** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
   inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],

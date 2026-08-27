@@ -1,5 +1,7 @@
 # dsh-loop-engine
 
+[![npm version](https://img.shields.io/npm/v/@kuun993/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@kuun993/dsh-loop-engine)
+
 Switch the agent loop engine of **dsh web** the same way you switch a model: a
 "Loop engine" dropdown in Settings chooses which driver runs your agents — the
 built-in in-process loop, the Claude Code CLI, or the Codex CLI — without
@@ -44,20 +46,21 @@ changing anything in the main repository.
 
    ```json
    "dependencies": {
-     "@deepseek-ai/dsh-loop-engine": "0.1.1-rc.2",
+     "@kuun993/dsh-loop-engine": "1.0.0-rc1",
      "...keep existing deps"
    }
    ```
 
-   Until the package is published, use a local `file:` reference to your
-   checkout instead of the version string.
+   The package is published on npm as `@kuun993/dsh-loop-engine`. For local
+   development, use a `file:` reference to your checkout instead of the version
+   string.
 
 3. Append one composition row in `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
    ```yaml
    - insert:
        - id: loop-engine
-         name: '@deepseek-ai/dsh-loop-engine'
+         name: '@kuun993/dsh-loop-engine'
    ```
 
 4. Install and restart:
