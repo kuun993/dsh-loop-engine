@@ -4,7 +4,7 @@
  * event payloads the driver appends inside its current step, so the mapping
  * stays unit-testable without any SDK process.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine/mapping
+ * @module @deepseek-ai/dsh-loop-engine/engine-claude/mapping
  */
 
 import type {

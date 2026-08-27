@@ -28,7 +28,7 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { ClaudeCodeLoop } from '../../src/engine/loop.ts'
+import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 /** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
   inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
@@ -36,7 +36,7 @@ const loopPlugin = {
     void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
   },
 }
-import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine/sdk.ts'
+import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-claude/sdk.ts'
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
 

@@ -1,6 +1,6 @@
 /**
  * Pure fold and mapping tests for the session-permission → native-permission bridge.
- * @module tests/engine/permission
+ * @module tests/engine-claude/permission
  */
 
 import { describe, expect, it } from 'vitest'
@@ -9,7 +9,7 @@ import {
   resolveSessionPermission,
   sessionApprovalPolicy,
   sessionSandboxMode,
-} from '../../src/engine/permission.ts'
+} from '../../src/engine-claude/permission.ts'
 
 /** One structural log event. */
 function event(type: string, data: unknown): { type: string; data: unknown } {

@@ -4,7 +4,7 @@
  * serialized transcript is its exact projection, so a later replay of the same
  * log derives the identical prompt (Model-visible ⟺ logged bridge).
  *
- * @module @deepseek-ai/dsh-loop-engine/engine/prompt
+ * @module @deepseek-ai/dsh-loop-engine/engine-claude/prompt
  */
 
 import type {

@@ -16,7 +16,7 @@ import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES } from '../../src/engine/loop.ts'
+import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES } from '../../src/engine-claude/loop.ts'
 /** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
 const loopPlugin = {
   inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],

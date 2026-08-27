@@ -13,10 +13,10 @@
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { sessionApprovalPolicy, sessionSandboxMode } from '../engine/permission.ts'
+import { sessionApprovalPolicy, sessionSandboxMode } from '../engine-claude/permission.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './types.ts'
 
-/** Minimal structural shape of one session log event (see engine/permission). */
+/** Minimal structural shape of one session log event (see engine-claude/permission). */
 type PermissionEvent = Pick<SessionEvent, 'data'> & { readonly type: string }
 
 /** The declarative permission stance one Codex thread runs under. */

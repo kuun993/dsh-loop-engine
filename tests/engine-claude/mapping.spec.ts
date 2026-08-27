@@ -13,8 +13,8 @@ import {
   mapToolResults,
   stringifyToolInput,
   type StreamToolCall,
-} from '../../src/engine/mapping.ts'
-import { serializeHistory, OMITTED_IMAGE_TEXT } from '../../src/engine/prompt.ts'
+} from '../../src/engine-claude/mapping.ts'
+import { serializeHistory, OMITTED_IMAGE_TEXT } from '../../src/engine-claude/prompt.ts'
 
 function assistantMessage(overrides: Partial<BetaMessage> = {}): BetaMessage {
   return {
