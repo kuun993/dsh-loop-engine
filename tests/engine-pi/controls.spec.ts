@@ -259,6 +259,38 @@ describe('cancellation during a running turn', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('swallows a rejected abort() when the client is disposed mid-teardown', async () => {
+    const ctx = await harness()
+    const originalAbort = mock.client.abort
+    try {
+      let release: (() => void) | undefined
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      // Keep the step in-flight so cancellation fires the best-effort abort()
+      // while the RPC client is still busy — then reject that abort, exactly as
+      // PiRpcClient.dispose() does during an engine switch / scope teardown.
+      mock.client.events = async function* (): AsyncGenerator<Record<string, unknown>> {
+        yield { type: 'message_start', message: assistantMessage('first') }
+        await gate
+        yield { type: 'turn_end', message: assistantMessage('late') }
+      }
+      mock.client.abort = vi.fn(async () => { throw new Error('pi RPC client is disposed') })
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('abort-reject'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await new Promise<void>((resolve) => { setImmediate(resolve) })
+      agent.cancel({ kind: 'user' })
+      release?.()
+      await agent.whenIdle()
+      const end = agent.session.events.findLast(event => event.type === 'turn/end')
+      expect(end).toMatchObject({ data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    } finally {
+      mock.client.abort = originalAbort
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('defensive guards', () => {

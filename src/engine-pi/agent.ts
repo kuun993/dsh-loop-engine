@@ -21,11 +21,10 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { CallId, LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -493,18 +492,14 @@ export class PiAgent implements Agent {
     }
   }
 
-  /** Assemble the dsh system prompt for one query. */
-  private async assembleSystemPrompt(signal: AbortSignal): Promise<string> {
-    const scopeContext = assembleContextFor(this, signal)
-    const assembly = await this.loopCtx.systemPrompt.assemble(scopeContext)
-    return renderPrompt(assembly)
-  }
-
   /**
    * Run one Pi RPC query for the current step and map its event stream into the
-   * session log. The step opens a fresh Pi session (`new_session`), sends the
-   * assembled system prompt plus the serialized history as one prompt, and
-   * consumes events until the agent settles.
+   * session log. The step opens a fresh Pi session (`new_session`) and sends the
+   * serialized session history as one prompt, then consumes events until the
+   * agent settles. Like the Codex/Claude drivers, Pi owns its own system prompt
+   * natively, so the dsh system-prompt assembly (which pulls dsh tool schemas
+   * and `agent.ctx.tools`) is deliberately not run — the durable session log is
+   * the sole source of model context.
    */
   private async step(): Promise<StepEndReason | null> {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
@@ -534,22 +529,33 @@ export class PiAgent implements Agent {
       if (!controller.signal.aborted) {
         /* v8 ignore next -- the phase signal aborts with AgentCancelCause values only, which the durable log can record */
         controller.abort(signal.reason instanceof Error ? signal.reason : new Error(`agent "${this.id}" query aborted`))
-        void this.rpc?.abort()
+        // Best-effort abort: the RPC child may already be tearing down (engine
+        // switch / scope dispose), in which case the in-flight `abort` command
+        // is rejected by `PiRpcClient.dispose()`. The request is fire-and-forget,
+        // so swallow the rejection — an unhandled one would otherwise crash the
+        // process with "pi RPC client is disposed" during teardown.
+        void this.rpc?.abort().catch(() => undefined)
       }      /* v8 ignore stop */
     }
     signal.addEventListener('abort', cancel, { once: true })
     try {
       const client = await this.rpcClient(cwd)
-      const systemText = await this.assembleSystemPrompt(signal)
       signal.throwIfAborted()
       await client.newSession()
       client.clearEvents()
-      /* v8 ignore start -- the harness always renders a non-empty system prompt */
-      const message = systemText.length > 0 ? `${systemText}\n\n${prompt}` : prompt
-      /* v8 ignore stop */
-      await client.prompt(message)
+      await client.prompt(prompt)
 
       let finished = false
+      /**
+       * Whether the agent has fully settled for this step. Unlike {@link finished}
+       * (set on any terminal-ish event, including a mid-run `turn_end`), this
+       * becomes true only on `agent_settled` (or a non-retrying `agent_end`), and
+       * it is what actually ends the event loop — because the Pi RPC child stays
+       * alive between steps, the `events()` generator never returns on its own, so
+       * the loop must break on the settle signal or `step()` hangs after the
+       * reply has already streamed.
+       */
+      let settled = false
       /** Seq refs of chunks already streamed for the current agent message. */
       const chunkSeqs: number[] = []
       /** The assistant message being assembled; its chunks stream live as items complete. */
@@ -735,11 +741,22 @@ export class PiAgent implements Agent {
             break
           }
           case 'agent_end':
+            flushHeld(lastUsage)
+            finished = true
+            // `agent_end` carries `willRetry`; a retrying run keeps emitting (auto-retry /
+            // compaction), so only a non-retrying `agent_end` concludes the step.
+            if (!event.willRetry) settled = true
+            break
           case 'agent_settled':
             flushHeld(lastUsage)
             finished = true
+            settled = true
             break
         }
+        // The Pi child persists across steps, so the RPC event generator never
+        // ends on its own: once the agent has settled, stop consuming and let the
+        // step return, otherwise `step()` hangs after the final reply streams.
+        if (settled) break
       }
       flushHeld(lastUsage)
       if (!finished) {
