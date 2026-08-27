@@ -47,8 +47,15 @@ import { CodexSkillProvider } from './engine-codex/skills.ts'
 
 export const name = 'loop-engine'
 
-/** Services the hosted engine factory resolves through the plugin fiber. */
-export const inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
+/**
+ * Services the plugin's own fiber requires. The plugin declares none of its
+ * own: the optional host services it reads (`commands`, `skills`) are resolved
+ * lazily via `ctx.get` and may be absent, and the hosted engine factories
+ * (Claude Code / Codex) declare their own `inject` when the plugin mounts them
+ * as children. Empty keeps the plugin from demanding a service that a minimal
+ * profile does not provide.
+ */
+export const inject = []
 
 /** Bounded retry window for the AgentFactory slot race on runtime switches. */
 const MAX_MOUNT_ATTEMPTS = 40
@@ -66,15 +73,20 @@ export interface Config extends ClaudeCodeConfig {
   sandboxMode?: CodexSandboxMode
   /** Pinned Codex approval policy; falls back to the session's dsh permission knobs. */
   approvalPolicy?: CodexApprovalPolicy
-  /** Codex API key injected as CODEX_API_KEY into the CLI environment. */
-  apiKey?: string
-  /** Codex API base URL override. */
-  baseUrl?: string
-  /** Whether the Codex sandbox may reach the network. */
-  networkAccessEnabled?: boolean
 }
 
-/** Schema of the loop engine composition entry. */
+/**
+ * Schema of the loop engine composition entry.
+ *
+ * A schemastery object validates each field only when it is present and lets
+ * an absent key fall through as `undefined`, so omitted knobs are accepted —
+ * matching the permissive interface and read path (`resolvePatchPath` defaults
+ * the patch path; each engine driver resolves only the knobs it owns and
+ * omitted deployment tunables fall back to the session). The composition entry
+ * is an engine-agnostic superset: the selectable knobs belong to whichever
+ * engine the settings pick at runtime, so both engines' knobs may coexist and
+ * only the selected one is consumed.
+ */
 export const Config: z<Config> = z.object({
   profile: z.string(),
   patchFilename: z.string(),
@@ -86,9 +98,6 @@ export const Config: z<Config> = z.object({
   maxTurns: z.number(),
   sandboxMode: z.union(CODEX_SANDBOX_MODES.map(mode => z.const(mode))),
   approvalPolicy: z.union(CODEX_APPROVAL_POLICIES.map(policy => z.const(policy))),
-  apiKey: z.string(),
-  baseUrl: z.string(),
-  networkAccessEnabled: z.boolean(),
 })
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
@@ -183,11 +192,6 @@ function codexConfig(config: Config): CodexConfig {
     ...config.approvalPolicy === undefined ? {} : { approvalPolicy: config.approvalPolicy },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.model === undefined ? {} : { model: config.model },
-    ...config.apiKey === undefined ? {} : { apiKey: config.apiKey },
-    ...config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl },
-    ...config.networkAccessEnabled === undefined ? {} : { networkAccessEnabled: config.networkAccessEnabled },
-    ...config.disposeGraceMs === undefined ? {} : { disposeGraceMs: config.disposeGraceMs },
-    ...config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns },
   }
 }
 

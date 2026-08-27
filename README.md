@@ -26,8 +26,8 @@ changing anything in the main repository.
 - dsh `0.1.1-rc.2` (or a build whose peer packages match).
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
   the host.
-- For the Codex engine: authenticated either via `codex login` on the host, a
-  `CODEX_API_KEY` environment entry, or the plugin's `apiKey` config field.
+- For the Codex engine: authenticated either via `codex login` on the host or a
+  `CODEX_API_KEY` environment entry.
 - When the harness runs from a **source checkout** (e.g. `pnpm dsh` inside the
   `deepseek-harness` repository), the profile must resolve this plugin's
   harness peer packages to the monorepo **sources** via local `file:` shims

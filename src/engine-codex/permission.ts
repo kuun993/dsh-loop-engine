@@ -12,12 +12,9 @@
  * @module @kuun993/dsh-loop-engine/engine-codex/permission
  */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { sessionApprovalPolicy, sessionSandboxMode } from '../engine-claude/permission.ts'
+import type { PermissionEvent } from '../driver-core/permission-knobs.ts'
+import { sessionApprovalPolicy, sessionSandboxMode } from '../driver-core/permission-knobs.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './types.ts'
-
-/** Minimal structural shape of one session log event (see engine-claude/permission). */
-type PermissionEvent = Pick<SessionEvent, 'data'> & { readonly type: string }
 
 /** The declarative permission stance one Codex thread runs under. */
 export interface CodexPermission {
