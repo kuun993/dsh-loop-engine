@@ -14,7 +14,7 @@ import {
   stringifyToolInput,
   type StreamToolCall,
 } from '../../src/engine-claude/mapping.ts'
-import { serializeHistory, OMITTED_IMAGE_TEXT } from '../../src/engine-claude/prompt.ts'
+import { serializeHistory, OMITTED_IMAGE_TEXT } from '../../src/driver-core/prompt.ts'
 
 function assistantMessage(overrides: Partial<BetaMessage> = {}): BetaMessage {
   return {

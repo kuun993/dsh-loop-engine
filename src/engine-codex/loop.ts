@@ -10,7 +10,7 @@
  * @module @kuun993/dsh-loop-engine/engine-codex
  */
 
-import { FiberState, Service } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
@@ -23,20 +23,12 @@ import type {
   ResumeAgentOptions,
   SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
-import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { CodexAgent } from './agent.ts'
-import { DEFAULT_DISPOSE_GRACE_MS } from './sdk.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
-
-/** Fiber states that cannot own or serve a new lifecycle. */
-const INACTIVE_STATES: ReadonlySet<FiberState> = new Set([
-  FiberState.UNLOADING,
-  FiberState.DISPOSED,
-  FiberState.FAILED,
-])
+import { FactoryOwnership, raceAbort, raceAbortCall } from '../driver-core/ownership.ts'
 
 /** Codex CLI sandbox modes a deployment may pin. */
 export const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
@@ -73,24 +65,6 @@ export interface Config {
   env?: Record<string, string>
   /** Model override for the SDK; Codex native settings own the model when omitted. */
   model?: string
-  /** API key injected as CODEX_API_KEY into the CLI environment. */
-  apiKey?: string
-  /** Base URL override for the Codex API endpoint. */
-  baseUrl?: string
-  /** Whether the sandboxed agent may reach the network. */
-  networkAccessEnabled?: boolean
-  /**
-   * Grace in milliseconds kept for config symmetry with the Claude Code
-   * driver. The Codex SDK spawns and owns its CLI process, so the value is
-   * validated at the config boundary but not currently forwarded.
-   */
-  disposeGraceMs?: number
-  /**
-   * Cap on conversation turns kept for config symmetry with the Claude Code
-   * driver. The Codex SDK exposes no per-thread turn cap, so the value is
-   * validated at the config boundary but not currently forwarded.
-   */
-  maxTurns?: number
 }
 
 /** Schema of the Codex loop plugin configuration. */
@@ -99,105 +73,7 @@ export const Config: z<Config> = z.object({
   approvalPolicy: z.union([...CODEX_APPROVAL_POLICIES]),
   env: z.dict(z.string()).default({}),
   model: z.string(),
-  apiKey: z.string(),
-  baseUrl: z.string(),
-  networkAccessEnabled: z.boolean(),
-  disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
-  maxTurns: z.number().step(1).min(1),
 })
-
-/* jscpd:ignore-start -- the ownership/transaction machinery mirrors the
- * Claude Code loop factory; each product's lifecycle stays package-private. */
-/** Factory-level ownership: live agent teardowns plus load-time tracking. */
-class FactoryOwnership {
-  private accepting = true
-  private readonly teardown = new AbortController()
-  private readonly inactive = Promise.withResolvers<void>()
-  private readonly liveAgents = new Set<() => Promise<void>>()
-  private startupTasks = new Set<Promise<void>>()
-
-  constructor(private readonly fiber: Context['fiber']) {}
-
-  /** Aborts (reason: `agent loop is not active` error) when factory teardown begins. */
-  get signal(): AbortSignal {
-    return this.teardown.signal
-  }
-
-  isActive(): boolean {
-    return this.accepting && !INACTIVE_STATES.has(this.fiber.state)
-  }
-
-  /** Track one live agent's shared teardown until it has run. */
-  track(dispose: () => Promise<void>): () => void {
-    this.liveAgents.add(dispose)
-    return () => { this.liveAgents.delete(dispose) }
-  }
-
-  /** Join config startup work that begins before an agent exists. */
-  trackStartup(job: Promise<void>): void {
-    this.startupTasks.add(job)
-    const forget = () => { this.startupTasks.delete(job) }
-    void job.then(forget, forget)
-  }
-
-  /** Join one public create/resume continuation; factory dispose awaits its settlement. */
-  trackWrapper(job: Promise<unknown>): void {
-    this.trackStartup(job.then(() => undefined, () => undefined))
-  }
-
-  async dispose(): Promise<void> {
-    this.accepting = false
-    this.teardown.abort(new Error('agent loop is not active'))
-    this.inactive.resolve()
-    await Promise.all([
-      ...[...this.liveAgents].map(dispose => dispose()),
-      ...this.startupTasks,
-    ])
-  }
-}
-
-/** Await `operation`, or throw the signal's reason as soon as it aborts. */
-async function raceAbort<T>(operation: PromiseLike<T> | T, signal: AbortSignal, id: SessionId): Promise<T> {
-  const toAbortError = (): Error => {
-    /* v8 ignore start -- every fused abort source carries an Error reason; onCallerAbort and onFactoryTeardown wrap foreign values */
-    /* v8 ignore next -- every fused abort source carries an Error reason; onCallerAbort and onFactoryTeardown wrap foreign values */
-    return signal.reason instanceof Error ? signal.reason : new Error(`agent "${id}" creation aborted`, { cause: signal.reason })
-  }
-  /* v8 ignore next -- both call sites guard pre-aborted signals, so a pre-aborted entry is unreachable */
-  if (signal.aborted) throw toAbortError()    /* v8 ignore stop */
-  const aborted = Promise.withResolvers<never>()
-  const listener = (): void => { aborted.reject(toAbortError()) }
-  signal.addEventListener('abort', listener, { once: true })
-  try {
-    return await Promise.race([Promise.resolve(operation), aborted.promise])
-  } finally {
-    signal.removeEventListener('abort', listener)
-  }
-}
-/** Start an abortable operation and release a value that arrives after cancellation. */
-async function raceAbortCall<T>(
-  operation: () => PromiseLike<T> | T,
-  signal: AbortSignal,
-  id: SessionId,
-  releaseAbandoned?: (value: T) => void,
-): Promise<T> {
-  if (signal.aborted) {
-    throw signal.reason instanceof Error
-      ? signal.reason
-      : new Error(`agent "${id}" creation aborted`, { cause: signal.reason })
-  }
-  const pending = Promise.resolve().then(operation)
-  try {
-    return await raceAbort(pending, signal, id)
-  } catch (error: unknown) {
-    // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while the operation is awaited.
-    if (signal.aborted && releaseAbandoned !== undefined) {
-      void pending.then(releaseAbandoned, () => undefined)
-    }
-    throw error
-  }
-}
-/* jscpd:ignore-end */
 
 /** Prepared-but-unpublished agent resources sharing one memoized teardown. */
 interface PreparedAgent {
@@ -212,25 +88,11 @@ interface PreparedAgent {
 
 /** Resolve the driver configuration at the plugin config boundary. */
 function resolveConfig(config: Config): ResolvedConfig {
-  const disposeGraceMs = config.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
-  if (!Number.isFinite(disposeGraceMs) || disposeGraceMs <= 0) {
-    throw new Error('agent-loop-codex: disposeGraceMs must be a positive finite number')
-  }
-  if (disposeGraceMs > MAX_TIMER_DELAY_MS) {
-    throw new Error(
-      `agent-loop-codex: disposeGraceMs must be no greater than ${MAX_TIMER_DELAY_MS}`,
-    )
-  }
   return {
     sandboxMode: config.sandboxMode,
     approvalPolicy: config.approvalPolicy,
     env: config.env ?? {},
     model: config.model,
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-    networkAccessEnabled: config.networkAccessEnabled,
-    disposeGraceMs,
-    maxTurns: config.maxTurns,
   }
 }
 

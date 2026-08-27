@@ -33,9 +33,16 @@ import {
   mapToolResults,
   type StreamToolCall,
 } from './mapping.ts'
-import { serializeHistory } from './prompt.ts'
+import { serializeHistory } from '../driver-core/prompt.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
+import {
+  invokedSkillNames,
+  isSkillName,
+  renderSkillContent,
+  type SkillDefinition,
+  type SkillsService,
+} from '../driver-core/skill-inject.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
 const PROVIDER = 'claude-code'
@@ -46,96 +53,9 @@ const PROVIDER = 'claude-code'
  */
 const NATIVE_MODEL_LABEL = 'claude-code-native'
 
-// ── Skill-injection helpers (inline to avoid a peer dep on @deepseek-ai/dsh-skill) ──
-
-/** Kebab-case skill name regex. */
-const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-
-/** Whitespace-bounded `/name` gesture in user text. */
-const SKILL_GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
-
-function isSkillName(name: string): boolean {
-  return SKILL_NAME_RE.test(name)
-}
-
-/** Minimal shape of a loaded skill definition. */
-interface SkillDefinition {
-  readonly name: string
-  readonly description: string
-  readonly whenToUse?: string
-  readonly invocation: { readonly modelInvocable: boolean; readonly userInvocable: boolean }
-  readonly source: string
-  readonly provider: string
-  readonly content: string
-  readonly path?: string
-  readonly resourceBase?: { readonly kind: string; readonly path: string }
-}
-
-/** Durable source for an injected user-explicit skill invocation (mirrors dsh-skill's). */
-interface SkillInvocationSource {
-  readonly kind: 'skill-invocation'
-  readonly name: string
-  readonly form: 'instructions'
-}
-
-declare module '@deepseek-ai/dsh-llm' {
-  interface MessageSourceMap {
-    /** A user-explicit skill invocation injected by this driver. */
-    'skill-invocation': SkillInvocationSource
-  }
-}
-
-/** Minimal shape of the SkillRegistry service. */
-interface SkillsService {
-  get(name: string, options: { cwd?: string; signal?: AbortSignal; scope?: unknown }): Promise<SkillDefinition | undefined>
-}
-
 /** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
 interface ApprovalService {
   request(req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
-}
-
-/** Escape text for inclusion in XML-like skill markup. */
-function escapeText(value: string): string {
-  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-}
-
-/** Escape an XML-like attribute value. */
-function escapeAttr(value: string): string {
-  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
-}
-
-/** Render the `<skill_content>` block for a loaded skill. */
-function renderSkillContent(skill: SkillDefinition): string {
-  return [
-    `<skill_content name="${escapeAttr(skill.name)}">`,
-    '<skill_resources>',
-    skill.resourceBase !== undefined && skill.resourceBase.kind === 'directory'
-      ? `Base directory for this skill: ${escapeText(skill.resourceBase.path)}. Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.`
-      : `Resources for this skill are managed by provider "${escapeText(skill.provider)}". Load referenced resources only as needed.`,
-    '</skill_resources>',
-    '',
-    '<skill_instructions>',
-    skill.content,
-    '</skill_instructions>',
-    '</skill_content>',
-  ].join('\n')
-}
-
-/** Collect `/name` gesture tokens from direct user messages, in first-seen order. */
-function invokedSkillNames(messages: readonly UserMessage[]): string[] {
-  const names: string[] = []
-  for (const message of messages) {
-    if ((message.source as { kind?: unknown }).kind !== 'user') continue
-    for (const block of message.content) {
-      if (block.type !== 'text') continue
-      for (const match of block.text.matchAll(SKILL_GESTURE)) {
-        const name = match[2]
-        if (name !== undefined && !names.includes(name)) names.push(name)
-      }
-    }
-  }
-  return names
 }
 
 /* jscpd:ignore-start -- mirrors default agent-loop driver; depending on agent-loop is forbidden. */

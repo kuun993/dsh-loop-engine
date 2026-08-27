@@ -10,9 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { assembleContextFor } from '@deepseek-ai/dsh-agent'
-import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES } from '../../src/engine-codex/loop.ts'
-import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-codex/sdk.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
 /** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
@@ -548,34 +546,6 @@ describe('multi-step continuation', () => {
 })
 
 describe('configuration validation', () => {
-  async function bareContext(): Promise<Context> {
-    const fresh = new Context()
-    await fresh.plugin(SessionStore)
-    await fresh.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-    await fresh.plugin(AgentRegistry)
-    return fresh
-  }
-
-  it('rejects a non-finite disposeGraceMs at the config boundary', async () => {
-    const fresh = await bareContext()
-    try {
-      await expect(fresh.plugin(loopPlugin, { disposeGraceMs: Number.NaN }))
-        .rejects.toThrow(/disposeGraceMs/)
-    } finally {
-      await fresh.fiber.dispose()
-    }
-  })
-
-  it('rejects a disposeGraceMs beyond the timer ceiling', async () => {
-    const fresh = await bareContext()
-    try {
-      await expect(fresh.plugin(loopPlugin, { disposeGraceMs: MAX_TIMER_DELAY_MS + 1 }))
-        .rejects.toThrow('disposeGraceMs must be no greater than')
-    } finally {
-      await fresh.fiber.dispose()
-    }
-  })
-
   it('exposes the sandbox modes and approval policies accepted by the plugin config', () => {
     expect(CODEX_SANDBOX_MODES).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
     expect(CODEX_APPROVAL_POLICIES).toEqual(['never', 'on-request', 'on-failure', 'untrusted'])
@@ -589,22 +559,12 @@ describe('configuration validation', () => {
         approvalPolicy: 'on-failure',
         env: { CX_ENV: '1' },
         model: 'deployment-model',
-        apiKey: 'sk-x',
-        baseUrl: 'https://codex.example.test/v1',
-        networkAccessEnabled: true,
-        disposeGraceMs: 4321,
-        maxTurns: 7,
       })
       expect(ctx.agentLoopCodex.config).toMatchObject({
         sandboxMode: 'workspace-write',
         approvalPolicy: 'on-failure',
         env: { CX_ENV: '1' },
         model: 'deployment-model',
-        apiKey: 'sk-x',
-        baseUrl: 'https://codex.example.test/v1',
-        networkAccessEnabled: true,
-        disposeGraceMs: 4321,
-        maxTurns: 7,
       })
     } finally {
       await ctx.fiber.dispose()
@@ -617,15 +577,11 @@ describe('configuration validation', () => {
       const loop = new CodexLoop(ctx, {})
       expect(loop.config).toMatchObject({
         env: {},
-        disposeGraceMs: DEFAULT_DISPOSE_GRACE_MS,
       })
       // Unpinned stances follow the session's dsh permission knobs.
       expect(loop.config.sandboxMode).toBeUndefined()
       expect(loop.config.approvalPolicy).toBeUndefined()
       expect(loop.config.model).toBeUndefined()
-      expect(loop.config.apiKey).toBeUndefined()
-      expect(loop.config.baseUrl).toBeUndefined()
-      expect(loop.config.networkAccessEnabled).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
     }

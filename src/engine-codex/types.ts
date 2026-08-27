@@ -18,9 +18,4 @@ export interface ResolvedConfig {
   readonly approvalPolicy: CodexApprovalPolicy | undefined
   readonly env: Record<string, string>
   readonly model: string | undefined
-  readonly apiKey: string | undefined
-  readonly baseUrl: string | undefined
-  readonly networkAccessEnabled: boolean | undefined
-  readonly disposeGraceMs: number
-  readonly maxTurns: number | undefined
 }

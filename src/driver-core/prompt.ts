@@ -1,10 +1,11 @@
 /**
  * Serialization of the durable session history into the prompt text of one
- * Claude Code query. The session log is the sole source of model context; the
- * serialized transcript is its exact projection, so a later replay of the same
- * log derives the identical prompt (Model-visible ⟺ logged bridge).
+ * hosted-engine query. Both the Claude Code and Codex drivers build their
+ * per-step input from the durable session log: the transcript is the log's
+ * exact projection, so a later replay of the same log derives the identical
+ * prompt (Model-visible ⟺ logged bridge).
  *
- * @module @kuun993/dsh-loop-engine/engine-claude/prompt
+ * @module @kuun993/dsh-loop-engine/driver-core/prompt
  */
 
 import type {
@@ -15,9 +16,9 @@ import type {
   UserMessage,
 } from '@deepseek-ai/dsh-llm'
 
-/** Model-facing stand-in for an image block that Claude Code cannot consume as bytes. */
+/** Model-facing stand-in for an image block that the hosted engines cannot consume as bytes. */
 export const OMITTED_IMAGE_TEXT
-  = '[image omitted: the Claude Code driver does not transcribe images; read the file when a path is available]'
+  = '[image omitted: the driver does not transcribe images; read the file when a path is available]'
 
 /**
  * Frame a serialized message body with its visible role label.
@@ -32,8 +33,8 @@ function frame(tag: string, body: string): string {
 /**
  * Render one assistant message's content blocks to transcript text. Text
  * blocks render verbatim; tool-call blocks render as a compact invocation
- * line; reasoning content is not transcribed (Claude Code re-derives its own
- * thinking in each fresh query).
+ * line; reasoning content is not transcribed (each engine re-derives its own
+ * thinking in every fresh query).
  * @param blocks - the assistant message's content blocks.
  * @returns the transcript text of the message body.
  */
@@ -81,13 +82,13 @@ function renderToolResult(message: ToolResultMessage): string {
 }
 
 /**
- * Serialize a derived conversation history into the prompt text of one Claude
- * Code query. The last message is the live user request that triggered the
- * step; every earlier message is durable replay context. The output is a pure
+ * Serialize a derived conversation history into the prompt text of one hosted
+ * query. The last message is the live user request that triggered the step;
+ * every earlier message is durable replay context. The output is a pure
  * function of the log prefix.
  * @param messages - derived history, oldest first, as returned by
  *   `Session.deriveMessages()` at step time.
- * @returns the prompt text to pass to the Claude Agent SDK.
+ * @returns the prompt text to pass to the engine.
  */
 export function serializeHistory(messages: readonly Message[]): string {
   const sections: string[] = []
