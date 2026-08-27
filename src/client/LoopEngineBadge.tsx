@@ -60,7 +60,8 @@ export function LoopEngineBadge(props: LoopEngineBadgeProps): JSX.Element | null
   const label = t(
     engine === 'claude-code' ? 'engineClaudeCode'
       : engine === 'codex' ? 'engineCodex'
-        : 'engineInProcess',
+        : engine === 'pi' ? 'enginePi'
+          : 'engineInProcess',
   )
   return (
     <span style={pill} title={t('description')}>

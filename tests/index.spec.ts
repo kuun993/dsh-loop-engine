@@ -27,6 +27,7 @@ import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
 import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
+import { PiSkillProvider } from '../src/engine-pi/skills.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -599,6 +600,92 @@ describe('apply codex engine', () => {
 
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+    expect(errorSpy).not.toHaveBeenCalled()
+
+    await fiber.dispose()
+  })
+})
+
+describe('apply pi engine', () => {
+  it('mounts the pi factory and forwards the pi driver configuration', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, {
+      patchPath: path,
+      sandboxMode: 'workspace-write',
+      env: { PI_ENV: '1' },
+      model: 'pi-deployment-model',
+      piProvider: 'anthropic',
+      piThinking: 'high',
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeDefined()
+    })
+    const loop = ctx.get('agentLoopPi')!
+    expect(loop.config).toMatchObject({
+      sandboxMode: 'workspace-write',
+      env: { PI_ENV: '1' },
+      model: 'pi-deployment-model',
+      provider: 'anthropic',
+      thinkingLevel: 'high',
+    })
+    // The pi engine registers no commands but does mount its AGENTS.md skill provider.
+    expect(commands.registered).toHaveLength(0)
+    expect(skills.creates).toHaveLength(1)
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(PiSkillProvider)
+    expect(ctx.get('agentLoopCodex')).toBeUndefined()
+
+    await fiber.dispose()
+  })
+
+  it('switches between hosted engines including pi in the same process', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
+    })
+
+    // codex -> pi: the codex fiber unmounts and the pi fiber mounts.
+    await ctx.settings.update(NS_BRANDED, { engine: 'pi' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeDefined()
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopCodex')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('pi')
+
+    // pi -> in-process: the pi fiber unmounts and the block leaves the file.
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+
+    await fiber.dispose()
+  })
+
+  it('mounts the pi factory without a config-boundary disposeGraceMs check', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeDefined()
     })
     expect(errorSpy).not.toHaveBeenCalled()
 

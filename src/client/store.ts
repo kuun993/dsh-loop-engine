@@ -20,7 +20,7 @@ export interface LoopEngineState {
 export function decodeLoopEngine(section: unknown): { engine: LoopEngineId } | undefined {
   if (typeof section !== 'object' || section === null || Array.isArray(section)) return undefined
   const engine = (section as { engine?: unknown }).engine
-  return engine === 'in-process' || engine === 'claude-code' || engine === 'codex'
+  return engine === 'in-process' || engine === 'claude-code' || engine === 'codex' || engine === 'pi'
     ? { engine }
     : undefined
 }
