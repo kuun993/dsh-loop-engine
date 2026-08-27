@@ -183,7 +183,9 @@ describe('PiAgent turn mapping', () => {
 
       expect(mock.client.newSession).toHaveBeenCalled()
       const promptText = String(mock.client.prompt.mock.calls[0]?.[0])
-      expect(promptText).toContain('You are the deployment.')
+      // Pi owns its system prompt natively; the driver sends only the serialized
+      // history (no dsh system-prompt assembly, which would pull dsh tools).
+      expect(promptText).not.toContain('You are the deployment.')
       expect(promptText).toContain('<user>')
       expect(promptText).toContain('hi')
     } finally {
@@ -417,6 +419,43 @@ describe('PiAgent turn mapping', () => {
       await agent.whenIdle()
       const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
+      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps consuming past a retrying agent_end and settles on the follow-up', async () => {
+    const ctx = await harness()
+    try {
+      // A willRetry agent_end is not terminal: the agent comes back (auto-retry
+      // then a fresh agent run) and only settles on the eventual agent_settled.
+      mock.eventsYield.mockReturnValue([
+        { type: 'agent_start' },
+        { type: 'turn_start' },
+        { type: 'message_start', message: assistantMessage('first') },
+        messageDelta({ type: 'text_delta', contentIndex: 0, delta: 'first' }),
+        { type: 'message_end', message: assistantMessage('first') },
+        turnEnd(assistantMessage('first')),
+        { type: 'agent_end', willRetry: true },
+        { type: 'auto_retry_start', attempt: 1 },
+        { type: 'auto_retry_end', success: true, attempt: 1 },
+        { type: 'agent_start' },
+        { type: 'turn_start' },
+        { type: 'message_start', message: assistantMessage('retried') },
+        messageDelta({ type: 'text_delta', contentIndex: 0, delta: 'retried' }),
+        { type: 'message_end', message: assistantMessage('retried') },
+        turnEnd(assistantMessage('retried')),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('retry-settle-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(2)
       expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
