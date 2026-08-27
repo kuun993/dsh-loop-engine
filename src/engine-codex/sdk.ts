@@ -4,7 +4,7 @@
  * `codex app-server` child process directly — but `disposeGraceMs` remains a
  * deployment knob for symmetry with the Claude Code driver.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex/sdk
+ * @module @kuun993/dsh-loop-engine/engine-codex/sdk
  */
 
 /** Grace in milliseconds kept for config symmetry with the Claude Code driver. */

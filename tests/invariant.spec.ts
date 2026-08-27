@@ -43,7 +43,7 @@ describe('loop-engine invariant companion', () => {
       apply: applyInvariant,
     })
     await mounted
-    expect(registry.registered).toEqual(['@deepseek-ai/dsh-loop-engine'])
+    expect(registry.registered).toEqual(['@kuun993/dsh-loop-engine'])
 
     await mounted.dispose()
     await fiber.dispose()

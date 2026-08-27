@@ -11,7 +11,7 @@ dsh web 的模型选择器有两个入口，均由主仓 `packages/client/ui-mod
 
 两者都走 `session.models` / `session.selectModel` RPC（`packages/host/apiproxy/src/api-proxy.ts`）。
 
-当会话由 `@deepseek-ai/dsh-loop-engine` 的 **claude-code 引擎**驱动时，实际推理模型由 Claude Code 原生决定（或由插件 `cordis.yml` 的 `model` 配置项钉死）。模型选择器对该引擎**没有任何生效路径**：
+当会话由 `@kuun993/dsh-loop-engine` 的 **claude-code 引擎**驱动时，实际推理模型由 Claude Code 原生决定（或由插件 `cordis.yml` 的 `model` 配置项钉死）。模型选择器对该引擎**没有任何生效路径**：
 
 - `selectModel` 只把选择写进 api-proxy 内存态（`selectionFor(agent)`）和默认选择持久化，claude 驱动从不读取；
 - 唯一的影响是会话创建时 api-proxy 把默认选择塞进 `agentOptions.model`，被 claude 驱动的 request-header 日志当作模型标签记录——**误导且无意义**（插件已在 0.1.1-rc.2 之后修复为忽略该值）。

@@ -7,7 +7,7 @@
  * (no spawn injection seam), so this loop deliberately does not inject the dsh
  * subprocess service.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex
+ * @module @kuun993/dsh-loop-engine/engine-codex
  */
 
 import { FiberState, Service } from '@deepseek-ai/cordis'

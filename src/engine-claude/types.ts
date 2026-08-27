@@ -1,7 +1,7 @@
 /**
  * Public types of the Claude Code loop driver. Types only — no runtime code.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-claude/types
+ * @module @kuun993/dsh-loop-engine/engine-claude/types
  */
 
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'

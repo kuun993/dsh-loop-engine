@@ -4,7 +4,7 @@
  * `CLAUDE.md` file, using the same YAML-frontmatter + markdown format as DSH
  * skills.
  *
- * @module @deepseek-ai/dsh-loop-engine/skills
+ * @module @kuun993/dsh-loop-engine/skills
  */
 
 import { readFile, readdir, stat } from 'node:fs/promises'

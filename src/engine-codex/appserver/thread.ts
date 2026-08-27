@@ -3,7 +3,7 @@
  * and its turn-level streaming, producing dsh-native events from the
  * app-server's JSON-RPC notifications.
  *
- * @module @deepseek-ai/dsh-loop-engine/engine-codex/appserver/thread
+ * @module @kuun993/dsh-loop-engine/engine-codex/appserver/thread
  */
 
 import type { AppServerClient } from './client.ts'
