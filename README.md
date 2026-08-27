@@ -12,8 +12,8 @@ changing anything in the main repository.
   and survives profile edits.
 - **Claude Code execution.** The Claude Code CLI drives agents, with token
   streaming forwarded into the session log.
-- **Codex execution.** The OpenAI Codex CLI drives agents through
-  `@openai/codex-sdk`, one stateless thread per step.
+- **Codex execution.** The driver spawns `codex app-server` and streams its
+  token-level deltas into the session log, one turn per step.
 - **Extensible.** Adding an engine is one driver module plus one entry in the
   settings schema.
 - **Zero main-repo changes.** Installed purely as a profile dependency plus one
@@ -85,21 +85,29 @@ changing anything in the main repository.
    `cordis.patch.yml`, drop the dependency from `package.json`, then
    `pnpm install` and restart `dsh web`.
 
-### Codex engine limitations
+### Codex engine details
 
-The Codex SDK differs from the Claude Agent SDK in ways the driver surfaces
-honestly:
+The driver bypasses the `@openai/codex-sdk` (which only exposes whole-item
+output) and spawns `codex app-server` as a child process, speaking JSON-RPC
+over stdio. The app-server streams **token-level deltas** via
+`item/agentMessage/delta` and `item/reasoning/summaryTextDelta`, so thinking
+and replies paint progressively in the session — like the Claude Code engine.
 
-- **No incremental streaming.** Codex emits whole items, not token deltas, so
-  each agent message appears in the session as one full-text chunk.
+- **Streaming.** Reasoning deltas and agent-message deltas are forwarded live
+  as `assistant/chunk` events; durable messages land at the correct step
+  boundaries with usage attached on turn completion.
+- **Skills.** The Codex engine registers a skill provider that surfaces
+  `AGENTS.md` (project root and `~/.codex/AGENTS.md`) through the same dsh
+  skill-injection seam as Claude skills.
 - **No interactive tool approval.** Permissions are the declarative
   `sandboxMode` + `approvalPolicy` pair resolved per query from the session's
   permission knobs (or pinned via the plugin's `sandboxMode`/`approvalPolicy`
   config). A session `ask` policy maps to `on-request`, whose CLI prompt
   degrades to a denial in the unattended dsh runtime.
-- **No dsh subprocess sandbox integration.** The Codex SDK spawns its own CLI
-  binary; the dsh subprocess service (and its sandbox) does not wrap it.
-- **No engine-specific commands or skills** are registered for Codex in this
+- **No dsh subprocess sandbox integration.** The driver spawns `codex
+  app-server` itself; the dsh subprocess service (and its sandbox) does not
+  wrap it.
+- **No engine-specific slash commands** are registered for Codex in this
   version.
 
 ## License

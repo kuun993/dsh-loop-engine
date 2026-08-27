@@ -6,7 +6,7 @@
 
 - **引擎由设置决定,而非改代码。** 在设置页选 `in-process`(默认)、`claude-code` 或 `codex`,选择持久保存,编辑 profile 也不丢失。
 - **Claude Code 执行。** 由 Claude Code CLI 驱动 agent,并把 token 流式转发进会话日志。
-- **Codex 执行。** 由 OpenAI Codex CLI 通过 `@openai/codex-sdk` 驱动 agent,每一步一个无状态线程。
+- **Codex 执行。** 驱动 spawn `codex app-server` 并把其 token 级增量流式转发进会话日志,每一步一个 turn。
 - **可扩展。** 新增引擎只需加一个驱动模块 + 设置 schema 里加一个枚举值。
 - **零主仓改动。** 仅作为 profile 依赖 + 一行组合配置安装。
 
@@ -64,14 +64,15 @@
 3. 引擎之间切换在**重启 `dsh web` 后生效**;切回默认时选择 **In-process** 并再次重启即可。
 4. 卸载插件:从 `cordis.patch.yml` 删除 `loop-engine` 行,并从 `package.json` 移除依赖,然后 `pnpm install` 并重启 `dsh web`。
 
-### Codex 引擎的限制
+### Codex 引擎的实现细节
 
-Codex SDK 与 Claude Agent SDK 的差异,驱动如实呈现:
+驱动绕过 `@openai/codex-sdk`(它只输出整条 item),改为 spawn `codex app-server` 子进程,通过 stdio 走 JSON-RPC。app-server 会流式输出 **token 级增量**(`item/agentMessage/delta` 与 `item/reasoning/summaryTextDelta`),因此思考与回复会在会话里逐步呈现——与 Claude Code 引擎一致。
 
-- **无增量流式。** Codex 以整条 item 为单位产出,没有 token 增量,因此每条 agent 消息在会话里以一整段文本块出现。
+- **流式。** 推理增量与回复增量实时转发为 `assistant/chunk` 事件;持久化消息在正确的 step 边界落盘,turn 结束时附加用量。
+- **技能。** Codex 引擎注册了一个技能提供者,把 `AGENTS.md`(项目根与 `~/.codex/AGENTS.md`)通过与 Claude 技能相同的 dsh 技能注入接口暴露出来。
 - **无交互式工具审批。** 权限是声明式的 `sandboxMode` + `approvalPolicy` 组合,每次查询按会话的权限开关解析(也可通过插件的 `sandboxMode`/`approvalPolicy` 配置固定)。会话的 `ask` 策略映射为 `on-request`,其 CLI 交互提示在无人值守的 dsh 运行时会退化为拒绝。
-- **不接入 dsh subprocess 沙箱。** Codex SDK 自行 spawn 自己的 CLI 二进制,dsh 的 subprocess 服务(及其沙箱)不会包裹它。
-- **本版本不为 Codex 注册引擎专属命令或技能。**
+- **不接入 dsh subprocess 沙箱。** 驱动自行 spawn `codex app-server`,dsh 的 subprocess 服务(及其沙箱)不会包裹它。
+- **本版本不为 Codex 注册引擎专属斜杠命令。**
 
 ## License
 

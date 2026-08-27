@@ -329,7 +329,7 @@ async function tryParseSkill(path: string): Promise<ParsedSkill | undefined> {
   }
 }
 
-async function findProjectRoot(cwd: string): Promise<string> {
+export async function findProjectRoot(cwd: string): Promise<string> {
   let current = cwd
   while (true) {
     try {
