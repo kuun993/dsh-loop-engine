@@ -31,7 +31,7 @@
 
    ```json
    "dependencies": {
-     "@kuun993/dsh-loop-engine": "1.0.0-rc1",
+     "@kuun993/dsh-loop-engine": "1.0.0-rc2",
      "...保留其余依赖"
    }
    ```
