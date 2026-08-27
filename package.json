@@ -5,6 +5,7 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": "github:kuun993/dsh-loop-engine",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -38,6 +39,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",

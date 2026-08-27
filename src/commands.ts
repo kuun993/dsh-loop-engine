@@ -6,7 +6,7 @@
  * processing happens inside the Claude Agent SDK — so the UI shows the
  * commands in the slash menu and the handler returns success immediately.
  *
- * @module @deepseek-ai/dsh-loop-engine/commands
+ * @module @kuun993/dsh-loop-engine/commands
  */
 
 /** Minimal shape of a DSH command definition (avoiding a direct peer dep on @deepseek-ai/dsh-commands). */

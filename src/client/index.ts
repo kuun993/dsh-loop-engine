@@ -3,7 +3,7 @@
  * page under the settings section slot once the settings shell declares it,
  * binding one store to the duplicated `agent-loop-engine` settings scope.
  * Export discipline: packages/client/AGENTS.md.
- * @module @deepseek-ai/dsh-loop-engine/client
+ * @module @kuun993/dsh-loop-engine/client
  */
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
