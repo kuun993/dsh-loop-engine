@@ -15,6 +15,8 @@ export interface LoopEngineKey {
   engineClaudeCode: string
   /** Option label: the Codex CLI driver. */
   engineCodex: string
+  /** Option label: the Pi CLI driver. */
+  enginePi: string
   /** Unavailable-state message. */
   unavailable: string
   /** Notice shown when the selection would interrupt running agents. */
@@ -40,6 +42,7 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   engineInProcess: '进程内引擎（默认）',
   engineClaudeCode: 'Claude Code CLI',
   engineCodex: 'Codex CLI',
+  enginePi: 'Pi CLI',
   unavailable: '循环引擎设置不可用',
   switchNotice: '切换引擎会中断当前使用旧引擎运行中的会话。',
   saving: '保存中…',
@@ -57,6 +60,7 @@ export const en: Record<keyof LoopEngineKey, string> = {
   engineInProcess: 'In-process engine (default)',
   engineClaudeCode: 'Claude Code CLI',
   engineCodex: 'Codex CLI',
+  enginePi: 'Pi CLI',
   unavailable: 'Loop engine settings are unavailable',
   switchNotice: 'Switching engines interrupts sessions currently running on the previous engine.',
   saving: 'Saving…',

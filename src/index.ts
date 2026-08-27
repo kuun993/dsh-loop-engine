@@ -30,6 +30,7 @@ import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
+import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
 import {
   applyManagedBlock,
@@ -44,6 +45,7 @@ import {
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from './commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
 import { CodexSkillProvider } from './engine-codex/skills.ts'
+import { PiSkillProvider } from './engine-pi/skills.ts'
 
 export const name = 'loop-engine'
 
@@ -73,6 +75,10 @@ export interface Config extends ClaudeCodeConfig {
   sandboxMode?: CodexSandboxMode
   /** Pinned Codex approval policy; falls back to the session's dsh permission knobs. */
   approvalPolicy?: CodexApprovalPolicy
+  /** LLM provider for the Pi RPC child (`--provider`). */
+  piProvider?: string
+  /** Thinking/reasoning level for the Pi RPC child, appended to its `--model`. */
+  piThinking?: string
 }
 
 /**
@@ -98,6 +104,8 @@ export const Config: z<Config> = z.object({
   maxTurns: z.number(),
   sandboxMode: z.union(CODEX_SANDBOX_MODES.map(mode => z.const(mode))),
   approvalPolicy: z.union(CODEX_APPROVAL_POLICIES.map(policy => z.const(policy))),
+  piProvider: z.string(),
+  piThinking: z.string(),
 })
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
@@ -192,6 +200,17 @@ function codexConfig(config: Config): CodexConfig {
     ...config.approvalPolicy === undefined ? {} : { approvalPolicy: config.approvalPolicy },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.model === undefined ? {} : { model: config.model },
+  }
+}
+
+/** Forward the engine-driver fields of the composition entry to the Pi loop. */
+function piConfig(config: Config): PiConfig {
+  return {
+    ...config.piProvider === undefined ? {} : { provider: config.piProvider },
+    ...config.model === undefined ? {} : { model: config.model },
+    ...config.piThinking === undefined ? {} : { thinkingLevel: config.piThinking },
+    ...config.env === undefined ? {} : { env: config.env },
+    ...config.sandboxMode === undefined ? {} : { sandboxMode: config.sandboxMode },
   }
 }
 
@@ -330,10 +349,23 @@ export function apply(ctx: Context, config: Config): void {
     hostFactory('codex', () => ctx.plugin(CodexLoop, codexConfig(config)))
   }
 
+  /** Mount the Pi loop factory plus its AGENTS.md skill provider. */
+  const mountPi = (): void => {
+    // Register the Pi skill provider so AGENTS.md instruction files are
+    // available through the same dsh skill-injection seam as Claude/Codex.
+    const skills = ctx.get('skills') as SkillsService | undefined
+    if (skills !== undefined) {
+      skillDisposer = skills.registerProvider(control => new PiSkillProvider(control))
+    }
+
+    hostFactory('pi', () => ctx.plugin(PiLoop, piConfig(config)))
+  }
+
   /** Mount the factory of a non-default engine; `in-process` mounts nothing here. */
   const mountEngine = (engine: LoopEngineId): void => {
     if (engine === 'claude-code') mountClaude()
     else if (engine === 'codex') mountCodex()
+    else if (engine === 'pi') mountPi()
   }
 
   const unmountEngine = (): void => {

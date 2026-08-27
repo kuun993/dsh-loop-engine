@@ -46,6 +46,7 @@ const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] =
   { value: 'in-process', key: 'engineInProcess' },
   { value: 'claude-code', key: 'engineClaudeCode' },
   { value: 'codex', key: 'engineCodex' },
+  { value: 'pi', key: 'enginePi' },
 ]
 
 /** Locale key of one engine's option label. */
@@ -53,6 +54,7 @@ function engineLabelKey(engine: LoopEngineId): keyof typeof en {
   switch (engine) {
     case 'claude-code': return 'engineClaudeCode'
     case 'codex': return 'engineCodex'
+    case 'pi': return 'enginePi'
     default: return 'engineInProcess'
   }
 }
