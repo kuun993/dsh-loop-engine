@@ -536,11 +536,6 @@ describe('apply codex engine', () => {
       approvalPolicy: 'on-failure',
       env: { CX_ENV: '1' },
       model: 'gpt-5.2-codex',
-      apiKey: 'sk-x',
-      baseUrl: 'https://codex.example.test/v1',
-      networkAccessEnabled: true,
-      disposeGraceMs: 1000,
-      maxTurns: 4,
     })
     await vi.waitFor(() => {
       expect(ctx.get('agentLoopCodex')).toBeDefined()
@@ -551,11 +546,6 @@ describe('apply codex engine', () => {
       approvalPolicy: 'on-failure',
       env: { CX_ENV: '1' },
       model: 'gpt-5.2-codex',
-      apiKey: 'sk-x',
-      baseUrl: 'https://codex.example.test/v1',
-      networkAccessEnabled: true,
-      disposeGraceMs: 1000,
-      maxTurns: 4,
     })
     // The codex engine registers no commands but does mount its AGENTS.md skill provider.
     expect(commands.registered).toHaveLength(0)
@@ -597,18 +587,20 @@ describe('apply codex engine', () => {
     await fiber.dispose()
   })
 
-  it('reports the failure when the codex factory fails to start', async () => {
+  it('mounts the codex factory without a config-boundary disposeGraceMs check', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     await writeFile(path, applyManagedBlock('# seed\n', 'codex'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'codex' } })
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    // The codex config boundary no longer validates disposeGraceMs (it was a
+    // dead knob), so a non-finite value is accepted and the factory mounts.
     apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
 
     await vi.waitFor(() => {
-      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('codex factory failed to start'))).toBe(true)
+      expect(ctx.get('agentLoopCodex')).toBeDefined()
     })
-    expect(ctx.get('agentLoopCodex')).toBeUndefined()
+    expect(errorSpy).not.toHaveBeenCalled()
 
     await fiber.dispose()
   })

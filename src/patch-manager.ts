@@ -16,11 +16,11 @@
  *
  * `in-process` renders an absent block (the base bundle's `agent-loop` row
  * stays active and supplies the factory), so switching back removes the span
- * entirely. Engine ids other than `in-process` render the same disable block
- * — the specific engine (claude-code, codex) is chosen by the stored
- * setting, and the block only records that a non-default engine owns the
- * factory. All functions here are pure string transforms — file I/O and
- * durability live in the plugin's apply.
+ * entirely. Any other engine renders the same disable block, and the begin
+ * marker carries the specific engine id (`# -- dsh-loop-engine managed block:
+ * claude-code --`) so `currentEngineOf` can read which non-default engine owns
+ * the slot from the file alone. All functions here are pure string transforms —
+ * file I/O and durability live in the plugin's apply.
  *
  * @module @kuun993/dsh-loop-engine/patch-manager
  */

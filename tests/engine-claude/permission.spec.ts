@@ -4,12 +4,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import {
-  approvalReason,
-  resolveSessionPermission,
-  sessionApprovalPolicy,
-  sessionSandboxMode,
-} from '../../src/engine-claude/permission.ts'
+import { approvalReason, resolveSessionPermission } from '../../src/engine-claude/permission.ts'
+import { sessionApprovalPolicy, sessionSandboxMode } from '../../src/driver-core/permission-knobs.ts'
 
 /** One structural log event. */
 function event(type: string, data: unknown): { type: string; data: unknown } {
