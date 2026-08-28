@@ -1,6 +1,8 @@
 /**
- * Unit tests for the CodexSkillProvider: AGENTS.md discovery from the project
- * root and user home, and content loading for matched candidates.
+ * Unit tests for the CodexSkillProvider: AGENTS.md discovery walking from the
+ * project cwd to the git root, the user home file, and content loading for
+ * matched candidates.
+ * @module tests/engine-codex/skills
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -49,6 +51,7 @@ describe('CodexSkillProvider.list', () => {
       description: 'Codex project/user instructions (AGENTS.md)',
       provider: 'codex',
       rank: 140,
+      path: join(project, 'AGENTS.md'),
     })
   })
 
@@ -70,17 +73,24 @@ describe('CodexSkillProvider.list', () => {
     const provider = new CodexSkillProvider(control())
     const candidates = await provider.list({ cwd: project } satisfies SkillLookupOptions)
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]).toMatchObject({ rank: 160 })
+    expect(candidates[0]).toMatchObject({ rank: 160, path: join(home, '.codex', 'AGENTS.md') })
   })
 
-  it('walks up to the git root for the project AGENTS.md', async () => {
+  it('merges context files from every directory between the cwd and the git root', async () => {
     await mkdir(join(project, '.git'), { recursive: true })
-    await mkdir(join(project, 'sub', 'dir'), { recursive: true })
+    await mkdir(join(project, 'sub'), { recursive: true })
     await writeFile(join(project, 'AGENTS.md'), '# Root instructions')
+    await writeFile(join(project, 'sub', 'AGENTS.md'), '# Sub instructions')
     const provider = new CodexSkillProvider(control())
-    const candidates = await provider.list({ cwd: join(project, 'sub', 'dir') } satisfies SkillLookupOptions)
+    const candidates = await provider.list({ cwd: join(project, 'sub', 'deep') } satisfies SkillLookupOptions)
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]?.path).toBe(join(project, 'AGENTS.md'))
+    // The nearest file becomes the candidate's display path; both are kept.
+    const candidate = candidates[0]!
+    expect(candidate.path).toBe(join(project, 'sub', 'AGENTS.md'))
+    expect((candidate.locator as { paths: string[] }).paths).toEqual([
+      join(project, 'sub', 'AGENTS.md'),
+      join(project, 'AGENTS.md'),
+    ])
   })
 
   it('lists only user-level AGENTS.md when no cwd is provided', async () => {
@@ -101,17 +111,20 @@ describe('CodexSkillProvider.list', () => {
 })
 
 describe('CodexSkillProvider.get', () => {
-  it('loads the AGENTS.md content for a matched candidate', async () => {
-    await writeFile(join(project, 'AGENTS.md'), '# Instructions\nBody text.')
+  it('concatenates the merged AGENTS.md contents for a project candidate', async () => {
+    await mkdir(join(project, '.git'), { recursive: true })
+    await mkdir(join(project, 'sub'), { recursive: true })
+    await writeFile(join(project, 'AGENTS.md'), '# Root instructions')
+    await writeFile(join(project, 'sub', 'AGENTS.md'), '# Sub instructions')
     const provider = new CodexSkillProvider(control())
-    const candidates = await provider.list({ cwd: project } satisfies SkillLookupOptions)
-    const definition = await provider.get(candidates[0] as SkillCandidate, { cwd: project } satisfies SkillLookupOptions)
+    const candidates = await provider.list({ cwd: join(project, 'sub') } satisfies SkillLookupOptions)
+    const definition = await provider.get(candidates[0] as SkillCandidate, { cwd: join(project, 'sub') } satisfies SkillLookupOptions)
     expect(definition).toMatchObject({
       name: 'agents-md',
       provider: 'codex',
-      content: '# Instructions\nBody text.',
+      content: '# Sub instructions\n\n# Root instructions',
     })
-    expect(definition?.resourceBase).toEqual({ kind: 'file', path: join(project, 'AGENTS.md') })
+    expect(definition?.resourceBase).toEqual({ kind: 'file', path: join(project, 'sub', 'AGENTS.md') })
   })
 
   it('returns undefined when the file is gone', async () => {
