@@ -15,6 +15,8 @@ import { LoopEngineSection } from './LoopEngineSection.tsx'
 import type { LoopEngineSectionInjected } from './LoopEngineSection.tsx'
 import { LoopEngineBadge } from './LoopEngineBadge.tsx'
 import type { LoopEngineBadgeInjected } from './LoopEngineBadge.tsx'
+import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
+import type { LoopEngineComposerSelectInjected } from './LoopEngineComposerSelect.tsx'
 import { LoopEngineStore, decodeLoopEngine } from './store.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
@@ -22,6 +24,7 @@ import type { LoopEngineSettings } from '../settings.ts'
 
 export type { LoopEngineSectionInjected, LoopEngineSectionProps } from './LoopEngineSection.tsx'
 export type { LoopEngineBadgeInjected, LoopEngineBadgeProps } from './LoopEngineBadge.tsx'
+export type { LoopEngineComposerSelectInjected, LoopEngineComposerSelectProps } from './LoopEngineComposerSelect.tsx'
 export type { LoopEngineState } from './store.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -91,5 +94,27 @@ export function apply(ctx: ClientContext): void {
         inject: badgeInjected,
       }, LoopEngineBadge)
     }, 'loop-engine: session header engine badge')
+  })
+
+  // The composer's loop-engine picker: registered at the tool-row seat beside
+  // the model select so the engine is switchable in the chat page, not only in
+  // settings. Same controller/store, so all three surfaces stay in sync. The
+  // dependency on `conversation` (like the header badge) ensures ui-conversation
+  // has declared the `conversation.input.right` seat before this entry lands.
+  ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
+    const composerInjected = (): LoopEngineComposerSelectInjected => ({
+      controller,
+      hooks: { snapshot: controller.store },
+      t,
+    })
+    scope.effect(() => {
+      return scope.slots.register({
+        name: 'conversation.input.right',
+        id: 'loop-engine',
+        order: 0,
+        locale: NS,
+        inject: composerInjected,
+      }, LoopEngineComposerSelect)
+    }, 'loop-engine: composer engine select')
   })
 }
