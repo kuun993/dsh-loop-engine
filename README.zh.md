@@ -25,24 +25,11 @@ dsh plugin --profile web add dsh-loop-engine
 
 ### 环境要求
 
-- dsh `0.1.1-rc.2`(或 peer 包版本匹配的构建)。
 - 使用 Claude Code 引擎时需要本机已安装并登录 Claude Code CLI。
 - 使用 Codex 引擎时需要完成认证:本机执行过 `codex login`,或配置 `CODEX_API_KEY` 环境变量。
 - 使用 Pi 引擎时需要以 `pi` 要求的方式完成认证(其自身的 `~/.pi/agent/auth.json`,或提供方的 API-key 环境变量,如 `ANTHROPIC_API_KEY`)。
-- 当 harness 以**源码方式**运行(如在 `deepseek-harness` 仓库内执行 `pnpm dsh`)时,profile 需要把本插件的 harness peer 包解析到主仓 **源码**,通过 profile 的 `shims/` 目录里的本地 `file:` 垫片实现;正式部署(单一发布版 `node_modules`)则无需垫片。
 
 > 切换引擎会重写 `cordis.patch.yml` 中一小段受管理的内容,文件里你写的其它部分都会保留,只改动插件自己的区间。
-
-### 本地开发
-
-要加载本地 checkout 而非已发布包时,用 `file:` 引用添加(需先构建——本包没有 `prepare` 脚本,pnpm 不会替你构建):
-
-```sh
-cd /path/to/dsh-loop-engine && pnpm install && pnpm run build
-dsh plugin --profile web add file:/path/to/dsh-loop-engine
-```
-
-或者,在 checkout 目录内直接 `dsh plugin --profile web add .`
 
 ## 使用方法
 
