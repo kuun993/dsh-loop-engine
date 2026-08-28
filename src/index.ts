@@ -42,7 +42,7 @@ import {
   type LoopEngineId,
   type LoopEngineSettings,
 } from './settings.ts'
-import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from './commands.ts'
+import { CLAUDE_CODE_COMMANDS, discoverUserSlashCommands, type CommandDefinition } from './commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
 import { CodexSkillProvider } from './engine-codex/skills.ts'
 import { PiSkillProvider } from './engine-pi/skills.ts'
@@ -317,12 +317,19 @@ export function apply(ctx: Context, config: Config): void {
     if (engineFiber !== undefined) return
     /* v8 ignore stop */
 
-    // Register Claude Code commands alongside the DSH-native ones.
+    // Register Claude Code slash commands alongside the DSH-native ones. The
+    // handlers forward the raw `/name` line to the receiving agent, where the
+    // CLI expands it natively; a name collision with a dsh-native command is
+    // skipped with a warning instead of failing the mount loud.
     const commands = ctx.get('commands') as CommandsService | undefined
     if (commands !== undefined) {
       const disposers: (() => void)[] = []
-      for (const cmd of CLAUDE_CODE_COMMANDS) {
-        disposers.push(commands.register(cmd))
+      for (const command of [...CLAUDE_CODE_COMMANDS, ...discoverUserSlashCommands()]) {
+        try {
+          disposers.push(commands.register(command))
+        } catch (error: unknown) {
+          ctx.logger.warn(`loop-engine: skip claude-code command /${command.name}: ${String(error)}`)
+        }
       }
       commandDisposers = disposers
     }
@@ -349,10 +356,11 @@ export function apply(ctx: Context, config: Config): void {
     hostFactory('codex', () => ctx.plugin(CodexLoop, codexConfig(config)))
   }
 
-  /** Mount the Pi loop factory plus its AGENTS.md skill provider. */
+  /** Mount the Pi loop factory plus its AGENTS.md + SKILL.md skill provider. */
   const mountPi = (): void => {
-    // Register the Pi skill provider so AGENTS.md instruction files are
-    // available through the same dsh skill-injection seam as Claude/Codex.
+    // Register the Pi skill provider so AGENTS.md/CLAUDE.md context files and
+    // `skills/` catalogs are available through the same dsh skill-injection
+    // seam as Claude/Codex.
     const skills = ctx.get('skills') as SkillsService | undefined
     if (skills !== undefined) {
       skillDisposer = skills.registerProvider(control => new PiSkillProvider(control))
