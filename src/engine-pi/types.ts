@@ -7,7 +7,7 @@
  * either wraps the whole `pi --mode rpc` child in the dsh subprocess sandbox or
  * prunes its `--tools` accordingly.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/types
+ * @module dsh-loop-engine/engine-pi/types
  */
 
 /** Pi sandbox stances the driver can resolve, mapped from the dsh session knobs. */

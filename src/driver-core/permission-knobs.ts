@@ -4,7 +4,7 @@
  * `approval/policy` events (pinned at creation, re-recorded on every switch)
  * into per-query permission decisions; the knob readers are engine-free.
  *
- * @module @kuun993/dsh-loop-engine/driver-core/permission-knobs
+ * @module dsh-loop-engine/driver-core/permission-knobs
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'

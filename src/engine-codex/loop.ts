@@ -7,7 +7,7 @@
  * (no spawn injection seam), so this loop deliberately does not inject the dsh
  * subprocess service.
  *
- * @module @kuun993/dsh-loop-engine/engine-codex
+ * @module dsh-loop-engine/engine-codex
  */
 
 import { Service } from '@deepseek-ai/cordis'

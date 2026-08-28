@@ -9,7 +9,7 @@
  *     interactive prompt degrades to a denial in the unattended dsh runtime),
  *   - anything else fails closed → `read-only` + `never`.
  *
- * @module @kuun993/dsh-loop-engine/engine-codex/permission
+ * @module dsh-loop-engine/engine-codex/permission
  */
 
 import type { PermissionEvent } from '../driver-core/permission-knobs.ts'

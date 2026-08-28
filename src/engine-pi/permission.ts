@@ -13,7 +13,7 @@
  *     callback, so interactive approval can only become a rejection);
  *   - anything else fails closed → `read-only`.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/permission
+ * @module dsh-loop-engine/engine-pi/permission
  */
 
 import type { PermissionEvent } from '../driver-core/permission-knobs.ts'

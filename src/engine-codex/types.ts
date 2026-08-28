@@ -1,7 +1,7 @@
 /**
  * Public types of the Codex loop driver. Types only — no runtime code.
  *
- * @module @kuun993/dsh-loop-engine/engine-codex/types
+ * @module dsh-loop-engine/engine-codex/types
  */
 
 /** Codex CLI sandbox modes, as spoken by the app-server `sandbox` field. */
