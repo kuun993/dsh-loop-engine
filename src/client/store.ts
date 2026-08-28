@@ -12,24 +12,28 @@ import type { LoopEngineId } from '../settings.ts'
 export interface LoopEngineState {
   status: 'loading' | 'ready' | 'unavailable' | 'saving'
   engine: LoopEngineId
+  showInComposer: boolean
   writable: boolean
   error: string | null
 }
 
-/** Narrow a wire section to the stored engine id; an invalid one reads default. */
-export function decodeLoopEngine(section: unknown): { engine: LoopEngineId } | undefined {
+/** Narrow a wire section to the stored engine id and display toggle; an invalid one reads default. */
+export function decodeLoopEngine(section: unknown): { engine: LoopEngineId; showInComposer: boolean } | undefined {
   if (typeof section !== 'object' || section === null || Array.isArray(section)) return undefined
-  const engine = (section as { engine?: unknown }).engine
-  return engine === 'in-process' || engine === 'claude-code' || engine === 'codex' || engine === 'pi'
-    ? { engine }
-    : undefined
+  const { engine, showInComposer } = section as { engine?: unknown; showInComposer?: unknown }
+  if (engine !== 'in-process' && engine !== 'claude-code' && engine !== 'codex' && engine !== 'pi') {
+    return undefined
+  }
+  // Absent or non-boolean reads true: the composer picker stays visible unless
+  // the setting explicitly clears it.
+  return { engine, showInComposer: showInComposer !== false }
 }
 
 /** Coordinates the settings-backed loop engine selection. */
 export class LoopEngineStore {
   /** uSES-safe state source shared by the registered settings section. */
   readonly store: SnapshotStore<LoopEngineState> = createSnapshotStore<LoopEngineState>({
-    status: 'loading', engine: 'in-process', writable: false, error: null,
+    status: 'loading', engine: 'in-process', showInComposer: true, writable: false, error: null,
   })
 
   private following: (() => void) | undefined
@@ -38,7 +42,7 @@ export class LoopEngineStore {
   /**
    * @param scope - the loop engine settings namespace scope.
    */
-  constructor(private readonly scope: SettingsScope<{ engine: LoopEngineId }>) {}
+  constructor(private readonly scope: SettingsScope<{ engine: LoopEngineId; showInComposer: boolean }>) {}
 
   /** Begin following the bound scope and publish its current answer. */
   load(): void {
@@ -72,6 +76,34 @@ export class LoopEngineStore {
     return landed
   }
 
+  /**
+   * Persist whether the composer shows the engine picker. Success is judged
+   * against the snapshot the write left behind, so a refused write reports
+   * error after its recovery. Unlike {@link setEngine}, landing does not reload
+   * the page — the toggle only changes composer visibility.
+   * @param show - whether the chat page composer reveals the engine picker.
+   * @returns whether the write landed.
+   */
+  async setShowInComposer(show: boolean): Promise<boolean> {
+    this.saving = true
+    this.store.update((state) => { state.status = 'saving'; state.error = null })
+    try {
+      await this.scope.set('showInComposer', show)
+    } finally {
+      this.saving = false
+    }
+    this.derive()
+    const { showInComposer: settled } = this.store.getSnapshot()
+    const landed = settled === show
+    if (!landed) {
+      this.store.update((state) => {
+        state.status = 'unavailable'
+        state.error = 'the loop engine display setting did not persist'
+      })
+    }
+    return landed
+  }
+
   /** Stop following the scope. */
   dispose(): void {
     this.following?.()
@@ -89,14 +121,17 @@ export class LoopEngineStore {
         this.store.update((state) => {
           state.status = 'unavailable'
           state.engine = 'in-process'
+          state.showInComposer = true
           state.error = null
         })
         return
       case 'ready': {
         const engine = scope.value?.engine ?? 'in-process'
+        const showInComposer = scope.value?.showInComposer ?? true
         this.store.update((state) => {
           state.status = 'ready'
           state.engine = engine
+          state.showInComposer = showInComposer
           state.writable = scope.writable
           state.error = null
         })

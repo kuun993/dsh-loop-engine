@@ -395,7 +395,7 @@ export function apply(ctx: Context, config: Config): void {
   // installSettingsSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
-  installSettingsSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: fileEngine }, {
+  installSettingsSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: fileEngine, showInComposer: true }, {
     setSource: (current) => { source = current },
     onChange: () => {
       const next = source!().engine
