@@ -38,7 +38,6 @@ a bundle layer — the package declares `dsh.bundle.patch`, so no manual edit of
 
 ### Requirements
 
-- dsh `0.1.1-rc.2` (or a build whose peer packages match).
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
   the host.
 - For the Codex engine: authenticated either via `codex login` on the host or a
@@ -46,28 +45,10 @@ a bundle layer — the package declares `dsh.bundle.patch`, so no manual edit of
 - For the Pi engine: authenticated the way `pi` expects (its own
   `~/.pi/agent/auth.json` or the provider's API-key environment variable such as
   `ANTHROPIC_API_KEY`).
-- When the harness runs from a **source checkout** (e.g. `pnpm dsh` inside the
-  `deepseek-harness` repository), the profile must resolve this plugin's
-  harness peer packages to the monorepo **sources** via local `file:` shims
-  (the profile's `shims/` directory). A deployed install with one published
-  `node_modules` needs no shims.
 
 > Switching engines rewrites a small managed block in `cordis.patch.yml`.
 > Everything else you wrote in that file is preserved; only the plugin's own
 > span changes.
-
-### Local development
-
-To work against a checkout instead of the published package, add it with a
-`file:` reference (build it first — the package has no `prepare` script, so
-pnpm will not build it for you):
-
-```sh
-cd /path/to/dsh-loop-engine && pnpm install && pnpm run build
-dsh plugin --profile web add file:/path/to/dsh-loop-engine
-```
-
-Or, from inside the checkout: `dsh plugin --profile web add .`
 
 ## Usage
 
