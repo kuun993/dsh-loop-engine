@@ -72,7 +72,8 @@ const CLAUDE_CODE_USER_RANK = 160
 
 // ── Parsing helpers ──
 
-interface ParsedSkill {
+/** One parsed agents-skill standard skill: frontmatter metadata plus the body. */
+export interface ParsedSkill {
   name: string
   description: string
   whenToUse?: string
@@ -152,7 +153,14 @@ function findClosingFrontmatter(raw: string, start: number): { start: number; bo
   /* v8 ignore stop */
 }
 
-function parseSkillFile(raw: string): ParsedSkill | undefined {
+/**
+ * Parse one agents-skill standard file: YAML frontmatter (`name`,
+ * `description`, optional `whenToUse`/`disable-model-invocation`/
+ * `user-invocable`) plus the markdown body.
+ * @param raw - the raw file content.
+ * @returns the parsed skill, or `undefined` when the file is not a skill.
+ */
+export function parseSkillFile(raw: string): ParsedSkill | undefined {
   const parsed = parseFrontmatter(raw)
   if (parsed === undefined) return undefined
   const name = stringField(parsed.data, 'name')
