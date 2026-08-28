@@ -32,10 +32,6 @@ dsh plugin --profile web add dsh-loop-engine
 
 Restart `dsh web`, then open **Settings → Loop engine**.
 
-`dsh plugin add` installs the package into the web profile and registers it as
-a bundle layer — the package declares `dsh.bundle.patch`, so no manual edit of
-`cordis.patch.yml` is needed. It is published on npm as `dsh-loop-engine`.
-
 ### Requirements
 
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
