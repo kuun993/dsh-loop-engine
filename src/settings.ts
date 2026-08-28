@@ -28,11 +28,14 @@ export type LoopEngineId = (typeof LOOP_ENGINE_IDS)[number]
 export interface LoopEngineSettings {
   /** The engine future Agents are created on. */
   engine: LoopEngineId
+  /** Whether the composer's loop engine picker is shown on the chat page. */
+  showInComposer: boolean
 }
 
 /** Schema of the loop engine settings section. */
 export const LOOP_ENGINE_SETTINGS_SCHEMA: z<LoopEngineSettings> = z.object({
   engine: z.union([z.const('in-process'), z.const('claude-code'), z.const('codex'), z.const('pi')]).default('in-process'),
+  showInComposer: z.boolean().default(true),
 })
 
 /** Brand the shared literal through the settings API on the node side. */
