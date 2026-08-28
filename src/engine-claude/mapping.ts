@@ -4,7 +4,7 @@
  * event payloads the driver appends inside its current step, so the mapping
  * stays unit-testable without any SDK process.
  *
- * @module @kuun993/dsh-loop-engine/engine-claude/mapping
+ * @module dsh-loop-engine/engine-claude/mapping
  */
 
 import type {

@@ -15,7 +15,7 @@ import { build } from 'esbuild'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const PACKAGE_ID = '@kuun993/dsh-loop-engine'
+const PACKAGE_ID = 'dsh-loop-engine'
 
 /** Run a command and inherit its streams; exit on failure. */
 function run(command, args) {

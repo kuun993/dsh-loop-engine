@@ -6,7 +6,7 @@
  * the file body, so the dsh skill-injection seam (`/name` gestures) can carry
  * it into the prompt.
  *
- * @module @kuun993/dsh-loop-engine/engine-codex/skills
+ * @module dsh-loop-engine/engine-codex/skills
  */
 
 import { readFile } from 'node:fs/promises'

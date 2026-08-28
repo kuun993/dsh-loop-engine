@@ -1,6 +1,6 @@
 /**
  * Loop engine settings page copy (Chinese product copy; comments in English).
- * @module @kuun993/dsh-loop-engine/client/locales
+ * @module dsh-loop-engine/client/locales
  */
 
 /** Copy keys of the loop engine settings page. */

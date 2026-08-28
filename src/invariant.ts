@@ -7,7 +7,7 @@
  * bundle's `agent-loop` row stays mounted). The companion asserts both against
  * the pure transform, binding the writer's inverse to the reader directly.
  *
- * @module @kuun993/dsh-loop-engine/invariant
+ * @module dsh-loop-engine/invariant
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import {
   renderManagedBlock,
 } from './patch-manager.ts'
 
-const PACKAGE_NAME = '@kuun993/dsh-loop-engine'
+const PACKAGE_NAME = 'dsh-loop-engine'
 
 /** Cordis companion plugin name. */
 export const name = 'loop-engine-invariant'

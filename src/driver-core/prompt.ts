@@ -5,7 +5,7 @@
  * exact projection, so a later replay of the same log derives the identical
  * prompt (Model-visible ⟺ logged bridge).
  *
- * @module @kuun993/dsh-loop-engine/driver-core/prompt
+ * @module dsh-loop-engine/driver-core/prompt
  */
 
 import type {

@@ -3,7 +3,7 @@
  * by `codex app-server generate-ts`, covering only what the driver needs for
  * streaming (initialize, thread/start, turn/start, notifications).
  *
- * @module @kuun993/dsh-loop-engine/engine-codex/appserver/types
+ * @module dsh-loop-engine/engine-codex/appserver/types
  */
 
 // ── JSON-RPC 2.0 envelope ──

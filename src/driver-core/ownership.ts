@@ -7,7 +7,7 @@
  * the session id type, and an AbortController — so the two loop modules share
  * them verbatim.
  *
- * @module @kuun993/dsh-loop-engine/driver-core/ownership
+ * @module dsh-loop-engine/driver-core/ownership
  */
 
 import { FiberState } from '@deepseek-ai/cordis'

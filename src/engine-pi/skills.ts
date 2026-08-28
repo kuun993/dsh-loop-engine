@@ -6,7 +6,7 @@
  * skill-injection seam (`/name` gestures) can carry it into the prompt — the
  * same bridge the codex driver exposes.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/skills
+ * @module dsh-loop-engine/engine-pi/skills
  */
 
 import { readFile } from 'node:fs/promises'

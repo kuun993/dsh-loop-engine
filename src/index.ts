@@ -17,7 +17,7 @@
  * The settings section is seeded from the block so the UI mirrors the file,
  * and a committed settings change writes the block (only when it differs).
  *
- * @module @kuun993/dsh-loop-engine
+ * @module dsh-loop-engine
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'

@@ -5,7 +5,7 @@
  * dsh-loop-engine constructs this factory when the Claude Code engine is
  * selected; this module is a library, not a Cordis plugin entry.
  *
- * @module @kuun993/dsh-loop-engine/engine-claude
+ * @module dsh-loop-engine/engine-claude
  */
 
 import { Service } from '@deepseek-ai/cordis'

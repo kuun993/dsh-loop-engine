@@ -1,5 +1,5 @@
 {
-  "name": "@kuun993/dsh-loop-engine",
+  "name": "dsh-loop-engine",
   "description": "Web-switchable agent loop engine selection for the DeepSeek Harness - out-of-tree plugin (Claude Code / Codex drivers) maintained by @kuun993, zero main-repo changes",
   "version": "1.0.0-rc2",
   "publishConfig": {
@@ -39,7 +39,9 @@
     "test:coverage": "vitest run --coverage"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",
@@ -78,6 +80,12 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh-attachment": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
     "@deepseek-ai/dsh-home-paths": "0.1.1-rc.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.1-rc.2",
     "@deepseek-ai/dsh-subprocess-local": "0.1.1-rc.2",
