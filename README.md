@@ -39,13 +39,21 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 
 ### Engine notes
 
+- The Claude Code driver runs one SDK query per step; its slash commands are
+  bridged into the web menu (built-ins plus user-level `~/.claude/commands/`)
+  and forwarded to the engine, which expands them natively. Project-level
+  `.claude/commands/` files stay engine-side and also work typed directly.
 - The Codex driver runs `codex app-server` and has no interactive tool
   approval — permissions come from the session's `sandboxMode` +
-  `approvalPolicy`.
+  `approvalPolicy`. Its `AGENTS.md` instruction files are surfaced through the
+  dsh skill-injection seam across every directory from the session cwd up to
+  the git root, plus `~/.codex/AGENTS.md`.
 - The Pi driver runs `pi --mode rpc`; Pi has no permission system, so the whole
   child is sandboxed through the dsh subprocess service (default `read-only`).
-- Both stream into the session log and surface `AGENTS.md` through the dsh
-  skill-injection seam.
+  Its context files (`AGENTS.md`/`CLAUDE.md` with `AGENTS.override.md`
+  preferred, plus the user-level file under the pi config dir) and its
+  `skills/` catalogs (`~/.pi/agent/skills/` and `.pi/skills/`) are surfaced
+  through the dsh skill-injection seam.
 
 ## License
 
