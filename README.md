@@ -1,6 +1,6 @@
 # dsh-loop-engine
 
-[![npm version](https://img.shields.io/npm/v/@kuun993/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@kuun993/dsh-loop-engine)
+[![npm version](https://img.shields.io/npm/v/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/dsh-loop-engine)
 
 Switch the agent loop engine of **dsh web** the same way you switch a model: a
 "Loop engine" dropdown in Settings chooses which driver runs your agents — the
@@ -22,9 +22,21 @@ without changing anything in the main repository.
 - **Extensible.** Adding an engine is one driver module plus one entry in the
   settings schema.
 - **Zero main-repo changes.** Installed purely as a profile dependency plus one
-  composition row.
+  bundle layer, with no edits to the main repository.
 
-## Requirements
+## Install
+
+```sh
+dsh plugin --profile web add dsh-loop-engine
+```
+
+Restart `dsh web`, then open **Settings → Loop engine**.
+
+`dsh plugin add` installs the package into the web profile and registers it as
+a bundle layer — the package declares `dsh.bundle.patch`, so no manual edit of
+`cordis.patch.yml` is needed. It is published on npm as `dsh-loop-engine`.
+
+### Requirements
 
 - dsh `0.1.1-rc.2` (or a build whose peer packages match).
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
@@ -40,46 +52,22 @@ without changing anything in the main repository.
   (the profile's `shims/` directory). A deployed install with one published
   `node_modules` needs no shims.
 
-## Configuration
-
-1. Build the plugin:
-
-   ```sh
-   pnpm install && pnpm run build
-   ```
-
-2. Add the dependency in `$DSH_HOME/profiles/web/package.json`:
-
-   ```json
-   "dependencies": {
-     "@kuun993/dsh-loop-engine": "1.0.0-rc2",
-     "...keep existing deps"
-   }
-   ```
-
-   The package is published on npm as `@kuun993/dsh-loop-engine`. For local
-   development, use a `file:` reference to your checkout instead of the version
-   string.
-
-3. Append one composition row in `$DSH_HOME/profiles/web/cordis.patch.yml`:
-
-   ```yaml
-   - insert:
-       - id: loop-engine
-         name: '@kuun993/dsh-loop-engine'
-   ```
-
-4. Install and restart:
-
-   ```sh
-   cd $DSH_HOME/profiles/web && pnpm install
-   ```
-
-   Restart `dsh web` once so the plugin is picked up.
-
 > Switching engines rewrites a small managed block in `cordis.patch.yml`.
 > Everything else you wrote in that file is preserved; only the plugin's own
 > span changes.
+
+### Local development
+
+To work against a checkout instead of the published package, add it with a
+`file:` reference (build it first — the package has no `prepare` script, so
+pnpm will not build it for you):
+
+```sh
+cd /path/to/dsh-loop-engine && pnpm install && pnpm run build
+dsh plugin --profile web add file:/path/to/dsh-loop-engine
+```
+
+Or, from inside the checkout: `dsh plugin --profile web add .`
 
 ## Usage
 
@@ -91,9 +79,8 @@ without changing anything in the main repository.
    - **Pi CLI** — the Pi (earendil-works/pi) driver.
 3. Switching between these applies after restarting `dsh web`. To return
    to the default, pick **In-process** and restart again.
-4. To remove the plugin: delete the `loop-engine` row from
-   `cordis.patch.yml`, drop the dependency from `package.json`, then
-   `pnpm install` and restart `dsh web`.
+4. To remove the plugin: `dsh plugin --profile web remove dsh-loop-engine`, then
+   restart `dsh web`.
 
 ### Codex engine details
 

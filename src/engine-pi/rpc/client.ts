@@ -8,7 +8,7 @@
  * correlates command responses by the optional `id` field while dispatching
  * every non-response line to a buffered event stream.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/rpc/client
+ * @module dsh-loop-engine/engine-pi/rpc/client
  */
 
 import { spawn } from 'node:child_process'

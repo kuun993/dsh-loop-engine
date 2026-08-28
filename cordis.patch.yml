@@ -1,3 +1,3 @@
 - insert:
     - id: loop-engine
-      name: '@kuun993/dsh-loop-engine'
+      name: 'dsh-loop-engine'

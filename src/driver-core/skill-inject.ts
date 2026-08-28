@@ -6,7 +6,7 @@
  * the agent-preset chain. These helpers are pure: they take user messages or a
  * loaded skill and return the injected text, with no session or loop access.
  *
- * @module @kuun993/dsh-loop-engine/driver-core/skill-inject
+ * @module dsh-loop-engine/driver-core/skill-inject
  */
 
 import type { UserMessage } from '@deepseek-ai/dsh-session'

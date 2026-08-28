@@ -8,7 +8,7 @@
  * the whole child is sandboxed by the dsh subprocess seam and its `--tools`
  * are pruned to the resolved stance.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/agent
+ * @module dsh-loop-engine/engine-pi/agent
  */
 
 import type {

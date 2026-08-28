@@ -5,7 +5,7 @@
  * finished a stream into the durable tool/call + tool/result events and folds
  * a finished turn's usage into a TokenUsage.
  *
- * @module @kuun993/dsh-loop-engine/engine-codex/appserver/mapping
+ * @module dsh-loop-engine/engine-codex/appserver/mapping
  */
 
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'

@@ -10,7 +10,7 @@
  * U+2029 are ordinary characters inside JSON strings — so a generic line reader
  * that treats them as newlines is not compliant.
  *
- * @module @kuun993/dsh-loop-engine/engine-pi/rpc/types
+ * @module dsh-loop-engine/engine-pi/rpc/types
  */
 
 // ── Commands (sent to stdin) ──
