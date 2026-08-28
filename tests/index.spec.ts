@@ -4,7 +4,7 @@
  * @module tests/index
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -41,6 +41,20 @@ vi.mock('node:fs', async (importOriginal) => {
 
 const mockedReadFile = vi.mocked(readFile)
 const mockedReadFileSync = vi.mocked(readFileSync)
+
+/** Hoisted home path so the os homedir mock can return it (claude command discovery reads `~/.claude/commands`). */
+const mockHome = vi.hoisted(() => ({ path: '' }))
+
+vi.mock('node:os', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('node:os')>()
+  return { ...mod, homedir: () => mockHome.path }
+})
+
+// Each test gets a fresh empty home, so `discoverUserSlashCommands` in the
+// claude-code mount path is deterministic regardless of the host's dotfiles.
+beforeEach(async () => {
+  mockHome.path = await tempDir()
+})
 
 const NS = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL
 
@@ -358,6 +372,31 @@ describe('apply mount registrations', () => {
     expect(commands.disposers).toHaveLength(CLAUDE_CODE_COMMANDS.length)
     for (const dispose of commands.disposers) expect(dispose).toHaveBeenCalledTimes(1)
     expect(skills.disposer).toHaveBeenCalledTimes(1)
+
+    await fiber.dispose()
+  })
+
+  it('skips a command registration that collides with a dsh-native command', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'claude-code'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    // The first registration (help) collides with an existing dsh-native
+    // command; the mount must skip it with a warning, not fail the engine.
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    commands.register.mockImplementationOnce(() => {
+      throw new Error('command "help" is already registered')
+    })
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(commands.registered).toHaveLength(CLAUDE_CODE_COMMANDS.length - 1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip claude-code command /help'))
+    expect(skills.creates).toHaveLength(1)
 
     await fiber.dispose()
   })
