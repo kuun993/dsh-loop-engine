@@ -1,11 +1,11 @@
 {
-  "name": "dsh-loop-engine",
-  "description": "Web-switchable agent loop engine selection for the DeepSeek Harness - out-of-tree plugin (Claude Code / Codex drivers) maintained by @kuun993, zero main-repo changes",
+  "name": "@vidge/dsh-loop-engine",
+  "description": "Fork of dsh-loop-engine with auto-inherited LLM credentials (Bedrock/Vertex/Anthropic) and cordis 4.0.1 compatibility fix",
   "version": "1.0.0-rc4",
   "publishConfig": {
     "access": "public"
   },
-  "repository": "github:kuun993/dsh-loop-engine",
+  "repository": "github:vidgewong/dsh-loop-engine",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
