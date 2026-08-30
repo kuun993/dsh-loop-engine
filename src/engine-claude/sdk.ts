@@ -70,6 +70,40 @@ export function unattendedDiagnostic(
 }
 
 /**
+ * LLM credential env vars that scrubbedParentEnv() strips (they match
+ * KEY/TOKEN/SECRET) but the Claude Code CLI needs to authenticate.
+ * Explicitly re-inheriting them lets the CLI reuse whatever provider
+ * the dsh host is already authenticated against (Bedrock, Vertex, etc.)
+ * without requiring a separate `claude login`.
+ */
+const INHERITED_LLM_ENV_KEYS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_REGION',
+  'AWS_DEFAULT_REGION',
+  'AWS_PROFILE',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLOUD_ML_REGION',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+] as const
+
+function inheritedLlmCredentials(): Record<string, string> {
+  const creds: Record<string, string> = {}
+  for (const key of INHERITED_LLM_ENV_KEYS) {
+    const value = process.env[key]
+    if (value !== undefined) creds[key] = value
+  }
+  return creds
+}
+
+/**
  * Build the fixed official SDK options for one step's query.
  * @param spec - workspace, environment, process seam, and disposal policy.
  * @param controller - per-query cancellation owner.
@@ -86,6 +120,7 @@ export function claudeQueryOptions(
     cwd: spec.cwd,
     env: {
       ...scrubbedParentEnv(),
+      ...inheritedLlmCredentials(),
       ...spec.env,
     },
     // Emit `stream_event` partial messages so the loop can forward token
@@ -93,7 +128,7 @@ export function claudeQueryOptions(
     // streams those). Without it the SDK yields only complete `assistant`
     // messages, so the surface renders each response all at once.
     includePartialMessages: true,
-    persistSession: false,
+    persistSession: true,
     disallowedTools: spec.permissionMode === 'plan'
       ? ['AskUserQuestion', 'ExitPlanMode']
       : ['AskUserQuestion'],

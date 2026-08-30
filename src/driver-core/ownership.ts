@@ -10,15 +10,21 @@
  * @module dsh-loop-engine/driver-core/ownership
  */
 
-import { FiberState } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
+// Numeric fiber state constants matching @deepseek-ai/cordis internals.
+// cordis 4.0.1 does not export FiberState as a named binding; these values
+// are read from Fiber._getState() / _updateState() in the cordis source.
+const FIBER_STATE_FAILED = 3
+const FIBER_STATE_DISPOSED = 4
+const FIBER_STATE_UNLOADING = 5
+
 /** Fiber states that cannot own or serve a new lifecycle. */
-export const INACTIVE_STATES: ReadonlySet<FiberState> = new Set([
-  FiberState.UNLOADING,
-  FiberState.DISPOSED,
-  FiberState.FAILED,
+export const INACTIVE_STATES: ReadonlySet<number> = new Set([
+  FIBER_STATE_UNLOADING,
+  FIBER_STATE_DISPOSED,
+  FIBER_STATE_FAILED,
 ])
 
 /** Factory-level ownership: live agent teardowns plus load-time tracking. */
