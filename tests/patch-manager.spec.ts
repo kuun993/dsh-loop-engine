@@ -15,6 +15,16 @@ import {
 
 const SEED = '# dsh profile patch layer\n'
 
+// The exact empty-sequence template `initProfile` seeds a fresh profile with:
+// a lone root-level `[]` flow sequence that the harness must still parse as a
+// top-level array. A managed block appended on top of it (rather than replacing
+// it) is a SECOND root collection, which js-yaml rejects at boot.
+const PROFILE_SEED = `# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; \`!!js\` expressions allowed).
+[]
+`
+
 describe('renderManagedBlock', () => {
   it('renders nothing for the in-process engine', () => {
     expect(renderManagedBlock('in-process')).toBe('')
@@ -136,13 +146,15 @@ describe('applyManagedBlock', () => {
     const text = `# head\n\n${MANAGED_BLOCK_BEGIN}claude-code --\n- id: agent-loop\n  disabled: true\n`
     const next = applyManagedBlock(text, 'in-process')
     expect(hasManagedBlock(next)).toBe(false)
-    expect(next).toBe('# head\n')
+    // A removal that leaves no entries re-seeds an empty top-level array, so the
+    // file stays a loadable patch list (a comment-only file is `null` to the loader).
+    expect(next).toBe('# head\n[]\n')
   })
 
   it('replaces a block that starts at file head without a blank separator', () => {
     const block = renderManagedBlock('claude-code')
     expect(applyManagedBlock(block, 'claude-code')).toBe(block)
-    expect(applyManagedBlock(block, 'in-process')).toBe('')
+    expect(applyManagedBlock(block, 'in-process')).toBe('[]\n')
   })
 
   it('collapses the separator when content follows the removed block', () => {
@@ -150,6 +162,24 @@ describe('applyManagedBlock', () => {
     const text = `# head\n\n${renderManagedBlock('claude-code')}\n${tail}`
     const next = applyManagedBlock(text, 'in-process')
     expect(hasManagedBlock(next)).toBe(false)
-    expect(next).toBe(`# head\n${tail}`)
+    expect(next).toBe(`# head\n${tail}[]\n`)
+  })
+
+  it('replaces the profile seed `[]` placeholder so a block is the only top-level collection', () => {
+    const next = applyManagedBlock(PROFILE_SEED, 'claude-code')
+    expect(hasManagedBlock(next)).toBe(true)
+    expect(currentEngineOf(next)).toBe('claude-code')
+    // No leftover root `[]` — the managed block is the whole top-level array now.
+    expect(next.match(/^\[\]\s*$/m)).toBeNull()
+    expect(next).not.toContain('[]\n\n# -- dsh-loop-engine')
+    // Round trip back to in-process leaves a clean single `[]`, valid on its own.
+    expect(applyManagedBlock(next, 'in-process').match(/^\[\]\s*$/m)).not.toBeNull()
+  })
+
+  it('keeps an indented `[]` inside an entry config intact across a switch', () => {
+    const prior = '# my patch\n- id: subagent-codex\n  config:\n    options: []\n'
+    const switched = applyManagedBlock(prior, 'claude-code')
+    expect(switched).toContain('    options: []')
+    expect(hasManagedBlock(switched)).toBe(true)
   })
 })
