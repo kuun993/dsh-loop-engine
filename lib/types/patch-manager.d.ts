@@ -40,12 +40,17 @@ export declare function currentEngineOf(text: string): LoopEngineId;
  * outside the managed span. Appends the span when absent; replaces or removes
  * it when present.
  *
- * A fresh profile's patch file is `[]`, which cannot be followed by block
- * sequence items — appending to it verbatim yields a file the loader cannot
- * parse, silently leaving the base `agent-loop` row enabled. So the `[]` is
- * dropped when a block goes in. Removing the block later leaves a comments-only
- * file, which parses as null — the same shape a comments-only input has always
- * produced here.
+ * The file must always parse as a top-level YAML *array*: app-boot's
+ * `parsePatchList` throws `must be a top-level YAML array of loader patch
+ * entries` on anything else, which fails the whole plugin tree — including this
+ * plugin's own `insert` row, so no agent factory registers at all.
+ *
+ * That constrains both directions:
+ *   - A fresh profile's file is `[]`, a complete flow-style document. Block
+ *     sequence items cannot follow it, so the `[]` is dropped when a block goes
+ *     in.
+ *   - Removing the last block must not leave a comments-only file: that parses
+ *     as `null`, not `[]`. The `[]` is restored so the list stays a list.
  *
  * @param text - current patch-file text.
  * @param engine - target engine.

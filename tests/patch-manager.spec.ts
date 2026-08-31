@@ -137,13 +137,15 @@ describe('applyManagedBlock', () => {
     const text = `# head\n\n${MANAGED_BLOCK_BEGIN}claude-code --\n- id: agent-loop\n  disabled: true\n`
     const next = applyManagedBlock(text, 'in-process')
     expect(hasManagedBlock(next)).toBe(false)
-    expect(next).toBe('# head\n')
+    expect(next).toBe('# head\n[]\n')
   })
 
   it('replaces a block that starts at file head without a blank separator', () => {
     const block = renderManagedBlock('claude-code')
     expect(applyManagedBlock(block, 'claude-code')).toBe(block)
-    expect(applyManagedBlock(block, 'in-process')).toBe('')
+    // Removing the only content cannot leave an empty file: the loader rejects
+    // anything that is not a top-level array.
+    expect(applyManagedBlock(block, 'in-process')).toBe('[]\n')
   })
 
   it('collapses the separator when content follows the removed block', () => {
@@ -151,7 +153,14 @@ describe('applyManagedBlock', () => {
     const text = `# head\n\n${renderManagedBlock('claude-code')}\n${tail}`
     const next = applyManagedBlock(text, 'in-process')
     expect(hasManagedBlock(next)).toBe(false)
-    expect(next).toBe(`# head\n${tail}`)
+    expect(next).toBe(`# head\n${tail}[]\n`)
+  })
+
+  it('does not add `[]` when the file still has entries of its own', () => {
+    const prior = '# head\n- id: other\n'
+    const next = applyManagedBlock(applyManagedBlock(prior, 'claude-code'), 'in-process')
+    expect(next).toBe(prior)
+    expect(next).not.toContain('[]')
   })
 })
 /**
@@ -180,22 +189,30 @@ describe('applyManagedBlock on a real profile seed', () => {
     expect(next).not.toMatch(/^\s*\[\]\s*$/m)
   })
 
-  it('leaves a parseable comments-only file when the block is removed', () => {
+  it('restores the `[]` body so the removed-block file is still a patch list', () => {
     const added = applyManagedBlock(PROFILE_SEED, 'claude-code')
     const back = applyManagedBlock(added, 'in-process')
     expect(hasManagedBlock(back)).toBe(false)
-    // Comments-only parses as null, the same empty shape the loader already
-    // gets from a patch file the user emptied by hand.
+    // A comments-only file parses as null, and app-boot's parsePatchList throws
+    // "must be a top-level YAML array of loader patch entries" on it — which
+    // fails the whole plugin tree, including this plugin's own insert row, so
+    // no agent factory registers at all. It has to stay an (empty) array.
     expect(() => parse(back)).not.toThrow()
-    expect(parse(back)).toBeNull()
+    expect(parse(back)).toEqual([])
     expect(back).toContain('# Your patch layer for this dsh profile')
   })
 
-  it('stays parseable across repeated engine switches', () => {
+  it('round-trips the profile seed back to itself', () => {
+    const added = applyManagedBlock(PROFILE_SEED, 'claude-code')
+    expect(applyManagedBlock(added, 'in-process')).toBe(PROFILE_SEED)
+  })
+
+  it('stays an array across repeated engine switches', () => {
     let text = PROFILE_SEED
     for (const engine of ['claude-code', 'codex', 'pi', 'in-process', 'codex'] as const) {
       text = applyManagedBlock(text, engine)
       expect(() => parse(text)).not.toThrow()
+      expect(Array.isArray(parse(text))).toBe(true)
       expect(currentEngineOf(text)).toBe(engine)
     }
   })

@@ -5,3 +5,7 @@ allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': false
   koffi: false
   node-pty: false
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/cordis@4.0.2'
+  - '@deepseek-ai/cosmokit@1.8.3'
+  - '@deepseek-ai/dsh-client-store@0.1.2-alpha.2'

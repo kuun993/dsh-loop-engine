@@ -134,12 +134,17 @@ function stripEmptyFlowSeq(text: string): string {
  * outside the managed span. Appends the span when absent; replaces or removes
  * it when present.
  *
- * A fresh profile's patch file is `[]`, which cannot be followed by block
- * sequence items — appending to it verbatim yields a file the loader cannot
- * parse, silently leaving the base `agent-loop` row enabled. So the `[]` is
- * dropped when a block goes in. Removing the block later leaves a comments-only
- * file, which parses as null — the same shape a comments-only input has always
- * produced here.
+ * The file must always parse as a top-level YAML *array*: app-boot's
+ * `parsePatchList` throws `must be a top-level YAML array of loader patch
+ * entries` on anything else, which fails the whole plugin tree — including this
+ * plugin's own `insert` row, so no agent factory registers at all.
+ *
+ * That constrains both directions:
+ *   - A fresh profile's file is `[]`, a complete flow-style document. Block
+ *     sequence items cannot follow it, so the `[]` is dropped when a block goes
+ *     in.
+ *   - Removing the last block must not leave a comments-only file: that parses
+ *     as `null`, not `[]`. The `[]` is restored so the list stays a list.
  *
  * @param text - current patch-file text.
  * @param engine - target engine.
@@ -159,7 +164,24 @@ export function applyManagedBlock(text: string, engine: LoopEngineId): string {
     // Collapse the blank separator that preceded the removed span so repeated
     // switches do not accumulate blank lines; the head already shed one blank
     // in managedSpan, and the tail's leading blank is the span's own newline.
-    return span.tail.startsWith('\n') ? `${span.head}${span.tail.slice(1)}` : `${span.head}${span.tail}`
+    const removed = span.tail.startsWith('\n')
+      ? `${span.head}${span.tail.slice(1)}`
+      : `${span.head}${span.tail}`
+    return hasYamlContent(removed) ? removed : withEmptyFlowSeq(removed)
   }
   return `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
+}
+
+/** Whether a patch-file text carries YAML content (not just comments and blanks). */
+function hasYamlContent(text: string): boolean {
+  return text.split('\n').some((line) => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !trimmed.startsWith('#')
+  })
+}
+
+/** Re-add the `[]` body so a comments-only file still parses as a patch list. */
+function withEmptyFlowSeq(text: string): string {
+  if (text.trim() === '') return '[]\n'
+  return `${ensureTrailingNewline(text.trimEnd())}[]\n`
 }
