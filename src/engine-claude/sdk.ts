@@ -200,6 +200,35 @@ function claudeChildEnv(spec: ClaudeCodeQuerySpec): Record<string, string> {
 }
 
 /**
+ * Describe the backend the child will actually run on.
+ *
+ * A misrouted child fails far from its cause: with nothing configured the CLI
+ * falls back to its own login state and reports "Not logged in", and with the
+ * wrong backend it reports a model that is "not available". Neither names the
+ * environment, so state the resolved routing up front.
+ *
+ * @param env - the composed child environment.
+ * @param backend - the deployment's choice.
+ * @returns a one-line diagnostic, or undefined when routing is unambiguous.
+ */
+export function backendDiagnostic(
+  env: Record<string, string>,
+  backend: ClaudeCodeBackend,
+): string | undefined {
+  const active = BACKEND_ENV_GROUPS.find((group) => env[group.selector] !== undefined)
+  if (active === undefined) {
+    return `claude-code: no provider backend configured (backend ${backend}); `
+      + 'the CLI will fall back to its own login state. Set ANTHROPIC_BASE_URL '
+      + 'for a relay, or CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX, via the '
+      + "plugin's `env` config or the environment dsh was launched from."
+  }
+  if (backend === 'auto' && active.id !== BACKEND_ENV_GROUPS[0].id) {
+    return `claude-code: routing to ${active.id} (backend auto)`
+  }
+  return undefined
+}
+
+/**
  * Build the fixed official SDK options for one step's query.
  * @param spec - workspace, environment, process seam, and disposal policy.
  * @param controller - per-query cancellation owner.
@@ -211,10 +240,13 @@ export function claudeQueryOptions(
 ): Options {
   const report = spec.onUnattended ?? (() => {})
   const forward = spec.onToolPermission
+  const childEnv = claudeChildEnv(spec)
+  const routing = backendDiagnostic(childEnv, spec.backend ?? 'auto')
+  if (routing !== undefined) report(routing)
   return {
     abortController: controller,
     cwd: spec.cwd,
-    env: claudeChildEnv(spec),
+    env: childEnv,
     // Emit `stream_event` partial messages so the loop can forward token
     // deltas to the dsh session as `assistant/chunk` events (the web surface
     // streams those). Without it the SDK yields only complete `assistant`

@@ -14,6 +14,7 @@ import {
   DEFAULT_DISPOSE_GRACE_MS,
   DEFAULT_PERMISSION_MODE,
   unattendedDiagnostic,
+  backendDiagnostic,
   claudeQueryOptions,
   type ClaudeCodeQuerySpec,
 } from '../../src/engine-claude/sdk.ts'
@@ -412,5 +413,42 @@ describe('ManagedClaudeCodeProcess', () => {
 describe('permission-mode defaults', () => {
   it('exposes the fixed lock-down default', () => {
     expect(DEFAULT_PERMISSION_MODE).toBe('dontAsk')
+  })
+})
+
+describe('backendDiagnostic', () => {
+  it('warns when nothing routes the child anywhere', () => {
+    // The CLI answers an unrouted child with "Not logged in", which names
+    // neither the environment nor the plugin — so say it here instead.
+    const line = backendDiagnostic({}, 'auto')
+    expect(line).toContain('no provider backend configured')
+    expect(line).toContain('ANTHROPIC_BASE_URL')
+  })
+
+  it('stays quiet when the resolved backend is the pinned one', () => {
+    expect(backendDiagnostic({ ANTHROPIC_BASE_URL: 'http://relay.example' }, 'relay'))
+      .toBeUndefined()
+  })
+
+  it('names the backend auto settled on when it is not the preferred one', () => {
+    expect(backendDiagnostic({ CLAUDE_CODE_USE_BEDROCK: '1' }, 'auto'))
+      .toContain('routing to bedrock')
+  })
+
+  it('reports the routing through the unattended channel', () => {
+    const saved = { ...process.env }
+    try {
+      for (const key of Object.keys(process.env)) {
+        if (/^(ANTHROPIC|CLAUDE_CODE_USE|AWS_)/.test(key)) delete process.env[key]
+      }
+      const lines: string[] = []
+      claudeQueryOptions(
+        spec({ env: {}, onUnattended: (line) => { lines.push(line) } }),
+        new AbortController(),
+      )
+      expect(lines.some((line) => line.includes('no provider backend configured'))).toBe(true)
+    } finally {
+      process.env = saved
+    }
   })
 })

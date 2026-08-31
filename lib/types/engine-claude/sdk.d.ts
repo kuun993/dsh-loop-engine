@@ -51,6 +51,19 @@ export interface ClaudeCodeQuerySpec {
  */
 export declare function unattendedDiagnostic(mode: PermissionMode, kind: string, answer: string, why: string): string;
 /**
+ * Describe the backend the child will actually run on.
+ *
+ * A misrouted child fails far from its cause: with nothing configured the CLI
+ * falls back to its own login state and reports "Not logged in", and with the
+ * wrong backend it reports a model that is "not available". Neither names the
+ * environment, so state the resolved routing up front.
+ *
+ * @param env - the composed child environment.
+ * @param backend - the deployment's choice.
+ * @returns a one-line diagnostic, or undefined when routing is unambiguous.
+ */
+export declare function backendDiagnostic(env: Record<string, string>, backend: ClaudeCodeBackend): string | undefined;
+/**
  * Build the fixed official SDK options for one step's query.
  * @param spec - workspace, environment, process seam, and disposal policy.
  * @param controller - per-query cancellation owner.
