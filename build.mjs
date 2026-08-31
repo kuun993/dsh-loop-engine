@@ -15,7 +15,7 @@ import { build } from 'esbuild'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const PACKAGE_ID = 'dsh-loop-engine'
+const PACKAGE_ID = '@vidge/dsh-loop-engine'
 
 /** Run a command and inherit its streams; exit on failure. */
 function run(command, args) {
@@ -57,16 +57,24 @@ const NODE_EXTERNALS = [
 
 // Module-table specifiers the browser bundle must NOT inline: the baseline
 // platform list, the preloaded runtime row, and this package's dsh.client.external.
+// Only PLATFORM_MODULES are seed externals (shared singletons in the module
+// table). Everything else (@deepseek-ai/dsh-client-runtime/client, locale,
+// settings, remotes, store, etc.) must be inlined — the harness's own plugins do
+// the same via tsdown's alwaysBundle for non-seed specifiers.  Plugin graph rows
+// declared in dsh.client.external are also external; add them here when needed.
+//
+// Keep this list minimal and justified: a non-seed specifier left external
+// survives the build but throws at boot in the browser ("missed the module
+// table"), because it is only a devDependency here and never ships to the
+// profile. dsh-client-store was external for that reason and broke rc9's UI.
+// ui-slots / ui-primitives stay external as declared plugin-graph rows — they
+// are supplied by the harness at runtime, and inlining ui-primitives would also
+// drag in KaTeX's CSS and font binaries, which this bundle has no loaders for.
 const BROWSER_EXTERNALS = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
-  '@deepseek-ai/dsh-client-locale/client',
-  '@deepseek-ai/dsh-client-ui-settings/client',
-  '@deepseek-ai/dsh-api-remotes/client',
-  '@deepseek-ai/dsh-settings/types',
 ]
 
 // 1. tsc emit (declarations + the type graph both halves import)
