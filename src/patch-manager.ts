@@ -91,9 +91,50 @@ function ensureTrailingNewline(text: string): string {
 }
 
 /**
+ * A root-level entry: a column-0 block-sequence item (`- id: …`) or flow array
+ * (`[ … ]`). Used to decide whether a patch-file text already carries a
+ * top-level collection, so the plugin never leaves a file that the harness
+ * rejects (a comment- or whitespace-only file parses to `null`, and the loader
+ * demands a top-level array).
+ */
+function hasRootEntry(text: string): boolean {
+  return /^(?:- |\[)/m.test(text)
+}
+
+/**
+ * The profile seed template (`cordis.patch.yml` on a fresh profile) is a lone
+ * root-level empty flow sequence `[]`. The plugin's managed block is itself a
+ * root-level block sequence of loader entries, so a block coexisting with a
+ * surviving `[]` is TWO root collections in one document — YAML the harness
+ * rejects with "end of the stream or a document separator is expected", and the
+ * web app then fails to boot whenever a non-default engine is selected.
+ * Remove a whole-line root `[]` placeholder so the managed block is the sole
+ * top-level collection. Anchored to column 0 so an indented `[]` that is a real
+ * value inside an entry's nested config is never touched.
+ */
+function dropSeedPlaceholder(text: string): string {
+  // Drop only the `[]` line itself; a following blank separator (the one the
+  // file's base and the managed block already share) is preserved.
+  return text.replace(/^\[\]\n/m, '')
+}
+
+/**
+ * Re-seed a patch file that a removal left with no entries at all: the harness
+ * loads a top-level array, and a bare or comment-only text is `null` to it.
+ * Preserve any comments and append an empty root array on its own line.
+ */
+function seedEmptyArray(text: string): string {
+  const head = text.replace(/\n+$/, '')
+  return head === '' ? '[]\n' : `${head}\n[]\n`
+}
+
+/**
  * Produce the next patch-file text for a target engine, preserving every byte
  * outside the managed span. Appends the span when absent; replaces or removes
- * it when present.
+ * it when present. The managed block is a root-level collection, so a leftover
+ * seed `[]` is dropped when adding it, and a removal that leaves no entries is
+ * re-seeded back to `[]` — either way the file stays a single valid top-level
+ * array the harness can boot.
  * @param text - current patch-file text.
  * @param engine - target engine.
  * @returns the rewritten patch-file text.
@@ -101,16 +142,19 @@ function ensureTrailingNewline(text: string): string {
 export function applyManagedBlock(text: string, engine: LoopEngineId): string {
   const block = renderManagedBlock(engine)
   const span = managedSpan(text)
+  let result: string
   if (!span.present) {
     if (block === '') return text
     const base = ensureTrailingNewline(text)
-    return `${base}\n${block}`
-  }
-  if (block === '') {
+    result = `${base}\n${block}`
+  } else if (block === '') {
     // Collapse the blank separator that preceded the removed span so repeated
     // switches do not accumulate blank lines; the head already shed one blank
     // in managedSpan, and the tail's leading blank is the span's own newline.
-    return span.tail.startsWith('\n') ? `${span.head}${span.tail.slice(1)}` : `${span.head}${span.tail}`
+    result = span.tail.startsWith('\n') ? `${span.head}${span.tail.slice(1)}` : `${span.head}${span.tail}`
+  } else {
+    result = `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
   }
-  return `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
+  if (block !== '') return dropSeedPlaceholder(result)
+  return hasRootEntry(result) ? result : seedEmptyArray(result)
 }
