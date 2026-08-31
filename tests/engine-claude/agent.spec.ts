@@ -751,6 +751,112 @@ describe('configuration validation', () => {
   })
 })
 
+describe('model resolution', () => {
+  /** Mount the default-model service the dsh base layer normally provides. */
+  function withDefaultModel(ctx: Context, selection: { provider: string; model: string }): void {
+    ctx.provide('agentDefaultModel', { currentSelection: () => selection }, true)
+  }
+
+  /** Run one turn and return the options the SDK query was called with. */
+  async function queriedOptions(ctx: Context, sessionId: string, options: Record<string, unknown> = {}): Promise<Options> {
+    queryMock.mockImplementation(() => stream([successResult()]))
+    const { agent } = await ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd: process.cwd() },
+      ...options,
+    })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    return queryMock.mock.calls[0]![0].options
+  }
+
+  it('runs the model the dsh selection names', async () => {
+    // The point of the whole chain: picking a model in the UI has to reach the
+    // child, which owned its model natively before.
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
+      const options = await queriedOptions(ctx, 'default-model-s')
+      expect(options.model).toBe('claude-opus-4.7')
+      expect(options.env?.ANTHROPIC_MODEL).toBe('claude-opus-4.7')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('lets a session choice beat the global default', async () => {
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
+      const options = await queriedOptions(ctx, 'session-model-s', {
+        agentOptions: { provider: 'copilot-proxy', model: 'claude-haiku-4.5' },
+      })
+      expect(options.model).toBe('claude-haiku-4.5')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records the resolved model in the request header', async () => {
+    const ctx = await harness()
+    try {
+      withDefaultModel(ctx, { provider: 'copilot-proxy', model: 'claude-opus-4.7' })
+      queryMock.mockImplementation(() => stream([successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('header-model-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+        data: { header: { config: { provider: 'claude-code', model: 'claude-opus-4.7' } } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves the model to the CLI when no layer chose one', async () => {
+    // A minimal profile need not mount the service; resolving must degrade to
+    // the CLI's own default rather than throw.
+    const ctx = await harness()
+    try {
+      const options = await queriedOptions(ctx, 'native-model-s')
+      expect('model' in options).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('falls back to the configured model when no selection exists', async () => {
+    const fresh = new Context()
+    await fresh.plugin(SessionStore)
+    await fresh.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    await fresh.plugin(AgentRegistry)
+    await fresh.plugin(LocalSubprocessRuntime)
+    await fresh.plugin(loopPlugin, { model: 'claude-opus-4-6' })
+    try {
+      const options = await queriedOptions(fresh, 'config-model-s')
+      expect(options.model).toBe('claude-opus-4-6')
+    } finally {
+      await fresh.fiber.dispose()
+    }
+  })
+
+  it('survives a default-model service that faults', async () => {
+    const ctx = await harness()
+    try {
+      ctx.provide('agentDefaultModel', {
+        currentSelection: () => { throw new Error('provider registry unavailable') },
+      }, true)
+      const options = await queriedOptions(ctx, 'faulting-model-s')
+      expect('model' in options).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
 /** Append a durable permission knob whose event key is augmented by packages this compilation does not depend on. */
 function appendKnob(session: Session, type: string, data: unknown): void {
   const append = session.append.bind(session) as unknown as (type: string, data: unknown) => void

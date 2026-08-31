@@ -1,7 +1,7 @@
 {
   "name": "@vidge/dsh-loop-engine",
   "description": "Fork of dsh-loop-engine with auto-inherited LLM credentials (Bedrock/Vertex/Anthropic) and cordis 4.0.1 compatibility fix",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "publishConfig": {
     "access": "public"
   },

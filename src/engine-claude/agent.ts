@@ -58,6 +58,23 @@ interface ApprovalService {
   request(req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
 }
 
+/** Minimal shape of the default-model service (inline to avoid a peer dep on @deepseek-ai/dsh-agent-default-model). */
+interface AgentDefaultModelService {
+  currentSelection(): { provider: string; model: string }
+}
+
+/** Which layer chose the model the child runs. */
+type ModelSource = 'session' | 'default' | 'config' | 'native'
+
+/** The model one query runs on, and where the choice came from. */
+interface ResolvedModel {
+  /** Provider-owned model id, or undefined to leave the CLI on its own default. */
+  model: string | undefined
+  /** Registered provider route the id belongs to, when a selection named one. */
+  provider: string | undefined
+  source: ModelSource
+}
+
 /* jscpd:ignore-start -- mirrors default agent-loop driver; depending on agent-loop is forbidden. */
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -433,9 +450,43 @@ export class ClaudeCodeAgent implements Agent {
     return true
   }
 
+  /**
+   * Resolve the model one query runs on, session choice first.
+   *
+   * The web surface sets `AgentOptions.model` when a session picks a model, and
+   * `agentDefaultModel` holds the global default; reading both is what makes
+   * the dsh model picker mean something for this engine. The service is
+   * optional — a minimal profile may not mount it — so it is resolved through
+   * `ctx.get` rather than `inject`, and a faulting provider degrades to the
+   * next layer instead of failing the turn.
+   *
+   * @returns the chosen id (undefined leaves the CLI on its own default),
+   * its provider route, and the layer that chose it.
+   */
+  private resolveModel(): ResolvedModel {
+    if (this.options.model !== undefined) {
+      return { model: this.options.model, provider: this.options.provider, source: 'session' }
+    }
+    const defaults = this.loopCtx.get('agentDefaultModel') as AgentDefaultModelService | undefined
+    if (defaults !== undefined) {
+      try {
+        const selection = defaults.currentSelection()
+        if (selection.model !== '') {
+          return { model: selection.model, provider: selection.provider, source: 'default' }
+        }
+      } catch (error: unknown) {
+        this.ctx.logger.warn('claude-code: default model selection unavailable: %s', error)
+      }
+    }
+    if (this.config.model !== undefined) {
+      return { model: this.config.model, provider: undefined, source: 'config' }
+    }
+    return { model: undefined, provider: undefined, source: 'native' }
+  }
+
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
-    return this.config.model ?? NATIVE_MODEL_LABEL
+    return this.resolveModel().model ?? NATIVE_MODEL_LABEL
   }
 
   /** Append the request header snapshot once per loop instance. */
@@ -486,13 +537,15 @@ export class ClaudeCodeAgent implements Agent {
     signal.addEventListener('abort', cancel, { once: true })
     const diagnostics: string[] = []
     try {
+      const selected = this.resolveModel()
       const options = claudeQueryOptions({
         cwd,
         ...this.queryPermission(),
         env: this.config.env,
         backend: this.config.backend,
         disposeGraceMs: this.config.disposeGraceMs,
-        ...this.config.model === undefined ? {} : { model: this.config.model },
+        ...selected.model === undefined ? {} : { model: selected.model },
+        ...selected.provider === undefined ? {} : { provider: selected.provider },
         ...this.config.maxTurns === undefined ? {} : { maxTurns: this.config.maxTurns },
         spawn: spec => this.loopCtx.subprocess.spawn(spec),
         onUnattended: (line) => { diagnostics.push(line) },

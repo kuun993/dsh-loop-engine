@@ -92,6 +92,20 @@ export declare class ClaudeCodeAgent implements Agent {
     private queryPermission;
     /** Open one turn before claiming its first proposed step. */
     private turn;
+    /**
+     * Resolve the model one query runs on, session choice first.
+     *
+     * The web surface sets `AgentOptions.model` when a session picks a model, and
+     * `agentDefaultModel` holds the global default; reading both is what makes
+     * the dsh model picker mean something for this engine. The service is
+     * optional — a minimal profile may not mount it — so it is resolved through
+     * `ctx.get` rather than `inject`, and a faulting provider degrades to the
+     * next layer instead of failing the turn.
+     *
+     * @returns the chosen id (undefined leaves the CLI on its own default),
+     * its provider route, and the layer that chose it.
+     */
+    private resolveModel;
     /** Model label recorded in the request header for one lifecycle. */
     private modelLabel;
     /** Append the request header snapshot once per loop instance. */

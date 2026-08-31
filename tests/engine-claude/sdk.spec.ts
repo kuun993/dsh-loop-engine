@@ -15,6 +15,7 @@ import {
   DEFAULT_PERMISSION_MODE,
   unattendedDiagnostic,
   backendDiagnostic,
+  modelDiagnostic,
   claudeQueryOptions,
   type ClaudeCodeQuerySpec,
 } from '../../src/engine-claude/sdk.ts'
@@ -309,6 +310,48 @@ describe('claudeQueryOptions', () => {
       process.env = saved
     }
   })
+
+  it('carries the resolved model to both the SDK option and the child env', () => {
+    // The SDK option drives the query; ANTHROPIC_MODEL covers the CLI paths
+    // that read the environment instead.
+    const options = claudeQueryOptions(spec({ model: 'claude-opus-4.7' }), new AbortController())
+    expect(options.model).toBe('claude-opus-4.7')
+    expect(options.env?.ANTHROPIC_MODEL).toBe('claude-opus-4.7')
+  })
+
+  it('leaves the model to the CLI when none is resolved', () => {
+    const saved = { ...process.env }
+    try {
+      delete process.env.ANTHROPIC_MODEL
+      const options = claudeQueryOptions(spec(), new AbortController())
+      expect('model' in options).toBe(false)
+      expect('ANTHROPIC_MODEL' in (options.env ?? {})).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('lets a deployment env entry override the resolved model', () => {
+    // `env` is the deployment's explicit word on the child, so it outranks the
+    // dsh selection rather than the other way round.
+    const options = claudeQueryOptions(
+      spec({ model: 'claude-opus-4.7', env: { ANTHROPIC_MODEL: 'claude-haiku-4.5' } }),
+      new AbortController(),
+    )
+    expect(options.model).toBe('claude-opus-4.7')
+    expect(options.env?.ANTHROPIC_MODEL).toBe('claude-haiku-4.5')
+  })
+
+  it('overrides a parent-inherited model with the resolved one', () => {
+    const saved = { ...process.env }
+    try {
+      process.env.ANTHROPIC_MODEL = 'from-the-shell'
+      const options = claudeQueryOptions(spec({ model: 'claude-opus-4.7' }), new AbortController())
+      expect(options.env?.ANTHROPIC_MODEL).toBe('claude-opus-4.7')
+    } finally {
+      process.env = saved
+    }
+  })
 })
 
 describe('unattendedDiagnostic', () => {
@@ -447,6 +490,59 @@ describe('backendDiagnostic', () => {
         new AbortController(),
       )
       expect(lines.some((line) => line.includes('no provider backend configured'))).toBe(true)
+    } finally {
+      process.env = saved
+    }
+  })
+})
+
+describe('modelDiagnostic', () => {
+  it('stays quiet behind a relay, whatever provider the selection names', () => {
+    // A relay endpoint is deployment-chosen, so any provider may sit behind it.
+    expect(modelDiagnostic('claude-opus-4.7', 'copilot-proxy', {
+      ANTHROPIC_BASE_URL: 'http://localhost:4143',
+    })).toBeUndefined()
+  })
+
+  it('flags a selection reaching a cloud backend with a fixed catalog', () => {
+    const line = modelDiagnostic('claude-opus-4.7', 'copilot-proxy', {
+      CLAUDE_CODE_USE_BEDROCK: '1',
+    })
+    expect(line).toContain('claude-opus-4.7')
+    expect(line).toContain('copilot-proxy')
+    expect(line).toContain('bedrock')
+    expect(line).toContain('sending it as-is')
+  })
+
+  it('says nothing without both a model and the provider that named it', () => {
+    const env = { CLAUDE_CODE_USE_BEDROCK: '1' }
+    expect(modelDiagnostic(undefined, 'copilot-proxy', env)).toBeUndefined()
+    expect(modelDiagnostic('claude-opus-4.7', undefined, env)).toBeUndefined()
+  })
+
+  it('says nothing when no backend is routed, leaving that to the backend line', () => {
+    expect(modelDiagnostic('claude-opus-4.7', 'copilot-proxy', {})).toBeUndefined()
+  })
+
+  it('reports the mismatch through the unattended channel', () => {
+    const saved = { ...process.env }
+    try {
+      for (const key of Object.keys(process.env)) {
+        if (/^(ANTHROPIC|CLAUDE_CODE_USE|AWS_)/.test(key)) delete process.env[key]
+      }
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      const lines: string[] = []
+      claudeQueryOptions(
+        spec({
+          env: {},
+          backend: 'bedrock',
+          model: 'claude-opus-4.7',
+          provider: 'copilot-proxy',
+          onUnattended: (line) => { lines.push(line) },
+        }),
+        new AbortController(),
+      )
+      expect(lines.some((line) => line.includes('may not be served by the bedrock backend'))).toBe(true)
     } finally {
       process.env = saved
     }

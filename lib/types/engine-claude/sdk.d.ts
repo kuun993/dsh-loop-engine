@@ -25,8 +25,10 @@ export interface ClaudeCodeQuerySpec {
     readonly env?: Record<string, string>;
     /** Grace in milliseconds for process-tree termination. */
     readonly disposeGraceMs: number;
-    /** Model override for the SDK, when the deployment pins one. */
+    /** Model override for the SDK, when a selection or the deployment pins one. */
     readonly model?: string;
+    /** Provider route the model id belongs to, used to diagnose a backend mismatch. */
+    readonly provider?: string;
     /** Provider backend the child is pointed at; defaults to `auto`. */
     readonly backend?: ClaudeCodeBackend;
     /** Cap on the number of conversation turns before the query stops. */
@@ -63,6 +65,22 @@ export declare function unattendedDiagnostic(mode: PermissionMode, kind: string,
  * @returns a one-line diagnostic, or undefined when routing is unambiguous.
  */
 export declare function backendDiagnostic(env: Record<string, string>, backend: ClaudeCodeBackend): string | undefined;
+/**
+ * Flag a model the active backend is unlikely to serve.
+ *
+ * The dsh selection names a provider route, and only a relay's endpoint is
+ * deployment-chosen — so a selection routed at some other provider reaching a
+ * cloud backend is a mismatch the child will discover as an opaque
+ * model-not-found. The id is still sent as-is: the caller asked for it, the
+ * provider lists it, and refusing here would substitute a model the user did
+ * not pick.
+ *
+ * @param model - the resolved model id.
+ * @param provider - the provider route the selection named, when it named one.
+ * @param env - the composed child environment.
+ * @returns a one-line diagnostic, or undefined when nothing looks wrong.
+ */
+export declare function modelDiagnostic(model: string | undefined, provider: string | undefined, env: Record<string, string>): string | undefined;
 /**
  * Build the fixed official SDK options for one step's query.
  * @param spec - workspace, environment, process seam, and disposal policy.
