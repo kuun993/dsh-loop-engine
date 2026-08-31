@@ -10,9 +10,9 @@
 
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import {
-  CallId,
   createToolResultMessage,
 } from '@deepseek-ai/dsh-llm'
+import { CallId } from '../../llm-compat.ts'
 import type { PiUsage } from './types.ts'
 
 /** Map one Pi usage snapshot to dsh TokenUsage. */

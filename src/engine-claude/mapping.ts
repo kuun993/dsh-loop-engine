@@ -14,13 +14,13 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import {
-  CallId,
   createToolResultMessage,
   type ContentBlock,
   type StreamChunk,
   type TokenUsage,
   type ToolResultMessage,
 } from '@deepseek-ai/dsh-llm'
+import { CallId } from '../llm-compat.ts'
 
 /** One tool invocation surfaced from a Claude Code assistant message. */
 export interface MappedToolCall {

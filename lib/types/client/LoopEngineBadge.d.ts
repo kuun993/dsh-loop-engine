@@ -9,7 +9,7 @@
  * @module dsh-loop-engine/client/badge
  */
 import type { JSX } from 'react';
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client';
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { LoopEngineState } from './store.ts';
 import type { en } from './locales.ts';

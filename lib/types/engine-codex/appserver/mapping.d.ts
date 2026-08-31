@@ -8,7 +8,7 @@
  * @module dsh-loop-engine/engine-codex/appserver/mapping
  */
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm';
-import { CallId } from '@deepseek-ai/dsh-llm';
+import { CallId } from '../../llm-compat.ts';
 /** Map app-server turn usage to dsh TokenUsage. */
 export declare function mapUsage(usage: {
     inputTokens: number;

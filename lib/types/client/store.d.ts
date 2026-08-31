@@ -3,7 +3,8 @@
  * and the store publishes a render-safe snapshot plus the write path.
  * @module dsh-loop-engine/client/store
  */
-import type { SettingsScope, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client';
+import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client';
+import { type SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { LoopEngineId } from '../settings.ts';
 /** State rendered by the loop engine section. */
 export interface LoopEngineState {

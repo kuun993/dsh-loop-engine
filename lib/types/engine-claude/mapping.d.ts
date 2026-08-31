@@ -8,7 +8,8 @@
  */
 import type { BetaMessage, BetaRawMessageStreamEvent, BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs';
 import type { MessageParam } from '@anthropic-ai/sdk/resources';
-import { CallId, type ContentBlock, type StreamChunk, type TokenUsage, type ToolResultMessage } from '@deepseek-ai/dsh-llm';
+import { type ContentBlock, type StreamChunk, type TokenUsage, type ToolResultMessage } from '@deepseek-ai/dsh-llm';
+import { CallId } from '../llm-compat.ts';
 /** One tool invocation surfaced from a Claude Code assistant message. */
 export interface MappedToolCall {
     /** SDK tool_use id, reused as the dsh call-id so results pair. */

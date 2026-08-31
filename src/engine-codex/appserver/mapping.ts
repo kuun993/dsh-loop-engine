@@ -9,7 +9,8 @@
  */
 
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { CallId } from '../../llm-compat.ts'
 
 /** Map app-server turn usage to dsh TokenUsage. */
 export function mapUsage(usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number; reasoningOutputTokens?: number }): TokenUsage {
