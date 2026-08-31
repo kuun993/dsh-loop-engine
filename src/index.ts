@@ -28,7 +28,7 @@ import { Context, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
+import { ClaudeCodeLoop, CLAUDE_CODE_BACKENDS, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
@@ -100,6 +100,7 @@ export const Config: z<Config> = z.object({
   permissionMode: z.union(CLAUDE_CODE_PERMISSION_MODES.map(mode => z.const(mode))),
   env: z.dict(z.string()),
   model: z.string(),
+  backend: z.union(CLAUDE_CODE_BACKENDS.map(id => z.const(id))),
   disposeGraceMs: z.number(),
   maxTurns: z.number(),
   sandboxMode: z.union(CODEX_SANDBOX_MODES.map(mode => z.const(mode))),
@@ -188,6 +189,7 @@ function claudeCodeConfig(config: Config): ClaudeCodeConfig {
     ...config.permissionMode === undefined ? {} : { permissionMode: config.permissionMode },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.model === undefined ? {} : { model: config.model },
+    ...config.backend === undefined ? {} : { backend: config.backend },
     ...config.disposeGraceMs === undefined ? {} : { disposeGraceMs: config.disposeGraceMs },
     ...config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns },
   }

@@ -11,9 +11,11 @@ import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { AgentFactory, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent';
-import type { ClaudeCodePermissionMode, ResolvedConfig } from './types.ts';
+import type { ClaudeCodeBackend, ClaudeCodePermissionMode, ResolvedConfig } from './types.ts';
 /** Deployment-selectable non-interactive Claude Code permission modes. */
 export declare const CLAUDE_CODE_PERMISSION_MODES: readonly ClaudeCodePermissionMode[];
+/** Provider backends the deployment can pin for the CLI child. */
+export declare const CLAUDE_CODE_BACKENDS: readonly ClaudeCodeBackend[];
 /** Deployment-owned configuration for the Claude Code loop plugin. */
 export interface Config {
     /**
@@ -31,6 +33,14 @@ export interface Config {
     env?: Record<string, string>;
     /** Model label for the logged request header; Claude Code native settings own the actual model. */
     model?: string;
+    /**
+     * Provider backend for the CLI child. The CLI resolves backends by
+     * precedence, so a host holding credentials for two of them silently runs on
+     * the wrong one — pin this when the host is not single-homed. `auto` (the
+     * default) takes the first configured, preferring a relay over ambient cloud
+     * credentials.
+     */
+    backend?: ClaudeCodeBackend;
     /** Grace in milliseconds for Claude Code process-tree termination. */
     disposeGraceMs?: number;
     /** Cap on the number of conversation turns before each query stops. */

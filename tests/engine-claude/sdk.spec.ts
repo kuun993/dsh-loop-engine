@@ -165,6 +165,149 @@ describe('claudeQueryOptions', () => {
     const options = claudeQueryOptions(spec({ env: { EXTRA: 'yes' } }), new AbortController())
     expect(options.env?.EXTRA).toBe('yes')
   })
+
+  it('re-inherits credentials the scrub would otherwise strip', () => {
+    // scrubbedParentEnv() drops /KEY|PASSWORD|SECRET|TOKEN/i, which would take
+    // the Bedrock bearer token with it. A missing credential makes the CLI
+    // hang rather than fail, so pin the re-inherit.
+    const saved = { ...process.env }
+    try {
+      process.env.AWS_BEARER_TOKEN_BEDROCK = 'bedrock-token'
+      const options = claudeQueryOptions(spec({ backend: 'bedrock' }), new AbortController())
+      expect(options.env?.AWS_BEARER_TOKEN_BEDROCK).toBe('bedrock-token')
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('carries the endpoint and transport settings a gateway needs', () => {
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.ANTHROPIC_BEDROCK_BASE_URL = 'https://gateway.example'
+      process.env.AWS_BEDROCK_FORCE_HTTP1 = '1'
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+      process.env.HTTPS_PROXY = 'http://proxy.example:3128'
+      const options = claudeQueryOptions(spec({ backend: 'bedrock' }), new AbortController())
+      expect(options.env).toMatchObject({
+        CLAUDE_CODE_USE_BEDROCK: '1',
+        ANTHROPIC_BEDROCK_BASE_URL: 'https://gateway.example',
+        AWS_BEDROCK_FORCE_HTTP1: '1',
+        NODE_TLS_REJECT_UNAUTHORIZED: '0',
+        HTTPS_PROXY: 'http://proxy.example:3128',
+      })
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('routes to a native-protocol relay when one is configured', () => {
+    const saved = { ...process.env }
+    try {
+      process.env.ANTHROPIC_BASE_URL = 'http://localhost:4143'
+      process.env.ANTHROPIC_AUTH_TOKEN = 'dummy'
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-4.5'
+      const options = claudeQueryOptions(spec({ backend: 'relay' }), new AbortController())
+      expect(options.env).toMatchObject({
+        ANTHROPIC_BASE_URL: 'http://localhost:4143',
+        ANTHROPIC_AUTH_TOKEN: 'dummy',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4.5',
+      })
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('drops a relay endpoint when Bedrock is the pinned backend', () => {
+    // The CLI resolves backends by precedence, not by merging: with
+    // USE_BEDROCK set it ignores ANTHROPIC_BASE_URL and answers a relay-only
+    // model with "not available on your bedrock deployment".
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.ANTHROPIC_BEDROCK_BASE_URL = 'https://gateway.example'
+      process.env.ANTHROPIC_BASE_URL = 'http://localhost:4143'
+      process.env.ANTHROPIC_AUTH_TOKEN = 'dummy'
+      const env = claudeQueryOptions(spec({ backend: 'bedrock' }), new AbortController()).env ?? {}
+      expect(env.CLAUDE_CODE_USE_BEDROCK).toBe('1')
+      expect('ANTHROPIC_BASE_URL' in env).toBe(false)
+      expect('ANTHROPIC_AUTH_TOKEN' in env).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('drops Bedrock selectors from the parent when the relay is pinned', () => {
+    // scrubbedParentEnv() passes non-secret vars through untouched, so a stale
+    // USE_BEDROCK in the parent would reach the child and win even though
+    // nothing re-inherited it. It has to be actively removed.
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.ANTHROPIC_BEDROCK_BASE_URL = 'https://gateway.example'
+      process.env.ANTHROPIC_BASE_URL = 'http://localhost:4143'
+      process.env.ANTHROPIC_AUTH_TOKEN = 'dummy'
+      const env = claudeQueryOptions(spec({ backend: 'relay' }), new AbortController()).env ?? {}
+      expect(env.ANTHROPIC_BASE_URL).toBe('http://localhost:4143')
+      expect('CLAUDE_CODE_USE_BEDROCK' in env).toBe(false)
+      expect('ANTHROPIC_BEDROCK_BASE_URL' in env).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('auto prefers a relay over ambient cloud credentials', () => {
+    // A relay is a deliberate local choice; cloud credentials are often left
+    // behind by an unrelated login, so they must not silently win.
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.ANTHROPIC_BASE_URL = 'http://localhost:4143'
+      const env = claudeQueryOptions(spec(), new AbortController()).env ?? {}
+      expect(env.ANTHROPIC_BASE_URL).toBe('http://localhost:4143')
+      expect('CLAUDE_CODE_USE_BEDROCK' in env).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('auto falls back to Bedrock when no relay is configured', () => {
+    const saved = { ...process.env }
+    try {
+      delete process.env.ANTHROPIC_BASE_URL
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      process.env.AWS_BEARER_TOKEN_BEDROCK = 'bedrock-token'
+      const env = claudeQueryOptions(spec(), new AbortController()).env ?? {}
+      expect(env.CLAUDE_CODE_USE_BEDROCK).toBe('1')
+      expect(env.AWS_BEARER_TOKEN_BEDROCK).toBe('bedrock-token')
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('forwards no backend when the pinned one is not configured', () => {
+    const saved = { ...process.env }
+    try {
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1'
+      delete process.env.CLAUDE_CODE_USE_VERTEX
+      const env = claudeQueryOptions(spec({ backend: 'vertex' }), new AbortController()).env ?? {}
+      expect('CLAUDE_CODE_USE_BEDROCK' in env).toBe(false)
+      expect('CLAUDE_CODE_USE_VERTEX' in env).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it('omits keys absent from the parent environment', () => {
+    const saved = { ...process.env }
+    try {
+      delete process.env.ANTHROPIC_VERTEX_PROJECT_ID
+      const options = claudeQueryOptions(spec({ backend: 'vertex' }), new AbortController())
+      expect('ANTHROPIC_VERTEX_PROJECT_ID' in (options.env ?? {})).toBe(false)
+    } finally {
+      process.env = saved
+    }
+  })
 })
 
 describe('unattendedDiagnostic', () => {

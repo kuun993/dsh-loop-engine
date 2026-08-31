@@ -13,6 +13,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
+import type { ClaudeCodeBackend } from './types.ts'
 import { ManagedClaudeCodeProcess, claudeSpawnSpec } from './process.ts'
 
 /** Native lock-down mode fixed for every query unless deployment overrides it. */
@@ -39,6 +40,8 @@ export interface ClaudeCodeQuerySpec {
   readonly disposeGraceMs: number
   /** Model override for the SDK, when the deployment pins one. */
   readonly model?: string
+  /** Provider backend the child is pointed at; defaults to `auto`. */
+  readonly backend?: ClaudeCodeBackend
   /** Cap on the number of conversation turns before the query stops. */
   readonly maxTurns?: number
   /**
@@ -70,37 +73,130 @@ export function unattendedDiagnostic(
 }
 
 /**
- * LLM credential env vars that scrubbedParentEnv() strips (they match
- * KEY/TOKEN/SECRET) but the Claude Code CLI needs to authenticate.
- * Explicitly re-inheriting them lets the CLI reuse whatever provider
- * the dsh host is already authenticated against (Bedrock, Vertex, etc.)
- * without requiring a separate `claude login`.
+ * Backend-selecting env keys, grouped because the CLI resolves them by
+ * precedence rather than by merging: with `CLAUDE_CODE_USE_BEDROCK` set, an
+ * `ANTHROPIC_BASE_URL` pointing at a relay is ignored outright, and a model the
+ * relay serves comes back as "not available on your bedrock deployment".
+ *
+ * So exactly one group is forwarded and the rest are actively removed. Order
+ * is the `auto` precedence: a relay is a deliberate local choice, so it wins
+ * over ambient cloud credentials that a login may have left behind.
  */
-const INHERITED_LLM_ENV_KEYS = [
-  'CLAUDE_CODE_USE_BEDROCK',
-  'ANTHROPIC_BEDROCK_BASE_URL',
-  'AWS_BEARER_TOKEN_BEDROCK',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-  'AWS_REGION',
-  'AWS_DEFAULT_REGION',
-  'AWS_PROFILE',
-  'ANTHROPIC_API_KEY',
+const BACKEND_ENV_GROUPS = [
+  {
+    /**
+     * Native protocol against an explicit endpoint — typically a local relay,
+     * where AUTH_TOKEN is often a placeholder.
+     */
+    id: 'relay',
+    selector: 'ANTHROPIC_BASE_URL',
+    keys: ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  },
+  {
+    /** Bedrock, direct or behind a corporate gateway. */
+    id: 'bedrock',
+    selector: 'CLAUDE_CODE_USE_BEDROCK',
+    keys: [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'ANTHROPIC_BEDROCK_BASE_URL',
+      'AWS_BEARER_TOKEN_BEDROCK',
+      // A gateway terminating TLS with a private CA, or rejecting HTTP/2,
+      // hangs without these rather than failing loudly.
+      'AWS_BEDROCK_FORCE_HTTP1',
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_REGION',
+      'AWS_DEFAULT_REGION',
+      'AWS_PROFILE',
+    ],
+  },
+  {
+    /** Vertex. */
+    id: 'vertex',
+    selector: 'CLAUDE_CODE_USE_VERTEX',
+    keys: ['CLAUDE_CODE_USE_VERTEX', 'CLOUD_ML_REGION', 'ANTHROPIC_VERTEX_PROJECT_ID'],
+  },
+  {
+    /** Direct Anthropic with no explicit endpoint. */
+    id: 'anthropic',
+    selector: 'ANTHROPIC_API_KEY',
+    keys: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+  },
+] as const satisfies readonly {
+  id: ClaudeCodeBackend
+  selector: string
+  keys: readonly string[]
+}[]
+
+/**
+ * Env keys forwarded regardless of backend: model routing, transport, and
+ * chatter suppression. None of these select a backend, so no group owns them.
+ *
+ * The proxy trio survives scrubbedParentEnv() on its own (it matches no
+ * sensitive pattern) and is listed for readability — one table describing
+ * everything the child needs to reach a provider.
+ */
+const SHARED_ENV_KEYS = [
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLOUD_ML_REGION',
-  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'DISABLE_NON_ESSENTIAL_MODEL_CALLS',
+  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
 ] as const
 
-function inheritedLlmCredentials(): Record<string, string> {
+/**
+ * Re-inherit the credentials and routing the CLI needs, forwarding exactly one
+ * backend so a second cannot take precedence over the intended endpoint.
+ *
+ * @param backend - the deployment's choice; `auto` takes the first configured.
+ * @returns env entries to lay over the scrubbed parent environment.
+ */
+function inheritedLlmCredentials(backend: ClaudeCodeBackend): Record<string, string> {
   const creds: Record<string, string> = {}
-  for (const key of INHERITED_LLM_ENV_KEYS) {
+  const take = (key: string): void => {
     const value = process.env[key]
     if (value !== undefined) creds[key] = value
   }
+  const chosen = backend === 'auto'
+    ? BACKEND_ENV_GROUPS.find((group) => process.env[group.selector] !== undefined)
+    : BACKEND_ENV_GROUPS.find((group) => group.id === backend)
+  for (const key of chosen?.keys ?? []) take(key)
+  for (const key of SHARED_ENV_KEYS) take(key)
   return creds
+}
+
+/**
+ * Compose the child environment: the scrubbed parent, minus every backend the
+ * caller did not select, plus the selected backend's credentials and routing,
+ * with the deployment's explicit entries last.
+ *
+ * The subtraction matters. scrubbedParentEnv() only drops secrets, so plain
+ * selectors like `CLAUDE_CODE_USE_BEDROCK` reach the child on their own and
+ * outrank a relay's `ANTHROPIC_BASE_URL` — leaving the CLI on the wrong
+ * backend even though nothing re-inherited it.
+ *
+ * @param spec - the query spec carrying the deployment's env overlay.
+ * @returns the child environment.
+ */
+function claudeChildEnv(spec: ClaudeCodeQuerySpec): Record<string, string> {
+  const selected = inheritedLlmCredentials(spec.backend ?? 'auto')
+  const env: Record<string, string> = { ...scrubbedParentEnv() }
+  for (const group of BACKEND_ENV_GROUPS) {
+    for (const key of group.keys) {
+      if (!(key in selected)) delete env[key]
+    }
+  }
+  return { ...env, ...selected, ...spec.env }
 }
 
 /**
@@ -118,11 +214,7 @@ export function claudeQueryOptions(
   return {
     abortController: controller,
     cwd: spec.cwd,
-    env: {
-      ...scrubbedParentEnv(),
-      ...inheritedLlmCredentials(),
-      ...spec.env,
-    },
+    env: claudeChildEnv(spec),
     // Emit `stream_event` partial messages so the loop can forward token
     // deltas to the dsh session as `assistant/chunk` events (the web surface
     // streams those). Without it the SDK yields only complete `assistant`

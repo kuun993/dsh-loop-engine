@@ -7,6 +7,7 @@
  */
 import type { Options, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess';
+import type { ClaudeCodeBackend } from './types.ts';
 /** Native lock-down mode fixed for every query unless deployment overrides it. */
 export declare const DEFAULT_PERMISSION_MODE: "dontAsk";
 /** Grace in milliseconds for Claude Code process-tree termination. */
@@ -26,6 +27,8 @@ export interface ClaudeCodeQuerySpec {
     readonly disposeGraceMs: number;
     /** Model override for the SDK, when the deployment pins one. */
     readonly model?: string;
+    /** Provider backend the child is pointed at; defaults to `auto`. */
+    readonly backend?: ClaudeCodeBackend;
     /** Cap on the number of conversation turns before the query stops. */
     readonly maxTurns?: number;
     /**
