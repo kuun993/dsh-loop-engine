@@ -39,6 +39,14 @@ export declare function currentEngineOf(text: string): LoopEngineId;
  * Produce the next patch-file text for a target engine, preserving every byte
  * outside the managed span. Appends the span when absent; replaces or removes
  * it when present.
+ *
+ * A fresh profile's patch file is `[]`, which cannot be followed by block
+ * sequence items — appending to it verbatim yields a file the loader cannot
+ * parse, silently leaving the base `agent-loop` row enabled. So the `[]` is
+ * dropped when a block goes in. Removing the block later leaves a comments-only
+ * file, which parses as null — the same shape a comments-only input has always
+ * produced here.
+ *
  * @param text - current patch-file text.
  * @param engine - target engine.
  * @returns the rewritten patch-file text.

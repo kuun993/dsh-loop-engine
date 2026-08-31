@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 import {
   applyManagedBlock,
   currentEngineOf,
@@ -151,5 +152,60 @@ describe('applyManagedBlock', () => {
     const next = applyManagedBlock(text, 'in-process')
     expect(hasManagedBlock(next)).toBe(false)
     expect(next).toBe(`# head\n${tail}`)
+  })
+})
+/**
+ * The body dsh writes into a fresh profile's `cordis.patch.yml`: a comment
+ * preamble plus an empty flow sequence. Every test above seeds a comments-only
+ * file, which is why the `[]` case shipped broken — appending block sequence
+ * items after `[]` is a YAML syntax error, and nothing here parsed the result.
+ */
+const PROFILE_SEED = `# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; \`!!js\` expressions allowed).
+[]
+`
+
+describe('applyManagedBlock on a real profile seed', () => {
+  it('produces parseable YAML when adding a block to the `[]` seed', () => {
+    const next = applyManagedBlock(PROFILE_SEED, 'claude-code')
+    expect(() => parse(next)).not.toThrow()
+    expect(parse(next)).toEqual([{ id: 'agent-loop', disabled: true }])
+    expect(currentEngineOf(next)).toBe('claude-code')
+  })
+
+  it('keeps the comment preamble when dropping the empty sequence', () => {
+    const next = applyManagedBlock(PROFILE_SEED, 'claude-code')
+    expect(next).toContain('# Your patch layer for this dsh profile')
+    expect(next).not.toMatch(/^\s*\[\]\s*$/m)
+  })
+
+  it('leaves a parseable comments-only file when the block is removed', () => {
+    const added = applyManagedBlock(PROFILE_SEED, 'claude-code')
+    const back = applyManagedBlock(added, 'in-process')
+    expect(hasManagedBlock(back)).toBe(false)
+    // Comments-only parses as null, the same empty shape the loader already
+    // gets from a patch file the user emptied by hand.
+    expect(() => parse(back)).not.toThrow()
+    expect(parse(back)).toBeNull()
+    expect(back).toContain('# Your patch layer for this dsh profile')
+  })
+
+  it('stays parseable across repeated engine switches', () => {
+    let text = PROFILE_SEED
+    for (const engine of ['claude-code', 'codex', 'pi', 'in-process', 'codex'] as const) {
+      text = applyManagedBlock(text, engine)
+      expect(() => parse(text)).not.toThrow()
+      expect(currentEngineOf(text)).toBe(engine)
+    }
+  })
+
+  it('does not disturb an `[]` that is a user entry rather than the whole body', () => {
+    const withList = '# head\n- id: other\n  config: []\n'
+    const next = applyManagedBlock(withList, 'claude-code')
+    expect(parse(next)).toEqual([
+      { id: 'other', config: [] },
+      { id: 'agent-loop', disabled: true },
+    ])
   })
 })
