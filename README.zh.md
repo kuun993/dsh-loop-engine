@@ -1,13 +1,13 @@
 # dsh-loop-engine
 
-[![npm version](https://img.shields.io/npm/v/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/dsh-loop-engine)
+[![npm version](https://img.shields.io/npm/v/@vidge/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-loop-engine)
 
 像切换模型一样切换 **dsh web** 的 agent 循环引擎:设置页的「Loop engine」下拉选择运行 agent 的驱动——内置 in-process 循环、Claude Code CLI、Codex CLI,或 Pi CLI——**无需改动主仓库**。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add dsh-loop-engine
+dsh plugin --profile web add @vidge/dsh-loop-engine
 ```
 
 重启 `dsh web`,然后打开 **Settings → Loop engine**。
@@ -24,7 +24,7 @@ dsh plugin --profile web add dsh-loop-engine
 
 1. 在 **Settings → Loop engine** 选择引擎——`in-process`(默认)、`claude-code`、`codex` 或 `pi`——然后重启 `dsh web`。
 2. 要切回默认,选 **In-process** 再重启即可。
-3. 卸载插件:`dsh plugin --profile web remove dsh-loop-engine`,然后重启 `dsh web`。
+3. 卸载插件:`dsh plugin --profile web remove @vidge/dsh-loop-engine`,然后重启 `dsh web`。
 
 ### 引擎说明
 

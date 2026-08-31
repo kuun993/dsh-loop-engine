@@ -1,6 +1,6 @@
 # dsh-loop-engine
 
-[![npm version](https://img.shields.io/npm/v/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/dsh-loop-engine)
+[![npm version](https://img.shields.io/npm/v/@vidge/dsh-loop-engine?color=cb3837)](https://www.npmjs.com/package/@vidge/dsh-loop-engine)
 
 Switch the agent loop engine of **dsh web** the same way you switch a model: a
 "Loop engine" dropdown in Settings chooses which driver runs your agents — the
@@ -10,7 +10,7 @@ without changing anything in the main repository.
 ## Install
 
 ```sh
-dsh plugin --profile web add dsh-loop-engine
+dsh plugin --profile web add @vidge/dsh-loop-engine
 ```
 
 Restart `dsh web`, then open **Settings → Loop engine**.
@@ -34,7 +34,7 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 1. Pick an engine in **Settings → Loop engine** — `in-process` (default),
    `claude-code`, `codex`, or `pi` — then restart `dsh web`.
 2. To return to the default, pick **In-process** and restart again.
-3. To remove the plugin: `dsh plugin --profile web remove dsh-loop-engine`, then
+3. To remove the plugin: `dsh plugin --profile web remove @vidge/dsh-loop-engine`, then
    restart `dsh web`.
 
 ### Engine notes
