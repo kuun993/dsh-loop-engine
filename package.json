@@ -1,7 +1,7 @@
 {
   "name": "dsh-loop-engine",
   "description": "Web-switchable agent loop engine selection for the DeepSeek Harness - out-of-tree plugin (Claude Code / Codex drivers) maintained by @kuun993, zero main-repo changes",
-  "version": "1.0.0-rc5",
+  "version": "1.0.0-rc6",
   "publishConfig": {
     "access": "public"
   },
