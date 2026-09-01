@@ -34,16 +34,23 @@ export const inject = ['invariants']
  */
 const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure): void => {
   void ctx
-  const seed = '# dsh profile patch layer\n'
+  // A bare layer is "no file yet"; in-process leaves it untouched. A
+  // comment-only seed is present-but-invalid (`null` to the loader), so the
+  // transform must repair it to a loadable `[]` rather than leave it bare.
+  const seed = ''
+  const commentOnly = '# dsh profile patch layer\n'
   /* v8 ignore start -- the checks below assert the transform's own fixed
   points; each is exercised by the patch-manager suite, and an honest failure
   only becomes reachable when that transform regresses. */
   for (const engine of LOOP_ENGINE_IDS) {
     const applied = applyManagedBlock(seed, engine)
     const reborn = applyManagedBlock(applied, currentEngineOf(applied))
-    if (reborn !== applied) fail(`managed-block round trip for ${engine} is not a fixed point`)
-    if (engine === 'in-process' && applied !== seed) fail('in-process engine must leave the file text unchanged')
+    if (reborn !== applied) fail(`bare round trip for ${engine} is not a fixed point`)
+    if (engine === 'in-process' && applied !== seed) fail('in-process engine must leave a bare layer unchanged')
     if (engine !== 'in-process' && currentEngineOf(renderManagedBlock(engine)) !== engine) fail(`${engine} block must read back as the ${engine} engine`)
+    if (engine === 'in-process' && applyManagedBlock(commentOnly, engine) === commentOnly) {
+      fail('in-process engine must re-seed a comment-only file to a loadable top-level array')
+    }
   }
   /* v8 ignore stop */
 }
