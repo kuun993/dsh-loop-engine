@@ -144,9 +144,12 @@ export function applyManagedBlock(text: string, engine: LoopEngineId): string {
   const span = managedSpan(text)
   let result: string
   if (!span.present) {
-    if (block === '') return text
-    const base = ensureTrailingNewline(text)
-    result = `${base}\n${block}`
+    if (block === '') {
+      result = text
+    } else {
+      const base = ensureTrailingNewline(text)
+      result = `${base}\n${block}`
+    }
   } else if (block === '') {
     // Collapse the blank separator that preceded the removed span so repeated
     // switches do not accumulate blank lines; the head already shed one blank
@@ -156,5 +159,9 @@ export function applyManagedBlock(text: string, engine: LoopEngineId): string {
     result = `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
   }
   if (block !== '') return dropSeedPlaceholder(result)
+  // An empty/whitespace input is "no layer" and stays bare; anything else —
+  // a comment-only file, or a removal that left no entries — is a present file
+  // the harness must still load as a top-level array, so re-seed `[]`.
+  if (text.trim() === '') return result
   return hasRootEntry(result) ? result : seedEmptyArray(result)
 }

@@ -83,9 +83,16 @@ describe('applyManagedBlock', () => {
     expect(currentEngineOf(next)).toBe('claude-code')
   })
 
-  it('leaves a file without a block untouched for in-process', () => {
-    expect(applyManagedBlock(SEED, 'in-process')).toBe(SEED)
+  it('leaves a missing (empty) layer bare and re-seeds a comment-only file for in-process', () => {
+    // A truly missing file is "no layer" — bare `''` is the harness's signal.
     expect(applyManagedBlock('', 'in-process')).toBe('')
+    expect(applyManagedBlock('  \n', 'in-process')).toBe('  \n')
+    // A comment-only file is present but parses to `null`; the harness demands a
+    // top-level array, so the transform must re-seed `[]` rather than leave the
+    // file uncrashable. This is the exact input that failed to boot `dsh web`.
+    const commentOnly = '# a comment\n# second line\n'
+    expect(applyManagedBlock(commentOnly, 'in-process')).toBe(`${commentOnly}[]\n`)
+    expect(applyManagedBlock('# comment', 'in-process')).toBe('# comment\n[]\n')
   })
 
   it('replaces an existing block with the same engine idempotently', () => {

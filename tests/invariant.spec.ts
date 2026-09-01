@@ -51,12 +51,15 @@ describe('loop-engine invariant companion', () => {
 
   it('asserts the same fixed points the invariant checks', () => {
     // Independent restatement so a silent invariant regression is caught by
-    // both the registration run and this explicit probe.
-    const seed = '# dsh profile patch layer\n'
+    // both the registration run and this explicit probe. A bare layer stays
+    // bare under in-process; a comment-only layer is re-seeded.
+    const seed = ''
+    const commentOnly = '# dsh profile patch layer\n'
     for (const engine of LOOP_ENGINE_IDS) {
       const applied = applyManagedBlock(seed, engine)
       const reborn = applyManagedBlock(applied, currentEngineOf(applied))
       expect(reborn).toBe(applied)
     }
+    expect(applyManagedBlock(commentOnly, 'in-process')).not.toBe(commentOnly)
   })
 })
