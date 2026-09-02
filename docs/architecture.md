@@ -132,7 +132,7 @@ schema（`src/settings.ts:36-39`）：`engine` 五选一并默认 `in-process`�
 
 ### 4.3 切换的 UI 语义
 
-设置页（`src/client/LoopEngineSection.tsx`）选择引擎只**暂存**，需经 Modal 确认；确认落地后 `window.location.reload()`（`src/client/LoopEngineSection.tsx:170-181`）——旧引擎工厂下建立的会话视图不会迁移，整页刷新让所有会话对新 composition 重新 attach。claude-code 引擎下额外显示"模型选择不生效"提示（`src/client/LoopEngineSection.tsx:213`，背景见 `docs/model-selection-disable.md`）。
+设置页（`src/client/LoopEngineSection.tsx`）选择引擎只**暂存**，需经 Modal 确认；确认落地后 `window.location.reload()`（`src/client/LoopEngineSection.tsx:170-181`）——旧引擎工厂下建立的会话视图不会迁移，整页刷新让所有会话对新 composition 重新 attach。claude-code 引擎下额外显示"模型选择不生效"提示（`src/client/LoopEngineSection.tsx:213`，背景见 `docs/proposals/model-selection-disable.md`）。
 
 ## 5. invariant 入口
 
