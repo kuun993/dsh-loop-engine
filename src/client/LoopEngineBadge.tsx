@@ -61,7 +61,8 @@ export function LoopEngineBadge(props: LoopEngineBadgeProps): JSX.Element | null
     engine === 'claude-code' ? 'engineClaudeCode'
       : engine === 'codex' ? 'engineCodex'
         : engine === 'pi' ? 'enginePi'
-          : 'engineInProcess',
+          : engine === 'kimi' ? 'engineKimi'
+            : 'engineInProcess',
   )
   return (
     <span style={pill} title={t('description')}>

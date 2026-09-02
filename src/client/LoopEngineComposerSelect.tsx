@@ -49,6 +49,7 @@ const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] =
   { value: 'claude-code', key: 'engineClaudeCode' },
   { value: 'codex', key: 'engineCodex' },
   { value: 'pi', key: 'enginePi' },
+  { value: 'kimi', key: 'engineKimi' },
 ]
 
 /** Locale key of one engine's option label. */
@@ -57,6 +58,7 @@ function engineLabelKey(engine: LoopEngineId): keyof typeof en {
     case 'claude-code': return 'engineClaudeCode'
     case 'codex': return 'engineCodex'
     case 'pi': return 'enginePi'
+    case 'kimi': return 'engineKimi'
     default: return 'engineInProcess'
   }
 }
@@ -88,6 +90,12 @@ function engineGlyph(engine: LoopEngineId, size = 16): JSX.Element {
         <svg width={size} height={size} viewBox="0 0 800 800" fill="none" aria-hidden>
           <path fill="currentColor" fillRule="evenodd" d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z" />
           <path fill="currentColor" d="M517.36 400H634.72V634.72H517.36Z" />
+        </svg>
+      )
+    case 'kimi':
+      return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+          <path fill="currentColor" d="M6 3h2.6v6.5L14.4 3h3.4l-5.6 7.4L17.8 21h-3.4l-5.9-8v8H6z" />
         </svg>
       )
     default:

@@ -17,6 +17,8 @@ export interface LoopEngineKey {
   engineCodex: string
   /** Option label: the Pi CLI driver. */
   enginePi: string
+  /** Option label: the Kimi Code CLI driver. */
+  engineKimi: string
   /** Settings toggle: show the engine picker in the chat page composer. */
   showInComposerLabel: string
   /** Unavailable-state message. */
@@ -45,6 +47,7 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   engineClaudeCode: 'Claude Code CLI',
   engineCodex: 'Codex CLI',
   enginePi: 'Pi CLI',
+  engineKimi: 'Kimi Code CLI',
   showInComposerLabel: '在对话页显示引擎选择器',
   unavailable: '循环引擎设置不可用',
   switchNotice: '切换引擎会中断当前使用旧引擎运行中的会话。',
@@ -64,6 +67,7 @@ export const en: Record<keyof LoopEngineKey, string> = {
   engineClaudeCode: 'Claude Code CLI',
   engineCodex: 'Codex CLI',
   enginePi: 'Pi CLI',
+  engineKimi: 'Kimi Code CLI',
   showInComposerLabel: 'Show the engine selector in the chat page',
   unavailable: 'Loop engine settings are unavailable',
   switchNotice: 'Switching engines interrupts sessions currently running on the previous engine.',

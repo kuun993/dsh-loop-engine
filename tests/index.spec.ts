@@ -28,6 +28,8 @@ import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
 import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
 import { PiSkillProvider } from '../src/engine-pi/skills.ts'
+import { KimiSkillProvider } from '../src/engine-kimi/skills.ts'
+import { KIMI_COMMANDS } from '../src/engine-kimi/commands.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -727,6 +729,111 @@ describe('apply pi engine', () => {
       expect(ctx.get('agentLoopPi')).toBeDefined()
     })
     expect(errorSpy).not.toHaveBeenCalled()
+
+    await fiber.dispose()
+  })
+})
+
+describe('apply kimi engine', () => {
+  it('mounts the kimi factory and forwards the kimi driver configuration', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, {
+      patchPath: path,
+      model: 'kimi/kimi-for-coding',
+      env: { KIMI_ENV: '1' },
+      kimiBin: '/fake/kimi',
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeDefined()
+    })
+    const loop = ctx.get('agentLoopKimi')!
+    expect(loop.config).toMatchObject({
+      model: 'kimi/kimi-for-coding',
+      env: { KIMI_ENV: '1' },
+      bin: '/fake/kimi',
+    })
+    // The kimi engine registers its slash-command bridge and mounts its AGENTS.md
+    // + `.kimi-code` skills provider.
+    expect(commands.registered.map(def => def.name)).toEqual(KIMI_COMMANDS.map(def => def.name))
+    expect(skills.creates).toHaveLength(1)
+    const control: SkillProviderControl = { signal: new AbortController().signal, invalidate: () => {} }
+    expect(skills.creates[0]!(control)).toBeInstanceOf(KimiSkillProvider)
+    expect(ctx.get('agentLoopCodex')).toBeUndefined()
+
+    await fiber.dispose()
+  })
+
+  it('switches between hosted engines including kimi in the same process', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeDefined()
+    })
+
+    // pi -> kimi: the pi fiber unmounts and the kimi fiber mounts.
+    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeDefined()
+    })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopPi')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('kimi')
+
+    // kimi -> in-process: the kimi fiber unmounts and the block leaves the file.
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeUndefined()
+    })
+    expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+
+    await fiber.dispose()
+  })
+
+  it('mounts the kimi factory without a config-boundary disposeGraceMs check', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path, disposeGraceMs: Number.NaN })
+
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeDefined()
+    })
+    expect(errorSpy).not.toHaveBeenCalled()
+
+    await fiber.dispose()
+  })
+
+  it('skips a kimi command registration that collides with a dsh-native command', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const commands = fakeCommandsService()
+    const skills = fakeSkillsService()
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    commands.register.mockImplementationOnce(() => {
+      throw new Error('command "help" is already registered')
+    })
+    ctx.provide('commands', commands)
+    ctx.provide('skills', skills)
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(commands.registered).toHaveLength(KIMI_COMMANDS.length - 1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip kimi command /help'))
 
     await fiber.dispose()
   })
