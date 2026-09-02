@@ -1,8 +1,8 @@
 /**
  * Web-switchable agent loop engine, node half.
  *
- * Hosts the non-default agent-loop engines (Claude Code, Codex) and
- * bridges them with the harness's single AgentFactory slot. The engine is
+ * Hosts the non-default agent-loop engines (Claude Code, Codex, Pi, Kimi Code)
+ * and bridges them with the harness's single AgentFactory slot. The engine is
  * selected by the `agent-loop-engine` settings section; the selection is
  * realized by a managed block in the profile's `cordis.patch.yml` that
  * disables the base bundle's `agent-loop` row — exactly one AgentFactory may
@@ -31,6 +31,9 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
+import { KimiLoop, type Config as KimiConfig } from './engine-kimi/loop.ts'
+import { KimiSkillProvider } from './engine-kimi/skills.ts'
+import { KIMI_COMMANDS } from './engine-kimi/commands.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
 import {
   applyManagedBlock,
@@ -79,6 +82,8 @@ export interface Config extends ClaudeCodeConfig {
   piProvider?: string
   /** Thinking/reasoning level for the Pi RPC child, appended to its `--model`. */
   piThinking?: string
+  /** Kimi CLI executable; `'kimi'` resolves through PATH when not pinned to an absolute path. */
+  kimiBin?: string
 }
 
 /**
@@ -106,6 +111,7 @@ export const Config: z<Config> = z.object({
   approvalPolicy: z.union(CODEX_APPROVAL_POLICIES.map(policy => z.const(policy))),
   piProvider: z.string(),
   piThinking: z.string(),
+  kimiBin: z.string(),
 })
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
@@ -211,6 +217,15 @@ function piConfig(config: Config): PiConfig {
     ...config.piThinking === undefined ? {} : { thinkingLevel: config.piThinking },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.sandboxMode === undefined ? {} : { sandboxMode: config.sandboxMode },
+  }
+}
+
+/** Forward the engine-driver fields of the composition entry to the Kimi loop. */
+function kimiConfig(config: Config): KimiConfig {
+  return {
+    ...config.model === undefined ? {} : { model: config.model },
+    ...config.env === undefined ? {} : { env: config.env },
+    ...config.kimiBin === undefined ? {} : { bin: config.kimiBin },
   }
 }
 
@@ -369,11 +384,41 @@ export function apply(ctx: Context, config: Config): void {
     hostFactory('pi', () => ctx.plugin(PiLoop, piConfig(config)))
   }
 
+  /** Mount the Kimi loop factory plus its slash-command bridge and skill provider. */
+  const mountKimi = (): void => {
+    // Register Kimi's slash commands alongside the DSH-native ones. The handlers
+    // forward the raw `/name` line to the receiving agent, where the engine
+    // expands it; a name collision with a dsh-native command is skipped with a
+    // warning instead of failing the mount loud.
+    const commands = ctx.get('commands') as CommandsService | undefined
+    if (commands !== undefined) {
+      const disposers: (() => void)[] = []
+      for (const command of KIMI_COMMANDS) {
+        try {
+          disposers.push(commands.register(command))
+        } catch (error: unknown) {
+          ctx.logger.warn(`loop-engine: skip kimi command /${command.name}: ${String(error)}`)
+        }
+      }
+      commandDisposers = disposers
+    }
+
+    // Register the Kimi skill provider so AGENTS.md context files and `.kimi-code`
+    // `skills/` catalogs are available through the dsh skill-injection seam.
+    const skills = ctx.get('skills') as SkillsService | undefined
+    if (skills !== undefined) {
+      skillDisposer = skills.registerProvider(control => new KimiSkillProvider(control))
+    }
+
+    hostFactory('kimi', () => ctx.plugin(KimiLoop, kimiConfig(config)))
+  }
+
   /** Mount the factory of a non-default engine; `in-process` mounts nothing here. */
   const mountEngine = (engine: LoopEngineId): void => {
     if (engine === 'claude-code') mountClaude()
     else if (engine === 'codex') mountCodex()
     else if (engine === 'pi') mountPi()
+    else if (engine === 'kimi') mountKimi()
   }
 
   const unmountEngine = (): void => {

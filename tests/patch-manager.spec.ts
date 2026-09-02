@@ -46,6 +46,13 @@ describe('renderManagedBlock', () => {
     expect(block).toContain('- id: agent-loop\n  disabled: true')
     expect(block.endsWith(`${MANAGED_BLOCK_END}\n`)).toBe(true)
   })
+
+  it('renders the swap span for the kimi engine', () => {
+    const block = renderManagedBlock('kimi')
+    expect(block.startsWith(`${MANAGED_BLOCK_BEGIN}kimi --\n`)).toBe(true)
+    expect(block).toContain('- id: agent-loop\n  disabled: true')
+    expect(block.endsWith(`${MANAGED_BLOCK_END}\n`)).toBe(true)
+  })
 })
 
 describe('block presence and engine derivation', () => {
@@ -65,6 +72,12 @@ describe('block presence and engine derivation', () => {
     const text = `${SEED}\n${renderManagedBlock('codex')}`
     expect(hasManagedBlock(text)).toBe(true)
     expect(currentEngineOf(text)).toBe('codex')
+  })
+
+  it('detects presence and derives kimi', () => {
+    const text = `${SEED}\n${renderManagedBlock('kimi')}`
+    expect(hasManagedBlock(text)).toBe(true)
+    expect(currentEngineOf(text)).toBe('kimi')
   })
 
   it('reads an unknown engine marker as in-process', () => {
@@ -130,7 +143,7 @@ describe('applyManagedBlock', () => {
   })
 
   it('fixed point: reading back a block and re-applying that engine is stable', () => {
-    for (const engine of ['in-process', 'claude-code', 'codex'] as const) {
+    for (const engine of ['in-process', 'claude-code', 'codex', 'kimi'] as const) {
       const applied = applyManagedBlock(SEED, engine)
       const reborn = applyManagedBlock(applied, currentEngineOf(applied))
       expect(reborn).toBe(applied)

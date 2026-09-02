@@ -21,7 +21,7 @@ export interface LoopEngineState {
 export function decodeLoopEngine(section: unknown): { engine: LoopEngineId; showInComposer: boolean } | undefined {
   if (typeof section !== 'object' || section === null || Array.isArray(section)) return undefined
   const { engine, showInComposer } = section as { engine?: unknown; showInComposer?: unknown }
-  if (engine !== 'in-process' && engine !== 'claude-code' && engine !== 'codex' && engine !== 'pi') {
+  if (engine !== 'in-process' && engine !== 'claude-code' && engine !== 'codex' && engine !== 'pi' && engine !== 'kimi') {
     return undefined
   }
   // Absent or non-boolean reads true: the composer picker stays visible unless

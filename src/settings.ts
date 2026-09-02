@@ -19,7 +19,7 @@ import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from './namespace.ts'
 export { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from './namespace.ts'
 
 /** The installed engine driving new Agent turns. */
-export const LOOP_ENGINE_IDS = ['in-process', 'claude-code', 'codex', 'pi'] as const
+export const LOOP_ENGINE_IDS = ['in-process', 'claude-code', 'codex', 'pi', 'kimi'] as const
 
 /** Installed agent loop engine id. */
 export type LoopEngineId = (typeof LOOP_ENGINE_IDS)[number]
@@ -34,7 +34,7 @@ export interface LoopEngineSettings {
 
 /** Schema of the loop engine settings section. */
 export const LOOP_ENGINE_SETTINGS_SCHEMA: z<LoopEngineSettings> = z.object({
-  engine: z.union([z.const('in-process'), z.const('claude-code'), z.const('codex'), z.const('pi')]).default('in-process'),
+  engine: z.union([z.const('in-process'), z.const('claude-code'), z.const('codex'), z.const('pi'), z.const('kimi')]).default('in-process'),
   showInComposer: z.boolean().default(true),
 })
 
