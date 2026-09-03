@@ -59,7 +59,7 @@ import {
 } from '../driver-core/skill-inject.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
-const PROVIDER = 'kimi'
+export const PROVIDER = 'kimi'
 /**
  * Model label logged when the deployment pins no model: Kimi owns its model
  * natively, so the web session's advisory model selection is deliberately not

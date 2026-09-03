@@ -16,6 +16,13 @@
  * the goal form). `skill:` commands are already carried by the dsh skill
  * injection seam and Kimi's own shorthand, so they are not duplicated here.
  *
+ * `model` is deliberately absent even though the CLI has it: the dsh web
+ * client owns a `/model` contribution, and a same-named host command makes
+ * `ui-commands` throw the whole command menu source away, leaving only the
+ * skill group. `/goal` stays: the managed block disables dsh's `command-goal`
+ * row for hosted engines, so the slot is free and the CLI's own goal mode
+ * takes it over.
+ *
  * @module dsh-loop-engine/engine-kimi/commands
  */
 
@@ -51,7 +58,6 @@ export const KIMI_COMMANDS: readonly CommandDefinition[] = [
   builtin('status', 'Show the current session runtime state'),
   builtin('compact', 'Compact the conversation context to free token usage'),
   builtin('clear', 'Start a fresh session, discarding the current context'),
-  builtin('model', 'Switch the LLM model used in the current session'),
   builtin('plan', 'Toggle plan (read-only exploration) mode'),
   builtin('auto', 'Toggle auto permission mode'),
   builtin('usage', 'Show token usage, context, and quota information'),

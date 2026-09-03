@@ -58,7 +58,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 - **驱动循环**：`wakeDriver` → `kick` → `while (await this.turn())`（agent.ts:230-283）。`kick` 的 finally 负责把 running 相位收回 idle 并按 latch 的 wake 重放。
 - **turn**：`turn/start` → 循环 `preStep`（inbox claim + `agent/pre-step` waterfall + 技能注入）→ `step/start` → 落 `user/message` → `step()` → `step/end` → … → `turn/end`（agent.ts:346-427）。每个退出路径都保证写 `turn/end`（completed / blocked / aborted / error）。
 - **step**：每个 step 重置块/工具累积器（agent.ts:496-498）→ 校验 cwd（无 cwd 直接抛错，500-503）→ `deriveMessages` + `serializeHistory` 造 prompt（504-505）→ 写一次 request/header（见下）→ 取/建 ACP 客户端 → 注册权限回调 → `session/new` → 挂 `onUpdate` → `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（514-533）→ `flushAssistant` 落 `assistant/message`（535）。
-- **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:62-68,430-446）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:440-444）。
+- **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:62-68,430-446）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:440-444）。provider 标签 `'kimi'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ### 3.4 ACP 客户端缓存
 
@@ -119,9 +119,14 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 
 dsh `commands` 运行时本地执行注册命令，命令行不会到达模型；真实处理在 Kimi 引擎内的命令必须**转发原文行**给 agent：`forwardKimiCommand` 把 `/<name><rawInput>` 作为普通 user 消息 `followup` 给接收 agent（commands.ts:33-41）。
 
-`KIMI_COMMANDS`（commands.ts:49-59）注册了 10 个对 ACP prompt 面有意义的内建命令：`help`、`status`、`compact`、`clear`、`model`、`plan`、`auto`、`usage`、`version`、`goal`。纯 TUI 控制类命令（`/login`、`/settings`、`/sessions` 等）不注册——ACP prompt 面不会像交互 TUI 那样展开它们（commands.ts:13-15）。`skill:` 类命令已由 dsh 技能注入接缝承载，不重复注册。
+`KIMI_COMMANDS`（commands.ts:56-65）注册了 9 个对 ACP prompt 面有意义的内建命令：`help`、`status`、`compact`、`clear`、`plan`、`auto`、`usage`、`version`、`goal`。纯 TUI 控制类命令（`/login`、`/settings`、`/sessions` 等）不注册——ACP prompt 面不会像交互 TUI 那样展开它们（commands.ts:13-15）。`skill:` 类命令已由 dsh 技能注入接缝承载，不重复注册。
 
-`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:393-404）。注意 `/model`、`/plan`、`/auto` 等可能与 base profile 的命令撞名，实际生效集合取决于注册顺序——改这里时核对运行时菜单。
+两个刻意的缺席/保留（commands.ts:17-24 模块注释）：
+
+- **`/model` 不桥接**：web 客户端自己占着 `/model` 贡献（`ui-model-selection`），host 侧同名命令会让 `ui-commands` 把整个 command 菜单源判死——表现为菜单里所有命令消失、只剩技能。这是真实踩过的坑，不是未雨绸缪。
+- **`/goal` 保留**：managed block 对托管引擎禁用了 dsh 的 `command-goal` 行（见 architecture.md §3.5），槽位空出，Kimi 自己的 goal 模式接管。注意运行时（不重启）从 in-process 切过来时 `command-goal` 仍在，本次 `/goal` 会被撞名跳过，重启后归位。
+
+`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:504-530）。
 
 ### 7.2 技能 provider（skills.ts）
 
@@ -132,7 +137,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 约束与留白：
 
-- 通用 `~/.agents/skills/`、`.agents/skills/` 根**刻意不扫**——web profile 的 `skill-filesystem` provider 已覆盖（skills.ts:14-16）。
+- 通用 `~/.agents/skills/`、`.agents/skills/` 根**刻意不扫**（skills.ts:14-16）——in-process 下它们由 web profile 的 `skill-filesystem` provider 覆盖；而托管引擎下 `skill-filesystem` 行已被 hosted preset 剥掉（见 architecture.md §3.5），这些根在 kimi 会话里就不出现，这正是"引擎接管技能面"的语义。
 - 复用共享 `parseSkillFile`（agents-skill frontmatter：`name`/`description`/`whenToUse`/`disable-model-invocation`）；Kimi 自己的 `disableModelInvocation`/`type` 字段**不翻译**，`type: flow` 技能会被当作 model-invocable 暴露（skills.ts:19-23）。
 - Kimi CLI 内建技能没有稳定磁盘位置，不在本 provider 范围（skills.ts:16-18）。
 

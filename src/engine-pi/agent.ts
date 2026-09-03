@@ -49,7 +49,7 @@ import {
 } from '../driver-core/skill-inject.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
-const PROVIDER = 'pi'
+export const PROVIDER = 'pi'
 /**
  * Model label logged when the deployment pins no model: Pi owns its model
  * natively, so the web session's advisory model selection is deliberately not

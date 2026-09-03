@@ -106,7 +106,7 @@ describe('runtime switch direction symmetry', () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     // file = claude-code
-    await writeFile(path, ['# seed\n', '', '# -- dsh-loop-engine managed block: claude-code --', '- id: agent-loop', '  disabled: true', '# -- /dsh-loop-engine managed block --', ''].join('\n'))
+    await writeFile(path, ['# seed\n', '', '# -- dsh-loop-engine managed block: claude-code --', '- id: agent-loop', '  disabled: true', '- id: command-goal', '  disabled: true', '# -- /dsh-loop-engine managed block --', ''].join('\n'))
     const { ctx, fiber } = await boot({ [NS]: { engine: 'claude-code' } })
     apply(ctx, { patchPath: path })
     await new Promise(resolve => setTimeout(resolve, 30))
