@@ -151,7 +151,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 固定 argv 前缀：`[bin, '--mode', 'rpc', '--no-session', ...]`（`agent.ts:484-489`）——`--no-session` 让 Pi 会话不落盘，与无状态 step 模型配套。
 
-模型标签：部署钉了 `model` 则用该值记入 `request/header` 与 assistant message 的 `source.model`；未钉则记 `'pi-native'`——web 会话的建议性模型选择**故意不**镜像进 header，因为它从不驱动查询（`agent.ts:53-58、452-454`）。provider 标签恒为 `'pi'`（`agent.ts:52`）。
+模型标签：部署钉了 `model` 则用该值记入 `request/header` 与 assistant message 的 `source.model`；未钉则记 `'pi-native'`——web 会话的建议性模型选择**故意不**镜像进 header，因为它从不驱动查询（`agent.ts:53-58、452-454`）。provider 标签恒为 `'pi'`（`agent.ts:52`），在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ## 9. 错误处理与已知边界
 

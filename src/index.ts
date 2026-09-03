@@ -17,6 +17,22 @@
  * The settings section is seeded from the block so the UI mirrors the file,
  * and a committed settings change writes the block (only when it differs).
  *
+ * A hosted engine also takes over the session's command and skill surface:
+ * the block disables dsh's `command-goal` row, and the plugin authors a
+ * stripped copy of the `standard` agent preset into the user preset root
+ * (see `preset.ts`) and steers the `agent-presets` roster default to it, so
+ * new sessions get the engine's commands and skills instead of the dsh-native
+ * ones an external engine cannot honor. Switching back to `in-process`
+ * restores the previous default.
+ *
+ * While a hosted engine is mounted the plugin also serves its provider route
+ * label (`claude-code` / `codex` / `pi` / `kimi`) from the llm registry with
+ * a model-less placeholder adapter (see `provider-route.ts`): the engine logs
+ * that label into each session's request/header, and the web host refuses a
+ * turn whose session selection names a provider no adapter serves — without
+ * the placeholder the second prompt of every hosted session would fail with
+ * `model-unavailable`.
+ *
  * @module dsh-loop-engine
  */
 
@@ -26,7 +42,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, settingsNamespace, type SettingsNamespace, type SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
@@ -39,6 +55,8 @@ import {
   applyManagedBlock,
   currentEngineOf,
 } from './patch-manager.ts'
+import { ensureHostedPreset, HOSTED_PRESET_ID } from './preset.ts'
+import { HOSTED_PROVIDER_ROUTES, HostedEngineRouteAdapter } from './provider-route.ts'
 import {
   loopEngineSettingsNamespace,
   LOOP_ENGINE_SETTINGS_SCHEMA,
@@ -256,6 +274,28 @@ export function apply(ctx: Context, config: Config): void {
   interface SkillsService {
     registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void
   }
+  // Minimal shape of the host preset roster (avoiding a direct peer dep on
+  // @deepseek-ai/dsh-agent-presets): the effective default id, and the
+  // composition reader the hosted preset derives from.
+  interface AgentPresetsService {
+    readonly defaultId: string
+    read(id: string): Promise<string>
+  }
+  // Minimal shape of the host settings service mutation seam.
+  interface SettingsMutator {
+    mutate(ns: SettingsNamespace, ops: readonly SettingsPathOp[]): Promise<void>
+  }
+  // Minimal shape of the host llm registry: only the route registration a
+  // hosted engine's request/header provider label needs.
+  interface LlmRegistry {
+    registerAdapter(providers: string[], adapter: HostedEngineRouteAdapter): () => void
+  }
+
+  /** Settings namespace of the preset roster (owned by dsh-agent-presets). */
+  const AGENT_PRESETS_NS = settingsNamespace('agent-presets')
+  /** Bounded retry window for the roster's settings namespace attach race. */
+  const PRESET_DEFAULT_ATTEMPTS = 30
+  const PRESET_DEFAULT_RETRY_MS = 100
 
   let engineFiber: (Fiber & PromiseLike<Fiber>) | undefined
   /** The engine whose fiber is currently mounted (or mounting), if any. */
@@ -271,6 +311,161 @@ export function apply(ctx: Context, config: Config): void {
       clearTimeout(mountRetry)
       mountRetry = undefined
     }
+  }
+
+  /** The roster default the plugin replaced, restored on the way back to in-process. */
+  let savedPresetDefault: string | undefined
+  /** Pending preset-default retry timer (attach race or stale-value re-check). */
+  let presetRetry: ReturnType<typeof setTimeout> | undefined
+
+  const CLEAR_PRESET_RETRY = (): void => {
+    if (presetRetry !== undefined) {
+      clearTimeout(presetRetry)
+      presetRetry = undefined
+    }
+  }
+
+  /** Bounded retry window for the llm service attach race on route registration. */
+  const ROUTE_ATTEMPTS = 30
+  const ROUTE_RETRY_MS = 100
+
+  /** Live placeholder-route registration, released on unmount. */
+  let routeHandle: (() => void) | undefined
+  /** The engine whose route `routeHandle` serves (idempotent re-mount guard). */
+  let routeEngine: LoopEngineId | undefined
+  /** Pending route-registration retry timer (llm service not up yet). */
+  let routeRetry: ReturnType<typeof setTimeout> | undefined
+
+  const CLEAR_ROUTE_RETRY = (): void => {
+    if (routeRetry !== undefined) {
+      clearTimeout(routeRetry)
+      routeRetry = undefined
+    }
+  }
+
+  /** Withdraw the mounted engine's provider route placeholder, if any. */
+  const releaseRoute = (): void => {
+    CLEAR_ROUTE_RETRY()
+    const handle = routeHandle
+    routeHandle = undefined
+    routeEngine = undefined
+    handle?.()
+  }
+
+  /**
+   * Serve the mounted engine's provider route label from the llm registry.
+   * A hosted engine logs its own label into each session's request/header, and
+   * the web host refuses a turn whose session selection names a provider no
+   * adapter serves — without this placeholder the second prompt of every
+   * hosted session fails with `model-unavailable`. The placeholder advertises
+   * no models, so the model catalog is unchanged. Best-effort like the
+   * command/skill registrations: a composition without the llm service cannot
+   * enforce the route check either, so an absent registry only schedules a
+   * bounded retry against the fiber start-order race.
+   */
+  const mountProviderRoute = (engine: LoopEngineId, attempt = 0): void => {
+    if (engine === 'in-process') return
+    // A slot-collision retry re-enters the mount path for the same engine;
+    // its live route must not be registered twice.
+    if (routeEngine === engine && routeHandle !== undefined) return
+    CLEAR_ROUTE_RETRY()
+    const label = HOSTED_PROVIDER_ROUTES[engine]
+    const llm = ctx.get('llm') as LlmRegistry | undefined
+    if (llm === undefined) {
+      if (attempt < ROUTE_ATTEMPTS) {
+        routeRetry = setTimeout(() => { mountProviderRoute(engine, attempt + 1) }, ROUTE_RETRY_MS)
+      }
+      return
+    }
+    try {
+      routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label))
+      routeEngine = engine
+    } catch (error: unknown) {
+      // A deployment whose own adapter already serves the label needs no placeholder.
+      if (error instanceof Error && error.message.includes('already registered')) {
+        ctx.logger.warn(`loop-engine: provider route "${label}" is already served by another adapter`)
+        return
+      }
+      ctx.logger.error(`loop-engine: provider route "${label}" registration failed: ${String(error)}`)
+    }
+  }
+
+  /**
+   * Apply one roster-default op, retrying while the `agent-presets` settings
+   * namespace is unregistered: the roster registers it from its own settings
+   * inject callback, which may land after this plugin's apply. Any other
+   * failure is deployment trouble and fails loud once.
+   */
+  const mutatePresetDefault = (op: SettingsPathOp, attempt = 0): void => {
+    const settings = ctx.get('settings') as SettingsMutator | undefined
+    if (settings === undefined) return
+    settings.mutate(AGENT_PRESETS_NS, [op]).then(() => undefined, (error: unknown) => {
+      if (
+        error instanceof Error
+        && error.message.includes('not registered')
+        && attempt < PRESET_DEFAULT_ATTEMPTS
+      ) {
+        presetRetry = setTimeout(() => { mutatePresetDefault(op, attempt + 1) }, PRESET_DEFAULT_RETRY_MS)
+        return
+      }
+      ctx.logger.error(`loop-engine: preset default switch failed: ${String(error)}`)
+    })
+  }
+
+  /**
+   * Undo the plugin's roster-default override. The roster's settings section
+   * may not have attached yet at boot — its persisted default only becomes
+   * visible in `defaultId` on attach — so a clean first read is re-checked on
+   * a bounded timer before concluding nothing is stale.
+   */
+  const restorePresetDefault = (attempt = 0): void => {
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    /* v8 ignore start -- steerPresetDefault only calls this with the roster present, and the disposal cleanup clears any pending re-check */
+    /* v8 ignore next -- see above */
+    if (presets === undefined) return
+    /* v8 ignore stop */
+    if (presets.defaultId === HOSTED_PRESET_ID) {
+      const saved = savedPresetDefault
+      savedPresetDefault = undefined
+      mutatePresetDefault(saved === undefined
+        ? { op: 'unset', path: ['default'] }
+        : { op: 'set', path: ['default'], value: saved })
+      return
+    }
+    if (attempt < PRESET_DEFAULT_ATTEMPTS) {
+      presetRetry = setTimeout(() => { restorePresetDefault(attempt + 1) }, PRESET_DEFAULT_RETRY_MS)
+    }
+  }
+
+  /**
+   * Steer the session's command/skill surface to match the engine. A hosted
+   * engine regenerates its stripped preset and points the roster default at
+   * it (new sessions only; live sessions keep the preset they joined);
+   * `in-process` restores whatever default the plugin replaced. Best-effort:
+   * a profile without the roster (headless) or an unauthorable preset leaves
+   * the surface exactly as the base composition shipped it.
+   */
+  const steerPresetDefault = (engine: LoopEngineId): void => {
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets === undefined) return
+    if (engine === 'in-process') {
+      restorePresetDefault()
+      return
+    }
+    void (async () => {
+      try {
+        await ensureHostedPreset(resolveDshHome(), presets)
+      } catch (error: unknown) {
+        // No default switch without the preset on disk: pointing the roster
+        // at a missing preset would fail every new session loud.
+        ctx.logger.error(`loop-engine: hosted preset authoring failed: ${String(error)}`)
+        return
+      }
+      const current = presets.defaultId
+      if (current === HOSTED_PRESET_ID) return
+      savedPresetDefault = current
+      mutatePresetDefault({ op: 'set', path: ['default'], value: HOSTED_PRESET_ID })
+    })()
   }
 
   /** Dispose the engine-specific command and skill registrations. */
@@ -415,6 +610,7 @@ export function apply(ctx: Context, config: Config): void {
 
   /** Mount the factory of a non-default engine; `in-process` mounts nothing here. */
   const mountEngine = (engine: LoopEngineId): void => {
+    mountProviderRoute(engine)
     if (engine === 'claude-code') mountClaude()
     else if (engine === 'codex') mountCodex()
     else if (engine === 'pi') mountPi()
@@ -425,6 +621,7 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = engineFiber
     mountAttempts = 0
     CLEAR_RETRY()
+    releaseRoute()
     cleanupEngineRegistrations()
     mountedEngine = undefined
     if (fiber === undefined) return
@@ -434,9 +631,12 @@ export function apply(ctx: Context, config: Config): void {
     /* v8 ignore stop */
   }
   mountEngine(fileEngine)
+  steerPresetDefault(fileEngine)
   // A pending slot-collision retry must not outlive the plugin: mounting after
-  // this fiber is gone would fail on the inactive context and log noise.
-  ctx.effect(() => () => CLEAR_RETRY(), 'loop-engine: mount retry cleanup')
+  // this fiber is gone would fail on the inactive context and log noise. The
+  // preset-default and route-registration retries are bounded the same way,
+  // and the route placeholder leaves the llm registry with the plugin.
+  ctx.effect(() => () => { CLEAR_RETRY(); CLEAR_PRESET_RETRY(); releaseRoute() }, 'loop-engine: retry cleanup')
   // installSettingsSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
@@ -462,7 +662,10 @@ export function apply(ctx: Context, config: Config): void {
         fileEngine = next
       } catch (error: unknown) {
         ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
+        return
       }
+      // The selection committed: steer new sessions to the matching preset.
+      steerPresetDefault(next)
     },
   })
 }

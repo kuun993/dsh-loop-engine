@@ -40,6 +40,18 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 3. To remove the plugin: `dsh plugin --profile web remove dsh-loop-engine`, then
    restart `dsh web`.
 
+### What a hosted engine takes over
+
+While a hosted engine is selected, it owns the session's command and skill
+surface: the plugin disables dsh's own `/goal` and points new sessions at a
+managed `loop-engine` agent preset — a copy of `standard` minus the dsh-native
+`/compact`, `/plan`, goal-tool, and skill rows that an external engine cannot
+honor — so the slash menu shows the engine's bridged commands and its own
+skill catalog. Engine-agnostic dsh commands (`/export`, `/feedback`,
+`/permission`) keep working and stay. Switching back to `in-process` restores
+the previous preset default; already-running sessions always keep the preset
+they were created with.
+
 ### Engine notes
 
 - The Claude Code driver runs one SDK query per step; its slash commands are

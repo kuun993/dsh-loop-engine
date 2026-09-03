@@ -37,6 +37,9 @@ describe('renderManagedBlock', () => {
     // The engine lives inside dsh-loop-engine; the block only disables the
     // base loop so the single AgentFactory slot has no collision.
     expect(block).not.toContain('agent-loop-claude-code')
+    // The dsh /goal command goes down with the loop: a hosted engine owns the
+    // session's command surface (Kimi brings its own /goal).
+    expect(block).toContain('- id: command-goal\n  disabled: true')
     expect(block.endsWith(`${MANAGED_BLOCK_END}\n`)).toBe(true)
   })
 

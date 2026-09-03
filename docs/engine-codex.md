@@ -132,7 +132,7 @@ step 循环（`src/engine-codex/agent.ts:547-651`）维护一套折叠状态：`
 
 ### 5.5 request/header
 
-每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:430-441`）。`provider` 恒为 `'codex'`（`src/engine-codex/agent.ts:50`）；未钉 `model` 时 model 标签为 `'codex-native'`（`src/engine-codex/agent.ts:52-56`）——**web 会话的建议性模型选择刻意不镜像进 header**，因为它从不驱动查询（与 `docs/proposals/model-selection-disable.md` 对 claude 引擎的论述同理）。
+每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:430-441`）。`provider` 恒为 `'codex'`（`src/engine-codex/agent.ts:50`）；未钉 `model` 时 model 标签为 `'codex-native'`（`src/engine-codex/agent.ts:52-56`）——**web 会话的建议性模型选择刻意不镜像进 header**，因为它从不驱动查询（与 `docs/proposals/model-selection-disable.md` 对 claude 引擎的论述同理）。该 provider 标签在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ## 6. 权限模型
 

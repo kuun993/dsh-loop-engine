@@ -12,7 +12,16 @@
  *   # -- dsh-loop-engine managed block: claude-code --
  *   - id: agent-loop
  *     disabled: true
+ *   - id: command-goal
+ *     disabled: true
  *   # -- /dsh-loop-engine managed block --
+ *
+ * The `command-goal` row goes down with the loop: a hosted engine owns the
+ * session's command surface, and dsh's `/goal` would otherwise collide with
+ * an engine's own goal command (Kimi) or dangle over a goal service nothing
+ * drives (the other engines). The remaining dsh-native commands (`/export`,
+ * `/feedback`, `/permission`) are engine-agnostic session/settings controls
+ * that keep working under a hosted engine, so they stay.
  *
  * `in-process` renders an absent block (the base bundle's `agent-loop` row
  * stays active and supplies the factory), so switching back removes the span
@@ -43,6 +52,8 @@ export function renderManagedBlock(engine: LoopEngineId): string {
   return [
     `${MANAGED_BLOCK_BEGIN}${engine} --`,
     '- id: agent-loop',
+    '  disabled: true',
+    '- id: command-goal',
     '  disabled: true',
     END_MARKER_LINE,
   ].join('\n')

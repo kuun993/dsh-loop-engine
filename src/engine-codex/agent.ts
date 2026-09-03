@@ -47,7 +47,7 @@ import {
 } from '../driver-core/skill-inject.ts'
 
 /** Provider route label used for logged header snapshots and message provenance. */
-const PROVIDER = 'codex'
+export const PROVIDER = 'codex'
 /**
  * Model label logged when the deployment pins no model: Codex owns its model
  * natively, so the web session's advisory model selection is deliberately not

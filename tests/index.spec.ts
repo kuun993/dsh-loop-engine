@@ -10,12 +10,14 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsProvider, settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentFactory } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import {
   apply,
   resolvePatchPath,
@@ -23,6 +25,7 @@ import {
   writePatchFile,
 } from '../src/index.ts'
 import { applyManagedBlock, currentEngineOf } from '../src/patch-manager.ts'
+import { HostedEngineRouteAdapter } from '../src/provider-route.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { CLAUDE_CODE_COMMANDS, type CommandDefinition } from '../src/commands.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
@@ -30,6 +33,7 @@ import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
 import { PiSkillProvider } from '../src/engine-pi/skills.ts'
 import { KimiSkillProvider } from '../src/engine-kimi/skills.ts'
 import { KIMI_COMMANDS } from '../src/engine-kimi/commands.ts'
+import { COMPOSITION_FILE, HOSTED_PRESET_ID, USER_PRESET_DIR } from '../src/preset.ts'
 
 // Partial mocks so a non-ENOENT read failure is reproducible on every host.
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -83,7 +87,7 @@ class MemorySettings extends SettingsProvider {
   }
 }
 
-async function boot(doc?: Record<string, unknown>) {
+async function boot(doc?: Record<string, unknown>, opts?: { llm?: boolean }) {
   const ctx = new Context()
   // The claude-code managed block hosts the Claude Code factory in apply(),
   // which requires the agent/session/system-prompt/subprocess services.
@@ -91,6 +95,10 @@ async function boot(doc?: Record<string, unknown>) {
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
+  // The real llm registry, present in the web profile: hosted-engine mounts
+  // register their provider route placeholder into it. Tests for the attach
+  // race pass { llm: false } and plugin the registry themselves later.
+  if (opts?.llm !== false) await ctx.plugin(LlmRuntime)
   const fiber = ctx.plugin(MemorySettings, doc)
   await fiber
   return { ctx, provider: ctx.get('settings') as MemorySettings, fiber }
@@ -102,6 +110,7 @@ afterEach(async () => {
     const dispose = cleanups.pop()!
     await dispose()
   }
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
 })
 
@@ -836,5 +845,440 @@ describe('apply kimi engine', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip kimi command /help'))
 
     await fiber.dispose()
+  })
+})
+
+describe('apply provider route', () => {
+  /** Live provider ids in the booted llm registry. */
+  const providerIds = (ctx: Context): string[] =>
+    (ctx.get('llm') as LlmRuntime).listProviders().map(provider => provider.id)
+
+  it('serves the mounted engine header label and withdraws it on the way back to in-process', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    apply(ctx, { patchPath: path })
+
+    // Registration is synchronous once the llm registry is up.
+    expect(providerIds(ctx)).toEqual(['kimi'])
+    // The placeholder advertises no models, so the picker catalog is unchanged.
+    await expect((ctx.get('llm') as LlmRuntime).listModels('kimi')).resolves.toEqual([])
+
+    // Let the settings section attach before driving the switch.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(providerIds(ctx)).toEqual([])
+    })
+
+    await fiber.dispose()
+  })
+
+  it('follows the hosted engine across a runtime switch', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    apply(ctx, { patchPath: path })
+    expect(providerIds(ctx)).toEqual(['kimi'])
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await ctx.settings.update(NS_BRANDED, { engine: 'codex' })
+    await vi.waitFor(() => {
+      expect(providerIds(ctx)).toEqual(['codex'])
+    })
+
+    await fiber.dispose()
+  })
+
+  it('warns and leaves a deployment-owned route alone when the label is already served', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    // A deployment adapter already serving the label needs no placeholder.
+    ;(ctx.get('llm') as LlmRuntime).registerAdapter(['kimi'], new HostedEngineRouteAdapter('kimi'))
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('provider route "kimi" is already served'))
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeDefined()
+    })
+
+    // Unmounting must not withdraw a route the plugin does not own.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(() => {
+      expect(ctx.get('agentLoopKimi')).toBeUndefined()
+    })
+    expect(providerIds(ctx)).toEqual(['kimi'])
+
+    await fiber.dispose()
+  })
+
+  it('reports a registration failure that is not a duplicate', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } }, { llm: false })
+    ctx.provide('llm', {
+      registerAdapter: () => { throw new Error('registry read-only') },
+    })
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('provider route "kimi" registration failed: Error: registry read-only'))
+
+    await fiber.dispose()
+  })
+
+  it('registers once the llm service appears within the retry window', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } }, { llm: false })
+    apply(ctx, { patchPath: path })
+    // Settle past one retry tick: nothing to register into yet.
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    await ctx.plugin(LlmRuntime)
+    await vi.waitFor(() => {
+      expect(providerIds(ctx)).toEqual(['kimi'])
+    })
+
+    await fiber.dispose()
+  })
+
+  it('stops retrying when the engine is unmounted before the llm service appears', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } }, { llm: false })
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(async () => {
+      expect(currentEngineOf((await safeRead(path)) ?? '')).toBe('in-process')
+    })
+
+    // The pending retry was cleared: the registry arriving later serves nothing.
+    await ctx.plugin(LlmRuntime)
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(providerIds(ctx)).toEqual([])
+
+    await fiber.dispose()
+  })
+
+  it('gives up after the bounded retry window when the llm service never appears', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } }, { llm: false })
+    apply(ctx, { patchPath: path })
+    // 30 attempts x 100ms: the window closes before the registry shows up.
+    await new Promise(resolve => setTimeout(resolve, 3300))
+
+    await ctx.plugin(LlmRuntime)
+    await new Promise(resolve => setTimeout(resolve, 250))
+    expect(providerIds(ctx)).toEqual([])
+
+    await fiber.dispose()
+  }, 10000)
+})
+
+describe('apply preset steering', () => {
+  /** Minimal standard-preset composition fixture carrying one stripped row. */
+  const PRESET_FIXTURE = [
+    '# header',
+    '',
+    '- id: persona',
+    `  name: '@deepseek-ai/dsh-persona'`,
+    '',
+    '# skills',
+    '',
+    '- id: skill-filesystem',
+    `  name: '@deepseek-ai/dsh-skill-filesystem'`,
+    '',
+    '- id: tool-bash',
+    `  name: '@deepseek-ai/dsh-tool-bash'`,
+    '',
+  ].join('\n')
+
+  interface RosterScope {
+    get(): { default?: string }
+  }
+
+  /**
+   * Fake agent-presets roster: `defaultId` mirrors the registered settings
+   * scope exactly like the real service (`settings?.get().default ?? config.default`).
+   */
+  function fakeRoster(scopeRef: { current: RosterScope | undefined }, composition = PRESET_FIXTURE) {
+    return {
+      get defaultId() {
+        return scopeRef.current?.get().default ?? 'standard'
+      },
+      read: vi.fn(async (id: string) => {
+        if (id !== 'standard') throw new Error(`unknown preset "${id}"`)
+        return composition
+      }),
+    }
+  }
+
+  const AGENT_PRESETS_NS = settingsNamespace('agent-presets')
+  const AGENT_PRESETS_SCHEMA = z.object({ default: z.string() })
+
+  /** Register the roster's settings namespace the way dsh-agent-presets does. */
+  function registerRosterNamespace(ctx: Context): RosterScope {
+    return ctx.settings.register(AGENT_PRESETS_NS, AGENT_PRESETS_SCHEMA, { base: { default: 'standard' } })
+  }
+
+  /** The managed preset composition path under a stubbed DSH_HOME. */
+  function hostedCompositionPath(home: string): string {
+    return join(home, USER_PRESET_DIR, HOSTED_PRESET_ID, COMPOSITION_FILE)
+  }
+
+  it('authors the hosted preset and points the roster default at it for a hosted engine', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+
+    await vi.waitFor(() => {
+      expect(scopeRef.current.get().default).toBe(HOSTED_PRESET_ID)
+    })
+    const composition = await readFile(hostedCompositionPath(home), 'utf8')
+    expect(composition).toContain('Managed by dsh-loop-engine')
+    expect(composition).not.toContain('skill-filesystem')
+    expect(composition).toContain('- id: tool-bash')
+
+    await fiber.dispose()
+  })
+
+  it('restores the replaced default when switching back to in-process', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, fiber, provider } = await boot({ [NS]: { engine: 'kimi' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+    await vi.waitFor(() => {
+      expect(scopeRef.current.get().default).toBe(HOSTED_PRESET_ID)
+    })
+
+    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    await vi.waitFor(async () => {
+      expect(currentEngineOf(await readFile(path, 'utf8'))).toBe('in-process')
+    })
+    // The replaced default is restored as an explicit value.
+    await vi.waitFor(() => {
+      expect(scopeRef.current.get().default).toBe('standard')
+    })
+    expect(provider.doc['agent-presets']).toEqual({ default: 'standard' })
+
+    await fiber.dispose()
+  })
+
+  it('clears a stale hosted default left over under in-process at boot', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n')
+    const { ctx, fiber, provider } = await boot({
+      [NS]: { engine: 'in-process' },
+      'agent-presets': { default: HOSTED_PRESET_ID },
+    })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    expect(scopeRef.current.get().default).toBe(HOSTED_PRESET_ID)
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+
+    // The stale value is unset, falling back to the row's configured default.
+    await vi.waitFor(() => {
+      expect(scopeRef.current.get().default).toBe('standard')
+    })
+    expect((provider.doc['agent-presets'] as { default?: string }).default).toBeUndefined()
+
+    await fiber.dispose()
+  })
+
+  it('retries the default switch until the roster namespace registers', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    // The roster service is up but its settings namespace is not — the attach
+    // race the retry window exists for.
+    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 150))
+    scopeRef.current = registerRosterNamespace(ctx)
+
+    await vi.waitFor(() => {
+      expect(scopeRef.current!.get().default).toBe(HOSTED_PRESET_ID)
+    })
+
+    await fiber.dispose()
+  })
+
+  it('leaves the default alone and reports when the preset cannot be authored', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    vi.stubEnv('DSH_HOME', await tempDir())
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    const roster = fakeRoster(scopeRef)
+    roster.read.mockRejectedValue(new Error('unknown preset "standard"'))
+    ctx.provide('agentPresets', roster)
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('hosted preset authoring failed'))).toBe(true)
+    })
+    expect(scopeRef.current.get().default).toBe('standard')
+
+    await fiber.dispose()
+  })
+
+  it('does not touch the roster when its default already names the hosted preset', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, fiber, provider } = await boot({
+      [NS]: { engine: 'kimi' },
+      'agent-presets': { default: HOSTED_PRESET_ID },
+    })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+
+    await vi.waitFor(async () => {
+      expect(await readFile(hostedCompositionPath(home), 'utf8')).toContain('Managed by dsh-loop-engine')
+    })
+    // No switch was needed: the doc is exactly what the seed carried.
+    expect(provider.doc['agent-presets']).toEqual({ default: HOSTED_PRESET_ID })
+
+    await fiber.dispose()
+  })
+
+  it('fails loud when the settings write itself rejects', async () => {
+    /** A provider whose persist always fails. */
+    class FailingPersist extends MemorySettings {
+      protected override persist(): Promise<void> {
+        return Promise.reject(new Error('disk full'))
+      }
+    }
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(FailingPersist, { [NS]: { engine: 'kimi' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('preset default switch failed'))).toBe(true)
+    })
+
+    await ctx.fiber.dispose()
+  })
+
+  it('gives up the default switch when the roster namespace never registers', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    vi.stubEnv('DSH_HOME', await tempDir())
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
+    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    apply(ctx, { patchPath: path })
+
+    // 30 attempts at 100ms: the retry window exhausts and fails loud once.
+    await vi.waitFor(() => {
+      expect(errorSpy.mock.calls.some(call => String(call[0]).includes('preset default switch failed'))).toBe(true)
+    }, { timeout: 8000 })
+
+    await fiber.dispose()
+  }, 10000)
+
+  it('stops polling a clean in-process default after the re-check window', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n')
+    const { ctx, fiber, provider } = await boot({ [NS]: { engine: 'in-process' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+
+    // The stale-value re-check polls for 30 x 100ms, finds nothing to undo,
+    // and stops without ever writing the roster namespace.
+    await new Promise(resolve => setTimeout(resolve, 3500))
+    expect(provider.doc['agent-presets']).toBeUndefined()
+
+    await fiber.dispose()
+  }, 8000)
+
+  it('clears a pending re-check when the plugin is disposed', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, '# seed\n')
+    const { ctx, provider } = await boot({ [NS]: { engine: 'in-process' } })
+    const scopeRef = { current: registerRosterNamespace(ctx) }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+    await new Promise(resolve => setTimeout(resolve, 150))
+    await ctx.fiber.dispose()
+
+    // The pending poll was cleared: no late mutation after disposal.
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(provider.doc['agent-presets']).toBeUndefined()
+  })
+
+  it('still authors the preset when the profile has no settings service', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'kimi'))
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    // A settings-less boot: the section install defers, the steering still
+    // authors the preset, and the default write skips quietly.
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalSubprocessRuntime)
+    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
+    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    apply(ctx, { patchPath: path })
+
+    await vi.waitFor(async () => {
+      expect(await readFile(hostedCompositionPath(home), 'utf8')).toContain('Managed by dsh-loop-engine')
+    })
+
+    await ctx.fiber.dispose()
   })
 })
