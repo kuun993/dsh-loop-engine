@@ -19,6 +19,13 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 > Everything else you wrote in that file is preserved; only the plugin's own
 > span changes.
 
+> **pnpm users:** pnpm 10+ blocks dependency build scripts by default, so the
+> install may report `@google/genai`, `node-pty`, and `protobufjs` as blocked.
+> This is expected — click **"Allow build scripts and retry"** (or run
+> `pnpm approve-builds`, or list them under `pnpm.onlyBuiltDependencies` in
+> your project root) and retry. Only the installing project can grant this;
+> the plugin cannot pre-approve its own dependencies.
+
 ### Requirements
 
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
