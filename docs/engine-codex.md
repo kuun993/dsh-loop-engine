@@ -128,7 +128,7 @@ step 循环（`src/engine-codex/agent.ts:547-651`）维护一套折叠状态：`
 - `commandExecution` → `name: 'command_execution'`，arguments 为 `{"command": ...}`，`isError = exitCode !== 0 || status === 'failed'`（`src/engine-codex/appserver/mapping.ts:25-38`）。
 - `fileChange` → `name: 'apply_patch'`，result 文本为 `patch <status>`，`isError = status === 'failed'`（`src/engine-codex/appserver/mapping.ts:41-54`）。
 - `mcpToolCall` → `name: '<server>/<tool>'`（缺任一则 `mcp_tool_call`），`isError = error != null`（`src/engine-codex/appserver/mapping.ts:57-76`）。
-- 三者的 `callId` 都是 `CallId(item.id)`，跨 item 类型不做去重。
+- 三者的 `callId` 都是 `ToolCallId(item.id)`，跨 item 类型不做去重。
 
 ### 5.5 request/header
 
@@ -220,7 +220,7 @@ Codex 没有交互审批，权限 = 线程启动时的 `sandboxMode` + `approval
 
 1. **`loop.ts:1-11` 模块注释过时**：称驱动"through the OpenAI Codex SDK"、"The Codex SDK spawns its own CLI binary (no spawn injection seam)"。实际代码没有任何 Codex SDK 依赖——驱动自己用 `node:child_process.spawn` 拉起 `codex app-server`（`appserver/client.ts:9, 76`），走的是手写 JSON-RPC。注释大概沿袭自早期 SDK 方案，"不经 subprocess 接缝"的结论仍然成立，但措辞误导。
 2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:64-65`），`codexConfig` 也转发它（`src/index.ts:207`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:76-78`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
-3. **`clientInfo.version` 硬编码过时**：initialize 报 `'0.1.1-rc.2'`（`appserver/client.ts:100`），而 `package.json` 已是 `1.0.0-rc7`。
+3. **`clientInfo.version` 已对齐**：initialize 报 `'1.0.0-rc8'`（`appserver/client.ts:100`），随本次发布与 `package.json` 同步到 `1.0.0-rc8`。
 4. **`threadResume` 无调用方**（`appserver/client.ts:113-115`）：保留的协议面，dsh resume 不走 codex thread/resume。改 resume 语义时注意别误以为它在用。
 5. `turn()` 的 `token-usage` 事件与 `ErrorNotification.willRetry` 被产生/携带但无人消费；若将来要中途展示 token 用量或区分可重试错误，这两个钩子已经现成。
 

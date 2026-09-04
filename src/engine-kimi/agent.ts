@@ -23,10 +23,10 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CallId, LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './types.ts'
@@ -89,7 +89,7 @@ interface OpenBlock {
   readonly index: number
   readonly type: 'text' | 'reasoning'
   text: string
-  readonly refs: number[]
+  readonly refs: SessionSeq[]
 }
 
 /** Drives one session through turn and step boundaries on Kimi Code. */
@@ -128,7 +128,7 @@ export class KimiAgent implements Agent {
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
     })
-    const lastTurn = session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0
+    const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -514,7 +514,7 @@ export class KimiAgent implements Agent {
     const client = await this.acpClient(cwd)
     signal.throwIfAborted()
     // Answer ACP tool-approval requests from the session's dsh approval knobs.
-    client.onPermission(() => resolveToolApproval(this.session.events))
+    client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))
     const acpSessionId = await client.newSession(cwd)
     signal.throwIfAborted()
 
@@ -589,7 +589,7 @@ export class KimiAgent implements Agent {
       if (callId === '' || this.emittedToolCalls.has(callId)) return
       this.emittedToolCalls.add(callId)
       const name = toolCallName(update)
-      this.session.append('tool/call', { turn, step, callId: CallId(callId), name, arguments: '{}' })
+      this.session.append('tool/call', { turn, step, callId: ToolCallId(callId), name, arguments: '{}' })
       this.toolText.set(callId, '')
       return
     }
@@ -614,7 +614,7 @@ export class KimiAgent implements Agent {
   }
 
   /** Append one live chunk and return its durable seq. */
-  private appendChunk(turn: number, step: number, chunk: StreamChunk): number {
+  private appendChunk(turn: number, step: number, chunk: StreamChunk): SessionSeq {
     return this.session.append('assistant/chunk', { turn, step, chunk }).seq
   }
 
@@ -625,7 +625,7 @@ export class KimiAgent implements Agent {
     // the `tool/call` + `tool/result` events have a parent message to pair with.
     if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) return
     const content: ContentBlock[] = []
-    const refs: number[] = []
+    const refs: SessionSeq[] = []
     for (const block of this.blocks) {
       // Blocks are created only when a non-empty delta arrives, so block.text is
       // always non-empty here — no `if (delta !== '')` guard needed.

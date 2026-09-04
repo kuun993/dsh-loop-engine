@@ -35,6 +35,8 @@ export interface LoopEngineKey {
   confirmAction: string
   /** Cancel action label. */
   cancelAction: string
+  /** Accessible close-button label of the confirmation dialog. */
+  closeLabel: string
   /** Notice shown while the Claude Code engine owns the slot: model selection is native. */
   claudeModelNotice: string
 }
@@ -56,6 +58,7 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   confirmBody: '切换会中断当前使用旧引擎运行中的会话，确认后页面将自动刷新，新对话使用新引擎。确认切换吗？',
   confirmAction: '切换',
   cancelAction: '取消',
+  closeLabel: '关闭',
   claudeModelNotice: '当前使用 Claude Code 引擎：实际模型由 Claude Code 原生决定，页面上的模型选择不生效。',
 }
 
@@ -76,5 +79,6 @@ export const en: Record<keyof LoopEngineKey, string> = {
   confirmBody: 'Switching interrupts sessions currently running on the previous engine; the page reloads after the switch and new turns use the new engine. Switch now?',
   confirmAction: 'Switch',
   cancelAction: 'Cancel',
+  closeLabel: 'Close',
   claudeModelNotice: 'Claude Code engine active: the actual model is decided natively by Claude Code; the model selector in this session has no effect.',
 }

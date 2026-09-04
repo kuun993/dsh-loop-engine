@@ -119,7 +119,7 @@ describe('createAgent options', () => {
         seed,
         meta: { cwd: process.cwd() },
       })
-      expect(agent.session.events.map(event => event.type)).toContain('turn/start')
+      expect(agent.session.snapshotEvents().map(event => event.type)).toContain('turn/start')
       expect(agent.session.header.cwd).toBe(process.cwd())
     } finally {
       await ctx.fiber.dispose()
@@ -223,14 +223,20 @@ describe('resume', () => {
     return ctx
   }
 
-  async function seedSession(root: string, sessionId: SessionId): Promise<void> {
+  async function seedSession(root: string, sessionId: SessionId, seed?: SessionEvent[]): Promise<void> {
     const ctx = await persistentHarness(root)
-    const seed: SessionEvent[] = [
+    const events: SessionEvent[] = seed ?? [
       { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
       { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
-    const session = ctx.sessions.create(sessionId, { seed })
-    await ctx.sessions.flush(session)
+    // Seed through a write handle directly: an unpublished session's events
+    // never route into a backend (live routing starts at agent publication).
+    const session = ctx.sessions.prepare(sessionId, { seed: events })
+    const handle = await ctx.sessionPersistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+    })
+    await handle.append(session.snapshotEvents())
+    await handle.close()
     await ctx.fiber.dispose()
   }
 
@@ -256,6 +262,47 @@ describe('resume', () => {
         expect(agent.session.id).toBe(sessionId)
         expect(agent.status).toBe('idle')
         expect(ctx.agents.get(sessionId)).toBe(agent)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('repairs an interrupted final turn through the write handle on resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-resume-'))
+    try {
+      const sessionId = SessionId('resume-interrupted')
+      // A crash tail: the turn started but never ended.
+      await seedSession(root, sessionId, [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      ])
+      const ctx = await persistentHarness(root)
+      try {
+        const { agent } = await ctx.agents.resume({ resumeSessionId: sessionId })
+        expect(agent.session.snapshotEvents().some(
+          event => event.type === 'turn/end' && event.data.reason.kind === 'interrupted',
+        )).toBe(true)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stores a created session through the write handle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const sessionId = SessionId('create-stored')
+        const { agent } = await ctx.agents.create({ sessionId, meta: { cwd: process.cwd() } })
+        expect(agent.status).toBe('idle')
+        // The create path claimed the session's write handle before publishing.
+        const stored = await ctx.sessionPersistence.stat(sessionId)
+        expect(stored?.header.id).toBe(sessionId)
       } finally {
         await ctx.fiber.dispose()
       }

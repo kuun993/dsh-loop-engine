@@ -10,7 +10,7 @@
 
 import type { TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import {
-  CallId,
+  ToolCallId,
   createToolResultMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { PiUsage } from './types.ts'
@@ -53,7 +53,7 @@ export function resultText(content: unknown): string {
 /** Map a completed Pi tool-execution end event to the durable tool/result message. */
 export function mapToolResult(ev: { toolCallId: string; result: unknown; isError: boolean }): ToolResultMessage {
   return createToolResultMessage({
-    callId: CallId(ev.toolCallId),
+    callId: ToolCallId(ev.toolCallId),
     content: [{ type: 'text', text: resultText(ev.result) || '(no content)' }],
     isError: ev.isError,
   })

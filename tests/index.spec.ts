@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { SettingsProvider, settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -496,7 +496,7 @@ describe('apply mount registrations', () => {
     // The base agent-loop owns the single AgentFactory slot, like a real boot.
     const releaseBase = ctx.agents.setFactory(fakeAgentFactory())
     apply(ctx, { patchPath: path })
-    // installSettingsSection registers the namespace inside a dependency
+    // installSection registers the namespace inside a dependency
     // inject callback; settle it before driving the settings scope.
     await new Promise(resolve => setTimeout(resolve, 20))
 
@@ -1026,7 +1026,7 @@ describe('apply preset steering', () => {
     }
   }
 
-  const AGENT_PRESETS_NS = settingsNamespace('agent-presets')
+  const AGENT_PRESETS_NS = 'agent-presets' as SettingsNamespace
   const AGENT_PRESETS_SCHEMA = z.object({ default: z.string() })
 
   /** Register the roster's settings namespace the way dsh-agent-presets does. */

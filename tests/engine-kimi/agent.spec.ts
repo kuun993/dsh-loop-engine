@@ -88,7 +88,7 @@ function textOf(input: UserMessage): string {
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
 function injectedSkillMessages(session: Session): UserMessage[] {
-  return session.events
+  return session.snapshotEvents()
     .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
     .map(event => event.data)
     .filter(input => (input.source as { kind: string }).kind === 'skill-invocation')
@@ -155,9 +155,9 @@ describe('KimiAgent turn mapping (streamed)', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const types = agent.session.events.map(event => event.type)
+      const types = agent.session.snapshotEvents().map(event => event.type)
       expect(types).toContain('assistant/chunk')
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
           message: {
@@ -167,7 +167,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
           },
         },
       })
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
       // The prompt was delivered to the ACP session.
       expect(mock.client.newSession).toHaveBeenCalledWith(process.cwd())
       expect(mock.client.prompt).toHaveBeenCalledWith('sess_1', expect.stringContaining('<user>'))
@@ -183,7 +183,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('think-s'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: { message: { content: [{ type: 'reasoning', text: 'think hard' }, { type: 'text', text: 'answer' }] } },
       })
@@ -205,12 +205,12 @@ describe('KimiAgent turn mapping (streamed)', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const toolCall_ = agent.session.events.find(event => event.type === 'tool/call')
+      const toolCall_ = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(toolCall_).toMatchObject({ data: { callId: '0:call_1', name: 'Bash' } })
-      const toolResult_ = agent.session.events.find(event => event.type === 'tool/result')
+      const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'ab' }] }] } } })
       // A tool-only step still publishes an (empty) assistant/message parent.
-      expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -227,7 +227,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('skip-s'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'kept' }] } } })
     } finally {
       await ctx.fiber.dispose()
@@ -241,7 +241,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('empty-s'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -294,7 +294,7 @@ describe('KimiAgent permission and client lifecycle', () => {
       agent.cancel({ kind: 'cancelled' })
       await idle
       expect(mock.client.cancel).toHaveBeenCalledWith('sess_1')
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -327,7 +327,7 @@ describe('KimiAgent error edges', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('init-fail'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
       // The rejected client is disposed and the cached reference is cleared.
       expect(mock.client.dispose).toHaveBeenCalled()
       expect(mock.client.newSession).not.toHaveBeenCalled()
@@ -345,7 +345,7 @@ describe('KimiAgent error edges', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('no-cwd') })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
       expect(mock.client.initialize).not.toHaveBeenCalled()
     } finally {
       await ctx.fiber.dispose()
@@ -370,7 +370,7 @@ describe('KimiAgent skill injection', () => {
       expect(injected).toHaveLength(1)
       expect(injected[0]).toMatchObject({ source: { kind: 'skill-invocation', name: 'review-pr', form: 'instructions' } })
       expect(textOf(injected[0])).toContain('# Do the review')
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -384,7 +384,7 @@ describe('KimiAgent skill injection', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: '/ghost fix this' }], source: { kind: 'user' } }))
       await agent.whenIdle()
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -405,7 +405,7 @@ describe('KimiAgent skill injection', () => {
       await agent.whenIdle()
       expect(get).toHaveBeenCalledTimes(3)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -427,7 +427,7 @@ describe('KimiAgent skill injection', () => {
       await agent.whenIdle()
       expect(get).toHaveBeenCalledTimes(1)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -447,7 +447,7 @@ describe('KimiAgent skill injection', () => {
       // Injection happens at pre-step, before the step itself fails on the
       // missing working directory.
       expect(injectedSkillMessages(agent.session)).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -466,9 +466,9 @@ describe('KimiAgent tool and chunk edges', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-edge'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      expect(agent.session.events.some(event => event.type === 'tool/call')).toBe(false)
-      expect(agent.session.events.some(event => event.type === 'tool/result')).toBe(false)
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      expect(agent.session.snapshotEvents().some(event => event.type === 'tool/call')).toBe(false)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'tool/result')).toBe(false)
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'ok' }] } } })
     } finally {
       await ctx.fiber.dispose()
@@ -485,10 +485,10 @@ describe('KimiAgent tool and chunk edges', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-stream'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      const toolResult = agent.session.events.find(event => event.type === 'tool/result')
+      const toolResult = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(toolResult).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'abc' }] }] } } })
       // A tool-only step still publishes an (empty) assistant/message parent.
-      expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -501,9 +501,9 @@ describe('KimiAgent tool and chunk edges', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('empty-delta'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'real' }] } } })
-      const chunks = agent.session.events.filter(event => event.type === 'assistant/chunk')
+      const chunks = agent.session.snapshotEvents().filter(event => event.type === 'assistant/chunk')
       // Only 'real' opened blocks: a block-start + text-delta + block-end.
       expect(chunks.filter(event => (event.data.chunk as { type: string }).type === 'block-start')).toHaveLength(1)
     } finally {
@@ -520,8 +520,8 @@ describe('KimiAgent driver control', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('steer-s'), meta: { cwd: process.cwd() } })
       agent.steer(message('hi'))
       await agent.whenIdle()
-      expect(agent.session.events.filter(event => event.type === 'step/start')).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(1)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -535,9 +535,9 @@ describe('KimiAgent driver control', () => {
       agent.inject(message('injected'))
       agent.followup(message('wake'))
       await agent.whenIdle()
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users).toHaveLength(2)
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -572,8 +572,8 @@ describe('KimiAgent driver control', () => {
       })
       expect(result).toBe('job-result')
       await agent.whenIdle()
-      expect(agent.session.events.filter(event => event.type === 'step/start')).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(1)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -641,7 +641,7 @@ describe('KimiAgent mid-turn input chaining', () => {
       agent.followup(message('two'))
       releasePrompt?.()
       await idle
-      const starts = agent.session.events.filter(event => event.type === 'turn/start')
+      const starts = agent.session.snapshotEvents().filter(event => event.type === 'turn/start')
       expect(starts).toHaveLength(2)
       expect(mock.client.prompt).toHaveBeenCalledTimes(2)
     } finally {
@@ -673,7 +673,7 @@ describe('KimiAgent mid-turn input chaining', () => {
       agent.steer(message('interrupt'))
       releasePrompt?.()
       await idle
-      const steps = agent.session.events.filter(event => event.type === 'step/start')
+      const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
       expect(steps).toHaveLength(2)
       expect(mock.client.prompt).toHaveBeenCalledTimes(2)
     } finally {
@@ -703,7 +703,7 @@ describe('KimiAgent mid-turn input chaining', () => {
       await idle
       // The disposed cancel does not latch a replay, so the followup stays queued.
       expect(agent.inbox.nextTurn).toHaveLength(1)
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'aborted', reason: { kind: 'disposed' } } } })
       expect(ends).toHaveLength(1)
     } finally {
@@ -721,7 +721,7 @@ describe('KimiAgent empty-step completion', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       expect(mock.client.prompt).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -747,7 +747,7 @@ describe('KimiAgent empty-step completion', () => {
       await agent.whenIdle()
       expect(proposals).toBe(2)
       expect(mock.client.prompt).toHaveBeenCalledTimes(1)
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -761,7 +761,7 @@ describe('KimiAgent empty-step completion', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       expect(mock.client.prompt).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'blocked' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'blocked' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -788,7 +788,7 @@ describe('KimiAgent commit vetoes', () => {
       const { agent } = await ctx.agents.create({ sessionId: SessionId('turnstart-veto'), meta: { cwd: process.cwd() } })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.some(event => event.type === 'turn/start' || event.type === 'user/message')).toBe(false)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'turn/start' || event.type === 'user/message')).toBe(false)
       expect(agent.inbox.nextTurn).toHaveLength(1)
       expect(errors.map(error => error.message)).toEqual(['reject turn-start before commit'])
     } finally {
@@ -821,7 +821,7 @@ describe('KimiAgent commit vetoes', () => {
       mock.updates.mockReturnValue([text('again')])
       agent.followup(message('again'))
       await agent.whenIdle()
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends).toHaveLength(1)
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
@@ -842,7 +842,7 @@ describe('KimiAgent request header', () => {
       })
       agent.followup(message('hi'))
       await agent.whenIdle()
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers[1]).toMatchObject({ data: { reason: 'resume' } })
     } finally {

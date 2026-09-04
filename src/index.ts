@@ -42,7 +42,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace, type SettingsNamespace, type SettingsPathOp } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
@@ -292,7 +292,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** Settings namespace of the preset roster (owned by dsh-agent-presets). */
-  const AGENT_PRESETS_NS = settingsNamespace('agent-presets')
+  const AGENT_PRESETS_NS = 'agent-presets' as SettingsNamespace
   /** Bounded retry window for the roster's settings namespace attach race. */
   const PRESET_DEFAULT_ATTEMPTS = 30
   const PRESET_DEFAULT_RETRY_MS = 100
@@ -637,35 +637,37 @@ export function apply(ctx: Context, config: Config): void {
   // preset-default and route-registration retries are bounded the same way,
   // and the route placeholder leaves the llm registry with the plugin.
   ctx.effect(() => () => { CLEAR_RETRY(); CLEAR_PRESET_RETRY(); releaseRoute() }, 'loop-engine: retry cleanup')
-  // installSettingsSection always calls setSource before the first onChange,
+  // installSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
-  installSettingsSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: fileEngine, showInComposer: true }, {
-    setSource: (current) => { source = current },
-    onChange: () => {
-      const next = source!().engine
-      if (next === fileEngine) return
-      // Runtime engines follow the selection in the same process: switching
-      // to a hosted engine mounts its factory, switching back to in-process
-      // unmounts it so the base loop regains the single AgentFactory slot.
-      // Re-entering the already-mounted engine is a no-op, not a churn.
-      if (mountedEngine !== next) {
-        unmountEngine()
-        mountEngine(next)
-      }
-      // Synchronous: the settings watch has no await, and a user may restart
-      // `dsh web` immediately after switching — the managed block must be on
-      // disk before the commit returns, or the restart reads the old engine.
-      try {
-        const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
-        writePatchFileSync(patchPath, updated)
-        fileEngine = next
-      } catch (error: unknown) {
-        ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
-        return
-      }
-      // The selection committed: steer new sessions to the matching preset.
-      steerPresetDefault(next)
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: fileEngine, showInComposer: true }, {
+      setSource: (current) => { source = current },
+      onChange: () => {
+        const next = source!().engine
+        if (next === fileEngine) return
+        // Runtime engines follow the selection in the same process: switching
+        // to a hosted engine mounts its factory, switching back to in-process
+        // unmounts it so the base loop regains the single AgentFactory slot.
+        // Re-entering the already-mounted engine is a no-op, not a churn.
+        if (mountedEngine !== next) {
+          unmountEngine()
+          mountEngine(next)
+        }
+        // Synchronous: the settings watch has no await, and a user may restart
+        // `dsh web` immediately after switching — the managed block must be on
+        // disk before the commit returns, or the restart reads the old engine.
+        try {
+          const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
+          writePatchFileSync(patchPath, updated)
+          fileEngine = next
+        } catch (error: unknown) {
+          ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
+          return
+        }
+        // The selection committed: steer new sessions to the matching preset.
+        steerPresetDefault(next)
+      },
+    })
   })
 }

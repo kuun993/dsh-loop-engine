@@ -167,7 +167,7 @@ describe('ClaudeCodeLoop factory registration', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -202,7 +202,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const types = agent.session.events.map(event => event.type)
+      const types = agent.session.snapshotEvents().map(event => event.type)
       expect(types).toContain('turn/start')
       expect(types).toContain('step/start')
       expect(types).toContain('user/message')
@@ -210,7 +210,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(types).toContain('step/end')
       expect(types).toContain('turn/end')
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
           message: {
@@ -253,7 +253,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -262,7 +262,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
         { type: 'text-delta', index: 0, text: 'world' },
       ])
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         surfaceOp: 'append',
         sourceEventSeqs: chunks.map(event => event.seq),
@@ -294,7 +294,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant?.data.message.content).toEqual([
         { type: 'reasoning', text: 'first second' },
         { type: 'reasoning', text: 'later' },
@@ -351,7 +351,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant?.data.message.content).toEqual([
         { type: 'reasoning', text: 'from message' },
         { type: 'text', text: 'answer' },
@@ -378,7 +378,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       // The reasoning-only message was held, not appended: exactly one
       // durable assistant message carries both the thinking and the answer.
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'split thinking' },
@@ -403,7 +403,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'reasoning', text: 'chunked' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
@@ -426,7 +426,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'trailing thinking' },
@@ -502,7 +502,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read it' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({
         data: { callId: 'toolu_999', name: 'Read', arguments: '{"file_path":"x.txt"}' },
@@ -562,7 +562,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: {
           reason: {
@@ -586,7 +586,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error', error: { code: 'CLAUDE_CODE_NO_RESULT' } } },
       })
@@ -608,7 +608,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: {
@@ -658,7 +658,7 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
       agent.cancel({ kind: 'user' })
       release?.()
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted', reason: { kind: 'user' } } },
       })
@@ -680,7 +680,7 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
       await agent.whenIdle()
       disposeReject()
       expect(queryMock).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'blocked' } },
       })
@@ -742,7 +742,7 @@ describe('configuration validation', () => {
         maxTurns: 4,
         disallowedTools: ['AskUserQuestion', 'ExitPlanMode'],
       })
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'claude-code', model: 'claude-opus-4-6' } } },
       })
     } finally {
@@ -765,7 +765,7 @@ function textOf(message: UserMessage): string {
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
 function injectedSkillMessages(session: Session): UserMessage[] {
-  return session.events
+  return session.snapshotEvents()
     .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
     .map(event => event.data)
     .filter(message => (message.source as { kind: string }).kind === 'skill-invocation')
@@ -934,7 +934,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       expect(texts[1]).toContain('PROVIDER INSTRUCTIONS')
       expect(texts[2]).toContain('Resources for this skill are managed by provider "file-provider".')
 
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -965,7 +965,7 @@ describe('ClaudeCodeAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(3)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -989,7 +989,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1020,7 +1020,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(get).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1052,7 +1052,7 @@ describe('ClaudeCodeAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(1)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted' } },
       })
@@ -1081,7 +1081,7 @@ describe('ClaudeCodeAgent skill injection', () => {
       // Injection happens at pre-step, before the step itself fails on the
       // missing working directory.
       expect(injectedSkillMessages(agent.session)).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })

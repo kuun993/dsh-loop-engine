@@ -157,10 +157,10 @@ describe('steering and injection', () => {
       agent.inject(message('queued first')) // no wakeup
       agent.steer(message('steered second')) // wakeup
       await agent.whenIdle()
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
         .toEqual(['queued first', 'steered second'])
-      expect(agent.session.events.at(-1)).toMatchObject({ type: 'turn/end' })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end' })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -184,7 +184,7 @@ describe('steering and injection', () => {
       // Safe followup after the queue was emptied.
       agent.followup(message('go'))
       await agent.whenIdle()
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
         .toEqual(['go'])
     } finally {
@@ -204,7 +204,7 @@ describe('steering and injection', () => {
       agent.cancel({ kind: 'user' }, { keepInbox: true })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users.map(event => (event as never as { data: { content: Array<{ text: string }> } }).data.content[0]!.text))
         .toEqual(['kept', 'go'])
     } finally {
@@ -261,7 +261,7 @@ describe('maintenance', () => {
       })
       await job
       await agent.whenIdle()
-      expect(agent.session.events.some(event => event.type === 'user/message')).toBe(true)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'user/message')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -311,10 +311,10 @@ describe('cancellation during a running turn', () => {
       agent.followup(message('two')) // during the aborted running phase
       release?.()
       await agent.whenIdle()
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
       expect(ends.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users).toHaveLength(2)
     } finally {
       await ctx.fiber.dispose()
@@ -347,7 +347,7 @@ describe('defensive guards', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const end = agent.session.events.findLast(event => event.type === 'turn/end')
+      const end = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
       expect(end).toMatchObject({
         data: { reason: { kind: 'error', error: { code: 'UNKNOWN' } } },
       })
@@ -367,7 +367,7 @@ describe('defensive guards', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const end = agent.session.events.findLast(event => event.type === 'turn/end')
+      const end = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
       expect(end).toMatchObject({
         data: {
           reason: {
@@ -417,12 +417,12 @@ describe('SDK transcript mapping edges', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const end = agent.session.events.findLast(event => event.type === 'turn/end')
+      const end = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
       if (end?.type === 'turn/end' && end.data.reason.kind === 'error') {
         throw new Error(`DEBUG reason: ${JSON.stringify(end.data.reason.error)}`)
       }
-      expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(0)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(0)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -459,10 +459,10 @@ describe('SDK transcript mapping edges', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistant = agent.session.events.findLast(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { role: 'assistant' } } })
       expect('usage' in (assistant as never as { data: Record<string, unknown> }).data).toBe(false)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -490,7 +490,7 @@ describe('SDK transcript mapping edges', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -514,7 +514,7 @@ describe('SDK transcript mapping edges', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers.at(-1)).toMatchObject({ data: { reason: 'resume' } })
     } finally {
@@ -540,10 +540,10 @@ describe('multi-step continuation', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const steps = agent.session.events.filter(event => event.type === 'step/start')
+      const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
       expect(steps).toHaveLength(2)
       expect(queryMock).toHaveBeenCalledTimes(2)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }

@@ -14,7 +14,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import {
-  CallId,
+  ToolCallId,
   createToolResultMessage,
   type ContentBlock,
   type StreamChunk,
@@ -25,7 +25,7 @@ import {
 /** One tool invocation surfaced from a Claude Code assistant message. */
 export interface MappedToolCall {
   /** SDK tool_use id, reused as the dsh call-id so results pair. */
-  readonly callId: CallId
+  readonly callId: ToolCallId
   /** Tool name exactly as the SDK reported it. */
   readonly name: string
   /** Raw JSON arguments string as the SDK produced them. */
@@ -78,7 +78,7 @@ export function mapAssistantMessage(message: BetaMessage): MappedAssistantMessag
         content.push({ type: 'text', text: block.text })
         break
       case 'tool_use': {
-        const callId = CallId(block.id)
+        const callId = ToolCallId(block.id)
         content.push({
           type: 'tool-call',
           id: callId,
@@ -126,7 +126,7 @@ export function mapToolResults(message: MessageParam): ToolResultMessage[] {
   for (const block of content) {
     if (block.type !== 'tool_result') continue
     results.push(createToolResultMessage({
-      callId: CallId(block.tool_use_id),
+      callId: ToolCallId(block.tool_use_id),
       content: toolResultContent(block.content),
       isError: block.is_error === true,
     }))
@@ -188,7 +188,7 @@ export function mapUsage(usage: BetaUsage): TokenUsage {
 
 /** Per-block-index tool-call identity captured at `content_block_start`, reused by `input_json_delta`. */
 export interface StreamToolCall {
-  readonly callId: CallId
+  readonly callId: ToolCallId
   readonly name: string
 }
 
@@ -219,7 +219,7 @@ export function mapStreamEvent(
         return [{ type: 'block-start', index: event.index, blockType: 'reasoning' }]
       }
       if (block.type === 'tool_use') {
-        toolCalls.set(event.index, { callId: CallId(block.id), name: block.name })
+        toolCalls.set(event.index, { callId: ToolCallId(block.id), name: block.name })
         return [{ type: 'block-start', index: event.index, blockType: 'tool-call' }]
       }
       return []
@@ -237,7 +237,7 @@ export function mapStreamEvent(
         return [{
           type: 'tool-call-delta',
           index: event.index,
-          id: call?.callId ?? CallId(`call-${event.index}`),
+          id: call?.callId ?? ToolCallId(`call-${event.index}`),
           ...call === undefined ? {} : { name: call.name },
           argumentsDelta: delta.partial_json,
         }]

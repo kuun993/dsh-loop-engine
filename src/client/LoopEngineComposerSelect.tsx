@@ -21,7 +21,7 @@ import {
   Menu,
   Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
 import type { LoopEngineId } from '../settings.ts'
@@ -251,6 +251,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
         open={pending !== null}
         onClose={cancelSwitch}
         title={t('confirmTitle')}
+        closeLabel={t('closeLabel')}
         footer={(
           <>
             <Button variant="outline" onClick={cancelSwitch}>{t('cancelAction')}</Button>

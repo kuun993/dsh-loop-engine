@@ -125,7 +125,7 @@ describe('PiLoop factory registration', () => {
       })
       agent.followup(message('hello'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -160,7 +160,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const types = agent.session.events.map(event => event.type)
+      const types = agent.session.snapshotEvents().map(event => event.type)
       expect(types).toContain('turn/start')
       expect(types).toContain('step/start')
       expect(types).toContain('user/message')
@@ -168,7 +168,7 @@ describe('PiAgent turn mapping', () => {
       expect(types).toContain('step/end')
       expect(types).toContain('turn/end')
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
           message: {
@@ -212,7 +212,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -220,7 +220,7 @@ describe('PiAgent turn mapping', () => {
         { type: 'text-delta', index: 0, text: 'hello ' },
         { type: 'text-delta', index: 0, text: 'world' },
       ])
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ sourceEventSeqs: chunks.map(event => event.seq) })
     } finally {
       await ctx.fiber.dispose()
@@ -245,7 +245,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       // The streamed thinking folds in because the authoritative message omits it.
       expect(assistants[0]?.data.message.content).toEqual([
@@ -278,7 +278,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('list it'))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' } })
       expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
@@ -318,9 +318,9 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const call = agent.session.events.find(event => event.type === 'tool/call')
+      const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'call-2', name: 'read', arguments: '{"path":"x"}' } })
-      const result = agent.session.events.find(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]).toMatchObject({ isError: true })
     } finally {
       await ctx.fiber.dispose()
@@ -340,7 +340,7 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
       expect(assistants[0]?.data.usage).toMatchObject({ inputTokens: 12 })
@@ -366,7 +366,7 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const result = agent.session.events.findLast(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'ran' })
     } finally {
       await ctx.fiber.dispose()
@@ -386,7 +386,7 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error', error: { code: 'PI_NO_RESULT' } } },
       })
@@ -417,9 +417,9 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -454,9 +454,9 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(2)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -475,7 +475,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('two'))
       await agent.whenIdle()
 
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: { header: { config: { provider: 'pi', model: 'pi-native' } }, reason: 'initial' },
@@ -503,7 +503,7 @@ describe('PiAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers.at(-1)).toMatchObject({ data: { reason: 'resume' } })
     } finally {
@@ -539,7 +539,7 @@ describe('PiAgent cancellation and pre-step interception', () => {
       agent.cancel({ kind: 'user' })
       release?.()
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted', reason: { kind: 'user' } } },
       })
@@ -562,7 +562,7 @@ describe('PiAgent cancellation and pre-step interception', () => {
       await agent.whenIdle()
       disposeReject()
       expect(mock.client.prompt).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'blocked' } },
       })
@@ -664,7 +664,7 @@ describe('PiAgent deployment pinning', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'pi', model: 'pi-deployment-model' } } },
       })
     } finally {
@@ -683,7 +683,7 @@ describe('PiAgent defensive guards', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const end = agent.session.events.findLast(event => event.type === 'turn/end')
+      const end = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
       expect(end).toMatchObject({ data: { reason: { kind: 'error', error: { code: 'UNKNOWN' } } } })
       expect(mock.client.prompt).not.toHaveBeenCalled()
     } finally {
@@ -715,7 +715,7 @@ function textOf(message: { content: readonly { type: string; text?: string }[] }
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
 function injectedSkillMessages(session: Session): Array<{ source: { kind: string; name?: string }; content: readonly { type: string; text: string }[] }> {
-  return session.events
+  return session.snapshotEvents()
     .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
     .map(event => event.data)
     .filter(message => (message.source as { kind: string }).kind === 'skill-invocation')
@@ -824,7 +824,7 @@ describe('PiAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -882,7 +882,7 @@ describe('PiAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(1)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted' } },
       })
@@ -913,7 +913,7 @@ describe('PiAgent skill injection', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -925,7 +925,7 @@ describe('PiAgent skill injection', () => {
         { type: 'block-start', index: 2, blockType: 'text' },
         { type: 'text-delta', index: 2, text: 'x' },
       ])
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'ab' },
         { type: 'reasoning', text: 'c' },
@@ -952,7 +952,7 @@ describe('PiAgent skill injection', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
     } finally {
@@ -974,10 +974,10 @@ describe('PiAgent skill injection', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'done' }])
       // The tool-call block is skipped from the assistant content (it is a separate tool/call event).
-      expect(agent.session.events.filter(event => event.type === 'tool/call')).toHaveLength(0)
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(0)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -999,9 +999,9 @@ describe('PiAgent skill injection', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const call = agent.session.events.find(event => event.type === 'tool/call')
+      const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } })
-      const result = agent.session.events.find(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'out' })
     } finally {
       await ctx.fiber.dispose()
@@ -1021,7 +1021,7 @@ describe('PiAgent skill injection', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const result = agent.session.events.findLast(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'ran' })
     } finally {
       await ctx.fiber.dispose()
@@ -1048,7 +1048,7 @@ describe('PiAgent skill injection', () => {
       // Injection happens at pre-step, before the step itself fails on the
       // missing working directory.
       expect(injectedSkillMessages(agent.session)).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -1108,7 +1108,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'plain answer' }])
     } finally {
       await ctx.fiber.dispose()
@@ -1129,7 +1129,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'thought' },
         { type: 'text', text: 'done' },
@@ -1153,7 +1153,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([])
     } finally {
       await ctx.fiber.dispose()
@@ -1173,7 +1173,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const result = agent.session.events.findLast(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: '(no content)' })
     } finally {
       await ctx.fiber.dispose()
@@ -1194,7 +1194,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const call = agent.session.events.find(event => event.type === 'tool/call')
+      const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'c9', name: 'read', arguments: '{}' } })
     } finally {
       await ctx.fiber.dispose()

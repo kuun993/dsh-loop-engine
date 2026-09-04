@@ -110,7 +110,7 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 - `resolveToolApproval(events)` = `sessionApprovalPolicy(events) !== 'ask'`（permission.ts:30-32）。即：**`ask` 策略降级为拒绝**（无人值守运行时唯一安全的答案，fail-closed）；`never` 或无旋钮一律自动批准。
 - **沙箱姿态不参与该折叠**（permission.ts:24-27 JSDoc）：Kimi 自己的工具策略约束工具能做什么，ACP 审批是 host 的闸门，信号只取 `approval/policy` 旋钮。沙箱姿态另由 subprocess 接缝在进程层生效。
 - `sessionApprovalPolicy` 从后往前取最后一条合法 `approval/policy` 事件（`src/driver-core/permission-knobs.ts:40-47`）。
-- 权限回调在每个 step 重新挂载：`client.onPermission(() => resolveToolApproval(this.session.events))`（agent.ts:517），读的是**应答时刻**的会话日志，所以运行中切换策略即刻生效。
+- 权限回调在每个 step 重新挂载：`client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))`（agent.ts:517），读的是**应答时刻**的会话日志，所以运行中切换策略即刻生效。
 - 双保险：即使 agent 没挂 handler，client 未注册 handler 时默认拒绝（client.ts:243）。
 
 ## 7. 斜杠命令桥接与技能注入
