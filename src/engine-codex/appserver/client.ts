@@ -97,7 +97,7 @@ export class AppServerClient {
       clientInfo: {
         name: 'dsh-loop-engine',
         title: null,
-        version: '0.1.1-rc.2',
+        version: '1.0.0-rc8',
       },
       capabilities: { experimentalApi: true, requestAttestation: false },
     }

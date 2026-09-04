@@ -23,9 +23,9 @@ import type {
   ResumeAgentOptions,
   SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
-import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import { interruptedTurnClosers, SessionId, SessionLogOffset, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { CodexAgent } from './agent.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
 import { FactoryOwnership, raceAbort, raceAbortCall } from '../driver-core/ownership.ts'
@@ -86,6 +86,12 @@ interface PreparedAgent {
   dispose(): Promise<void>
 }
 
+/** One session's owned write handle plus the count of events already stored through it. */
+interface StoredSession {
+  readonly handle: SessionHandle
+  storedCount: number
+}
+
 /** Resolve the driver configuration at the plugin config boundary. */
 function resolveConfig(config: Config): ResolvedConfig {
   return {
@@ -144,16 +150,18 @@ export class CodexLoop extends Service implements AgentFactory {
    * fuses caller cancellation with lifecycle teardown for setup awaits.
    */
   /* jscpd:ignore-start -- ownership/transaction machinery mirrors the Claude Code loop factory. */
-  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal): PreparedAgent {
+  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal, handle?: SessionHandle): PreparedAgent {
     ownerCtx.fiber.assertActive()
     /* v8 ignore start -- unreachable backstop, see above */
     /* v8 ignore next -- unreachable backstop, see above */
     if (!this.ownership.isActive()) throw new Error('agent loop is not active')    /* v8 ignore stop */
+    /* v8 ignore start -- both call sites gate the caller signal through raceAbortCall (create) or the fused load signal (resume) before prepare runs, so entering prepare with an aborted signal is unreachable */
     if (callerSignal?.aborted) {
       throw callerSignal.reason instanceof Error
         ? callerSignal.reason
         : new Error(`agent "${id}" creation aborted`, { cause: callerSignal.reason })
     }
+    /* v8 ignore stop */
     const loopCtx = this.runtime.ctx
 
     // Deactivation fuses three owners, each with its own reason: the caller's
@@ -188,12 +196,19 @@ export class CodexLoop extends Service implements AgentFactory {
           await machine.scope.dispose()
         }        /* v8 ignore stop */
       } finally {
+        // The machine committed its closing events synchronously into the
+        // session; closing the write handle drains them durably before the
+        // store attachment (the live-event write path) is released.
         try {
-          detachAgent?.()
-          detachSession?.()
+          await handle?.close()
         } finally {
-          untrack()
-          if (!ownerTriggered) await unfollowOwner()
+          try {
+            detachAgent?.()
+            detachSession?.()
+          } finally {
+            untrack()
+            if (!ownerTriggered) await unfollowOwner()
+          }
         }
       }
     })())
@@ -260,23 +275,36 @@ export class CodexLoop extends Service implements AgentFactory {
     setup: AgentSetup | undefined,
     signal: AbortSignal | undefined,
     source: SessionStartSource,
+    stored?: StoredSession,
   ): Promise<AgentHandle> {
     using ownedPreparation = preparation
     const session = ownedPreparation.session
-    const prepared = this.prepare(ownerCtx, id, agentOptions, session, signal)
+    let prepared: PreparedAgent
+    try {
+      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, stored?.handle)
+    } catch (error: unknown) {
+      // A rejected prepare never took the handle: close it so write ownership
+      // is released instead of leaking with the process.
+      await stored?.handle.close().catch(() => {})
+      throw error
+    }
     try {
       const setupCommit = await raceAbort(setup?.(prepared.agent.ctx), prepared.signal, id)
       setupCommit?.commit()
+      await this.appendUnstoredSuffix(stored, session)
       return prepared.publish(source)
     } catch (error: unknown) {
-      await prepared.dispose()
+      // Rollback swallows a disposal rejection (a failing final handle close):
+      // the setup failure is the primary error the caller must see.
+      await prepared.dispose().catch(() => {})
       throw error
     }
   }
 
   /**
    * Create an agent and session under one caller-supplied identity, owned by
-   * the accessing fiber.
+   * the accessing fiber. When a persistence backend is mounted, the session's
+   * durable identity is stored before publication.
    * @param ownerCtx - caller context that structurally owns the lifecycle.
    * @param options - identities, session seed/metadata, loop options, setup, and cancellation.
    * @returns the published handle.
@@ -285,18 +313,76 @@ export class CodexLoop extends Service implements AgentFactory {
     const preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(options.sessionId, {
       ...options.seed === undefined ? {} : { seed: options.seed },
       ...options.meta === undefined ? {} : { meta: options.meta },
+      ...options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount },
     }))
-    const published = this.setupAndPublish(
-      ownerCtx,
-      options.sessionId,
-      preparation,
-      options.agentOptions ?? {},
-      options.setup,
-      options.signal,
-      'startup',
-    )
+    const published = (async () => {
+      let stored: StoredSession | undefined
+      try {
+        // raceAbortCall normalizes a pre-aborted or mid-create abort and
+        // closes a handle that finishes creating after abandonment.
+        stored = options.signal === undefined
+          ? await this.createStoredSession(preparation.session)
+          : await raceAbortCall(
+            () => this.createStoredSession(preparation.session, options.signal),
+            options.signal,
+            options.sessionId,
+            (abandoned) => { void abandoned?.handle.close().catch(() => {}) },
+          )
+      } catch (error: unknown) {
+        preparation[Symbol.dispose]()
+        throw error
+      }
+      return this.setupAndPublish(
+        ownerCtx,
+        options.sessionId,
+        preparation,
+        options.agentOptions ?? {},
+        options.setup,
+        options.signal,
+        'startup',
+        stored,
+      )
+    })()
     this.ownership.trackWrapper(published)
     return published
+  }
+
+  /**
+   * Take a fresh session's write ownership when persistence is mounted.
+   * Nothing is appended here: the constructor seed (which never re-emits
+   * through `session/event`) is stored by {@link appendUnstoredSuffix} at the
+   * publication commit point, so a failed or cancelled setup closes an
+   * unmaterialized handle and leaves no stored residue — the same id can be
+   * created again.
+   * @param session - the unpublished session to store.
+   * @param signal - optional cancellation forwarded to the backend create.
+   * @returns the owned handle and stored cursor, or `undefined` without a backend.
+   */
+  private async createStoredSession(session: Session, signal?: AbortSignal): Promise<StoredSession | undefined> {
+    const persistence = this.runtime.ctx.get('sessionPersistence')
+    if (persistence === undefined) return undefined
+    const handle = await persistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+      ...signal === undefined ? {} : { signal },
+    })
+    return { handle, storedCount: 0 }
+  }
+
+  /**
+   * Durably store the session events appended since the last stored cursor.
+   * Pre-publication appends (constructor seed markers, setup-window events)
+   * never re-emit through `session/event`, so publication must flush them
+   * through the handle before live events start routing into it.
+   * @param stored - the session's owned handle and stored cursor, if any.
+   * @param session - the unpublished session whose suffix is stored.
+   */
+  private async appendUnstoredSuffix(stored: StoredSession | undefined, session: Session): Promise<void> {
+    if (stored === undefined) return
+    const suffix = session.snapshotEvents(SessionLogOffset(stored.storedCount))
+    if (suffix.length > 0) await stored.handle.append(suffix)
+    // Advance by what was stored, not to `session.seq`: an event appended
+    // during the await must stay unstored for the next flush.
+    stored.storedCount += suffix.length
   }
 
   /**
@@ -313,15 +399,17 @@ export class CodexLoop extends Service implements AgentFactory {
     return this.resumeWith(ownerCtx, persistence, options)
   }
 
-  /** Resume through an explicit persistence handle. */
-  private async resumeWith(
+  /** Resume through an explicit persistence service. */
+  private resumeWith(
     ownerCtx: Context,
     persistence: SessionPersistence,
     options: ResumeAgentOptions,
   ): Promise<AgentHandle> {
     const id = options.resumeSessionId
-    let preparation: SessionPreparation | undefined
-    try {
+    const published = (async () => {
+      // The open and read may outlive their owner: race them against caller
+      // cancellation, owner-fiber unload, and factory teardown so a
+      // never-settling backend cannot pin the identity.
       const ownerAbort = new AbortController()
       const unfollowOwner = ownerCtx.effect(() => () => {
         ownerAbort.abort(new Error(`agent "${id}" setup aborted: owner disposed during setup`))
@@ -331,30 +419,59 @@ export class CodexLoop extends Service implements AgentFactory {
         ownerAbort.signal,
         this.ownership.signal,
       ])
+      let handle: SessionHandle | undefined
+      let stored: StoredSession | undefined
+      let preparation: SessionPreparation | undefined
       try {
-        preparation = await raceAbortCall(
-          () => persistence.prepare(id, fused),
-          fused,
+        try {
+          // Taking write ownership FIRST excludes a concurrent resume of the
+          // same id (in this process, a live agent's handle holds the claim).
+          handle = await raceAbortCall(
+            () => persistence.open(id, 'write', { signal: fused }),
+            fused,
+            id,
+            (abandoned) => { void abandoned.close() },
+          )
+          // Semantic crash repair is the agent layer's job: persistence hands
+          // back the physically valid log; an interrupted final turn receives
+          // synthetic closers (missing tool errors, step/end, turn/end) that
+          // are appended through the same handle as an ordinary batch.
+          const persisted = await handle.read(0, undefined, { signal: fused })
+          fused.throwIfAborted()
+          const closers = interruptedTurnClosers(persisted)
+          if (closers.length > 0) await handle.append(closers)
+          preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
+            seed: [...persisted, ...closers],
+            meta: structuredClone(handle.header),
+            inheritedEventCount: handle.inheritedEventCount,
+            seedSource: 'persistence',
+          }))
+          stored = { handle, storedCount: persisted.length + closers.length }
+          await this.appendUnstoredSuffix(stored, preparation.session)
+        } finally {
+          await unfollowOwner()
+        }
+        ownerCtx.fiber.assertActive()
+        if (!this.ownership.isActive()) throw new Error('agent loop is not active')
+        const owned = stored
+        handle = undefined // ownership passes to setupAndPublish/prepare
+        return await this.setupAndPublish(
+          ownerCtx,
           id,
-          (abandoned) => { abandoned[Symbol.dispose]() },
+          preparation,
+          options.agentOptions ?? {},
+          options.setup,
+          options.signal,
+          'resume',
+          owned,
         )
       } finally {
-        await unfollowOwner()
+        preparation?.[Symbol.dispose]()
+        await handle?.close().catch(() => {})
       }
-      ownerCtx.fiber.assertActive()
-      if (!this.ownership.isActive()) throw new Error('agent loop is not active')
-      return await this.setupAndPublish(
-        ownerCtx,
-        id,
-        preparation,
-        options.agentOptions ?? {},
-        options.setup,
-        options.signal,
-        'resume',
-      )
-    } finally {
-      preparation?.[Symbol.dispose]()
-    }
+    })()
+    this.ownership.trackWrapper(published)
+    return published
   }
 }
 /* jscpd:ignore-end */

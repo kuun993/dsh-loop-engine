@@ -27,7 +27,7 @@ import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -76,7 +76,7 @@ type PreparedStep =
 interface HeldMessage {
   readonly content: ContentBlock[]
   /** Durable seqs of the chunks that already streamed this message's live partial. */
-  readonly refs: number[]
+  readonly refs: SessionSeq[]
 }
 
 /** Drives one session through turn and step boundaries on Codex. */
@@ -111,7 +111,7 @@ export class CodexAgent implements Agent {
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
     })
-    const lastTurn = session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0
+    const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -336,7 +336,7 @@ export class CodexAgent implements Agent {
    * @returns the permission fields of the query spec.
    */
   private queryPermission(): CodexPermission {
-    const fold = resolveSessionPermission(this.session.events)
+    const fold = resolveSessionPermission(this.session.snapshotEvents())
     return {
       sandboxMode: this.config.sandboxMode ?? fold.sandboxMode,
       approvalPolicy: this.config.approvalPolicy ?? fold.approvalPolicy,
@@ -495,9 +495,9 @@ export class CodexAgent implements Agent {
         /** Reasoning texts accumulated since the last flush, folded into the next agent message or flushed as a trailing reasoning message. */
         const pendingReasoning: string[] = []
         /** Seq refs of reasoning chunks already streamed for {@link pendingReasoning}. */
-        const pendingReasoningSeqs: number[] = []
+        const pendingReasoningSeqs: SessionSeq[] = []
         /** Seq refs of text chunks already streamed for the current agent message. */
-        const textSeqs: number[] = []
+        const textSeqs: SessionSeq[] = []
         /** The assistant message being assembled; its chunks stream live as items complete. */
         let held: HeldMessage | undefined
         /** Whether a reasoning block has been started (block-start emitted). */
@@ -508,7 +508,7 @@ export class CodexAgent implements Agent {
         let textBlockIndex = 0
 
         /** Emit one live partial chunk and return its durable seq. */
-        const emitChunk = (chunk: StreamChunk): number =>
+        const emitChunk = (chunk: StreamChunk): SessionSeq =>
           this.session.append('assistant/chunk', { turn, step, chunk }).seq
 
         /** Append the held assistant message, optionally carrying the turn's usage. */

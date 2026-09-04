@@ -9,10 +9,11 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, symbols, type EffectMeta } from '@deepseek-ai/cordis'
-import SessionStore, { SessionId, type SessionEvent, type SessionPreparation } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { Readable, Writable } from 'node:stream'
@@ -103,7 +104,7 @@ describe('createAgent options', () => {
         seed,
         meta: { cwd: process.cwd() },
       })
-      expect(agent.session.events.map(event => event.type)).toContain('turn/start')
+      expect(agent.session.snapshotEvents().map(event => event.type)).toContain('turn/start')
       expect(agent.session.header.cwd).toBe(process.cwd())
     } finally {
       await ctx.fiber.dispose()
@@ -282,14 +283,20 @@ describe('resume', () => {
     return ctx
   }
 
-  async function seedSession(root: string, sessionId: SessionId): Promise<void> {
+  async function seedSession(root: string, sessionId: SessionId, seed?: SessionEvent[]): Promise<void> {
     const ctx = await persistentHarness(root)
-    const seed: SessionEvent[] = [
+    const events: SessionEvent[] = seed ?? [
       { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
       { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
-    const session = ctx.sessions.create(sessionId, { seed })
-    await ctx.sessions.flush(session)
+    // Seed through a write handle directly: an unpublished session's events
+    // never route into a backend (live routing starts at agent publication).
+    const session = ctx.sessions.prepare(sessionId, { seed: events })
+    const handle = await ctx.sessionPersistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+    })
+    await handle.append(session.snapshotEvents())
+    await handle.close()
     await ctx.fiber.dispose()
   }
 
@@ -315,6 +322,47 @@ describe('resume', () => {
         expect(agent.session.id).toBe(sessionId)
         expect(agent.status).toBe('idle')
         expect(ctx.agents.get(sessionId)).toBe(agent)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('repairs an interrupted final turn through the write handle on resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-resume-'))
+    try {
+      const sessionId = SessionId('resume-interrupted')
+      // A crash tail: the turn started but never ended.
+      await seedSession(root, sessionId, [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      ])
+      const ctx = await persistentHarness(root)
+      try {
+        const { agent } = await ctx.agents.resume({ resumeSessionId: sessionId })
+        expect(agent.session.snapshotEvents().some(
+          event => event.type === 'turn/end' && event.data.reason.kind === 'interrupted',
+        )).toBe(true)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stores a created session through the write handle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const sessionId = SessionId('create-stored')
+        const { agent } = await ctx.agents.create({ sessionId, meta: { cwd: process.cwd() } })
+        expect(agent.status).toBe('idle')
+        // The create path claimed the session's write handle before publishing.
+        const stored = await ctx.sessionPersistence.stat(sessionId)
+        expect(stored?.header.id).toBe(sessionId)
       } finally {
         await ctx.fiber.dispose()
       }
@@ -352,17 +400,17 @@ describe('resume', () => {
     }
   })
 
-  it('releases an abandoned preparation when the resume caller cancels the load', async () => {
+  it('releases an abandoned write handle when the resume caller cancels the load', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-resume-'))
     try {
       const sessionId = SessionId('resume-abandoned')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<SessionHandle>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ;(ctx.sessionPersistence as unknown as { prepare: () => Promise<SessionPreparation> }).prepare = () => {
+        const closed = vi.fn(async () => {})
+        ;(ctx.sessionPersistence as unknown as { open: () => Promise<SessionHandle> }).open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -373,10 +421,10 @@ describe('resume', () => {
         })
         await started.promise
         controller.abort(new Error('cancel load'))
-        gate.resolve({ session: null, [Symbol.dispose]: released } as unknown as SessionPreparation)
+        gate.resolve({ close: closed } as unknown as SessionHandle)
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).toHaveBeenCalledTimes(1)
+        expect(closed).toHaveBeenCalledTimes(1)
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -409,17 +457,17 @@ describe('resume', () => {
     }
   })
 
-  it('propagates a preparation failure that is not a cancellation', async () => {
+  it('propagates an open failure that is not a cancellation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-resume-'))
     try {
-      const sessionId = SessionId('resume-prepare-boom')
+      const sessionId = SessionId('resume-open-boom')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        ;(ctx.sessionPersistence as unknown as { prepare: () => Promise<SessionPreparation> }).prepare = () => Promise.reject(new Error('prepare boom'))
+        ctx.sessionPersistence.open = () => Promise.reject(new Error('open boom'))
         await expect(ctx.agents.resume({
           resumeSessionId: sessionId,
-        })).rejects.toThrow('prepare boom')
+        })).rejects.toThrow('open boom')
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -429,17 +477,17 @@ describe('resume', () => {
     }
   })
 
-  it('swallows a preparation that fails after the resume caller cancels', async () => {
+  it('swallows an open that fails after the resume caller cancels', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-resume-'))
     try {
       const sessionId = SessionId('resume-late-failure')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<SessionHandle>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ;(ctx.sessionPersistence as unknown as { prepare: () => Promise<SessionPreparation> }).prepare = () => {
+        const closed = vi.fn(async () => {})
+        ;(ctx.sessionPersistence as unknown as { open: () => Promise<SessionHandle> }).open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -453,13 +501,192 @@ describe('resume', () => {
         gate.reject(new Error('late failure'))
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).not.toHaveBeenCalled()
+        expect(closed).not.toHaveBeenCalled()
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
       }
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('persistence cancellation edges', () => {
+  async function persistentHarness(root: string): Promise<Context> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
+    await ctx.plugin(loopPlugin, {})
+    await ctx.plugin(JsonlSessionPersistence, { root })
+    return ctx
+  }
+
+  async function seedSession(root: string, sessionId: SessionId): Promise<void> {
+    const ctx = await persistentHarness(root)
+    const seed: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const session = ctx.sessions.prepare(sessionId, { seed })
+    const handle = await ctx.sessionPersistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+    })
+    await handle.append(session.snapshotEvents())
+    await handle.close()
+    await ctx.fiber.dispose()
+  }
+
+  it('keeps the read failure primary when the abandoned handle close also fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-resume-'))
+    try {
+      const sessionId = SessionId('resume-read-boom')
+      await seedSession(root, sessionId)
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.open = () => Promise.resolve({
+          read: () => Promise.reject(new Error('read boom')),
+          close: closed,
+        } as unknown as SessionHandle)
+        await expect(ctx.agents.resume({
+          resumeSessionId: sessionId,
+        })).rejects.toThrow('read boom')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(sessionId)).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('closes an abandoned write handle when the create caller cancels the store claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const gate = Promise.withResolvers<SessionHandle>()
+        const started = Promise.withResolvers<undefined>()
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => {
+          started.resolve(undefined)
+          return gate.promise
+        }
+        const controller = new AbortController()
+        const creating = ctx.agents.create({
+          sessionId: SessionId('create-abandoned'),
+          meta: { cwd: process.cwd() },
+          signal: controller.signal,
+        })
+        await started.promise
+        controller.abort(new Error('cancel create'))
+        gate.resolve({ close: closed } as unknown as SessionHandle)
+        await expect(creating).rejects.toThrow('cancel create')
+        await new Promise<void>((resolve) => { setImmediate(resolve) })
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-abandoned'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('closes the claimed handle when agent preparation fails after the store claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => Promise.resolve({ close: closed } as unknown as SessionHandle)
+        const loop = ctx.agentLoopKimi as unknown as { prepare: (...args: never[]) => unknown }
+        vi.spyOn(loop, 'prepare').mockImplementationOnce(() => { throw new Error('prepare boom') })
+        await expect(ctx.agents.create({
+          sessionId: SessionId('create-prepare-boom'),
+          meta: { cwd: process.cwd() },
+        })).rejects.toThrow('prepare boom')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-prepare-boom'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('propagates a prepare failure without a backend and leaves no residue', async () => {
+    const ctx = await harness()
+    try {
+      const loop = ctx.agentLoopKimi as unknown as { prepare: (...args: never[]) => unknown }
+      vi.spyOn(loop, 'prepare').mockImplementationOnce(() => { throw new Error('prepare boom') })
+      await expect(ctx.agents.create({
+        sessionId: SessionId('create-prepare-bare'),
+        meta: { cwd: process.cwd() },
+      })).rejects.toThrow('prepare boom')
+      expect(ctx.agents.get(SessionId('create-prepare-bare'))).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('treats a signal aborted before the store claim settles as a cancelled create', async () => {
+    const ctx = await harness()
+    try {
+      const controller = new AbortController()
+      const creating = ctx.agents.create({
+        sessionId: SessionId('create-sync-abort'),
+        meta: { cwd: process.cwd() },
+        signal: controller.signal,
+      })
+      controller.abort(new Error('sync abort'))
+      await expect(creating).rejects.toThrow('sync abort')
+      expect(ctx.agents.get(SessionId('create-sync-abort'))).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the setup failure primary when the rollback handle close fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-kimi-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => Promise.resolve({ close: closed } as unknown as SessionHandle)
+        await expect(ctx.agents.create({
+          sessionId: SessionId('create-setup-close-boom'),
+          meta: { cwd: process.cwd() },
+          setup: () => { throw new Error('setup failed') },
+        })).rejects.toThrow('setup failed')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-setup-close-boom'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('forwards seed and inheritedEventCount into the prepared session', async () => {
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('create-seeded-count'),
+        meta: { cwd: process.cwd(), isSeeded: true },
+        seed: [{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } }],
+        inheritedEventCount: SessionLogOffset(1),
+      })
+      expect(agent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(true)
+      expect(agent.session.inheritedEventCount).toBe(1)
+    } finally {
+      await ctx.fiber.dispose()
     }
   })
 })

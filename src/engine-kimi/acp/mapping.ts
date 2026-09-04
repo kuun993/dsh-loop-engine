@@ -13,7 +13,7 @@
  */
 
 import type { ToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { AcpContentBlock, AcpToolCallExt, AcpToolCallStreamExt, AcpUpdate } from './types.ts'
 
 /** Whether the update is an incremental assistant text chunk. */
@@ -73,7 +73,7 @@ export function toolContentText(update: AcpToolCallExt | AcpToolCallStreamExt): 
 /** Project a completed tool call to a durable tool/result message. */
 export function toolResult(callId: string, text: string, isError: boolean): ToolResultMessage {
   return createToolResultMessage({
-    callId: CallId(callId),
+    callId: ToolCallId(callId),
     content: [{ type: 'text', text: text.length > 0 ? text : '(no content)' }],
     isError,
   })

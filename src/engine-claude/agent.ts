@@ -22,7 +22,7 @@ import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { query as officialQuery, type SDKResultError } from '@anthropic-ai/claude-agent-sdk'
@@ -117,7 +117,7 @@ export class ClaudeCodeAgent implements Agent {
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
     })
-    const lastTurn = session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0
+    const lastTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data.turn ?? 0
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -333,7 +333,7 @@ export class ClaudeCodeAgent implements Agent {
    */
   private queryPermission(): Pick<ClaudeCodeQuerySpec, 'permissionMode' | 'onToolPermission'> {
     if (this.config.permissionMode !== undefined) return { permissionMode: this.config.permissionMode }
-    const permission = resolveSessionPermission(this.session.events)
+    const permission = resolveSessionPermission(this.session.snapshotEvents())
     if (permission.kind === 'bypass') return { permissionMode: 'bypassPermissions' }
     if (permission.kind === 'ask') {
       const approval = this.loopCtx.get('approval') as ApprovalService | undefined
@@ -499,7 +499,7 @@ export class ClaudeCodeAgent implements Agent {
       const query = officialQuery({ prompt, options })
       let finished = false
       /** Seq numbers of the `assistant/chunk` events that streamed one message, for replay linking. */
-      const chunkSeqs: number[] = []
+      const chunkSeqs: SessionSeq[] = []
       /** Per-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
       const toolCalls = new Map<number, StreamToolCall>()
       /** Accumulated reasoning per block index, for the durable-message fallback below. */

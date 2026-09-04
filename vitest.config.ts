@@ -7,6 +7,13 @@ export default defineConfig({
   resolve: {
     alias: {
       '@deepseek-ai/cordis': `${mono}vendor/cordis/src/index.ts`,
+      // The persistence handle refactor (SessionPersistence.create/open +
+      // SessionHandle) landed in the monorepo AFTER the 0.1.2-rc.1 publish, so
+      // the npm packages still serve the removed `prepare` API. Alias both
+      // persistence packages to the monorepo sources, matching what the
+      // profile's file: shims resolve at runtime.
+      '@deepseek-ai/dsh-session-persistence-jsonl': `${mono}packages/session/session-persistence-jsonl/src/index.ts`,
+      '@deepseek-ai/dsh-session-persistence': `${mono}packages/session/session-persistence/src/index.ts`,
     },
   },
   test: {

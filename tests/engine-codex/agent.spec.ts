@@ -177,7 +177,7 @@ describe('CodexLoop factory registration', () => {
       })
       agent.followup(message('hello'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -216,7 +216,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const types = agent.session.events.map(event => event.type)
+      const types = agent.session.snapshotEvents().map(event => event.type)
       expect(types).toContain('turn/start')
       expect(types).toContain('step/start')
       expect(types).toContain('user/message')
@@ -224,7 +224,7 @@ describe('CodexAgent turn mapping', () => {
       expect(types).toContain('step/end')
       expect(types).toContain('turn/end')
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
           message: {
@@ -278,7 +278,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -286,7 +286,7 @@ describe('CodexAgent turn mapping', () => {
         { type: 'text-delta', index: 0, text: 'hello world' },
       ])
 
-      const assistant = agent.session.events.find(event => event.type === 'assistant/message')
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         surfaceOp: 'append',
         sourceEventSeqs: chunks.map(event => event.seq),
@@ -315,13 +315,13 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'split thinking' },
         { type: 'text', text: 'answer' },
       ])
-      const chunks = agent.session.events.filter(event => event.type === 'assistant/chunk')
+      const chunks = agent.session.snapshotEvents().filter(event => event.type === 'assistant/chunk')
       expect(chunks.map(event => event.data.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'reasoning' },
         { type: 'reasoning-delta', index: 0, text: 'split thinking' },
@@ -352,7 +352,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(2)
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
@@ -382,7 +382,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(2)
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
@@ -410,7 +410,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -418,7 +418,7 @@ describe('CodexAgent turn mapping', () => {
         { type: 'text-delta', index: 0, text: 'hello ' },
         { type: 'text-delta', index: 0, text: 'world' },
       ])
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
     } finally {
       await ctx.fiber.dispose()
@@ -445,7 +445,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.events.filter(
+      const chunks = agent.session.snapshotEvents().filter(
         (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
       )
       expect(chunks.map(event => event.data.chunk)).toEqual([
@@ -455,7 +455,7 @@ describe('CodexAgent turn mapping', () => {
         { type: 'block-start', index: 1, blockType: 'text' },
         { type: 'text-delta', index: 1, text: 'answer' },
       ])
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'think more' },
@@ -485,7 +485,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: '' },
@@ -512,7 +512,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: '' }])
     } finally {
       await ctx.fiber.dispose()
@@ -535,7 +535,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
       expect(assistants[0]?.data.usage).toBeUndefined()
     } finally {
@@ -560,10 +560,10 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
-      expect(agent.session.events.filter(event => event.type === 'tool/call')).toHaveLength(0)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(0)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -587,7 +587,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('list it'))
       await agent.whenIdle()
 
-      const events = agent.session.events
+      const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({
         data: { callId: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
@@ -626,9 +626,9 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const call = agent.session.events.find(event => event.type === 'tool/call')
+      const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'cmd-1', name: 'command_execution' } })
-      const result = agent.session.events.find(event => event.type === 'tool/result')
+      const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]).toMatchObject({ isError: true })
     } finally {
       await ctx.fiber.dispose()
@@ -655,9 +655,9 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const calls = agent.session.events.filter(event => event.type === 'tool/call')
+      const calls = agent.session.snapshotEvents().filter(event => event.type === 'tool/call')
       expect(calls.map(event => event.data.name)).toEqual(['docs/search', 'apply_patch'])
-      const results = agent.session.events.filter(event => event.type === 'tool/result')
+      const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
       expect(results).toHaveLength(2)
       expect(results[0]?.data.message.content[0]).toMatchObject({ isError: false })
     } finally {
@@ -682,10 +682,10 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const assistants = agent.session.events.filter(event => event.type === 'assistant/message')
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
-      expect(agent.session.events.filter(event => event.type === 'tool/call')).toHaveLength(0)
-      expect(agent.session.events.at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(0)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -706,7 +706,7 @@ describe('CodexAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: {
           reason: {
@@ -716,7 +716,7 @@ describe('CodexAgent turn mapping', () => {
         },
       })
       // The partial transcript survived the failure.
-      expect(agent.session.events.some(event => event.type === 'assistant/message')).toBe(true)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -734,7 +734,7 @@ describe('CodexAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error', error: { message: 'stream broke', code: 'CODEX_ERROR' } } },
       })
@@ -758,8 +758,8 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       // Trailing reasoning still lands durably before the failure surfaces.
-      expect(agent.session.events.some(event => event.type === 'assistant/message')).toBe(true)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(true)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error', error: { code: 'CODEX_NO_RESULT' } } },
       })
@@ -781,7 +781,7 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('two'))
       await agent.whenIdle()
 
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: {
@@ -812,7 +812,7 @@ describe('CodexAgent turn mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      const headers = agent.session.events.filter(event => event.type === 'request/header')
+      const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers.at(-1)).toMatchObject({ data: { reason: 'resume' } })
     } finally {
@@ -857,7 +857,7 @@ describe('CodexAgent cancellation and pre-step interception', () => {
       agent.cancel({ kind: 'user' })
       release?.()
       await agent.whenIdle()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted', reason: { kind: 'user' } } },
       })
@@ -879,7 +879,7 @@ describe('CodexAgent cancellation and pre-step interception', () => {
       await agent.whenIdle()
       disposeReject()
       expect(mock.runStreamed).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'blocked' } },
       })
@@ -973,7 +973,7 @@ describe('CodexAgent deployment pinning', () => {
         model: 'gpt-5.2-codex',
       })
 
-      expect(agent.session.events.filter(e => e.type === 'request/header')[0]).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
         data: { header: { config: { provider: 'codex', model: 'gpt-5.2-codex' } } },
       })
     } finally {
@@ -990,7 +990,7 @@ function textOf(message: UserMessage): string {
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
 function injectedSkillMessages(session: Session): UserMessage[] {
-  return session.events
+  return session.snapshotEvents()
     .filter((event): event is Extract<typeof event, { type: 'user/message' }> => event.type === 'user/message')
     .map(event => event.data)
     .filter(message => (message.source as { kind: string }).kind === 'skill-invocation')
@@ -1063,7 +1063,7 @@ describe('CodexAgent skill injection', () => {
       expect(texts[1]).toContain('PROVIDER INSTRUCTIONS')
       expect(texts[2]).toContain('Resources for this skill are managed by provider "file-provider".')
 
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1094,7 +1094,7 @@ describe('CodexAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(3)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1118,7 +1118,7 @@ describe('CodexAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1149,7 +1149,7 @@ describe('CodexAgent skill injection', () => {
       await agent.whenIdle()
 
       expect(get).not.toHaveBeenCalled()
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -1181,7 +1181,7 @@ describe('CodexAgent skill injection', () => {
 
       expect(get).toHaveBeenCalledTimes(1)
       expect(injectedSkillMessages(agent.session)).toEqual([])
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted' } },
       })
@@ -1210,7 +1210,7 @@ describe('CodexAgent skill injection', () => {
       // Injection happens at pre-step, before the step itself fails on the
       // missing working directory.
       expect(injectedSkillMessages(agent.session)).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })

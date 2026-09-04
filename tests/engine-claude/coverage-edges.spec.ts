@@ -18,7 +18,8 @@ import type {
   Query,
   SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
-import SessionStore, { SessionId, type SessionEvent, type SessionPreparation } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, {
   assembleContextFor,
@@ -171,7 +172,7 @@ describe('commit vetoes', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(agent.session.events.some(event => event.type === 'turn/start'
+      expect(agent.session.snapshotEvents().some(event => event.type === 'turn/start'
         || event.type === 'user/message')).toBe(false)
       expect(agent.inbox.nextTurn).toHaveLength(1)
       expect(errors.map(error => error.message)).toEqual(['reject turn-start before commit'])
@@ -208,7 +209,7 @@ describe('commit vetoes', () => {
       queryMock.mockImplementation(() => stream([assistantText('again'), successResult()]))
       agent.followup(message('again'))
       await agent.whenIdle()
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends).toHaveLength(1)
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'completed' } } })
     } finally {
@@ -229,7 +230,7 @@ describe('empty-step completion', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       expect(queryMock).not.toHaveBeenCalled()
-      const end = agent.session.events.at(-1)
+      const end = agent.session.snapshotEvents().at(-1)
       expect(end).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
@@ -259,7 +260,7 @@ describe('empty-step completion', () => {
       await agent.whenIdle()
       expect(proposals).toBe(2)
       expect(queryMock).toHaveBeenCalledTimes(1)
-      const end = agent.session.events.at(-1)
+      const end = agent.session.snapshotEvents().at(-1)
       expect(end).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     } finally {
       await ctx.fiber.dispose()
@@ -283,9 +284,9 @@ describe('mid-turn input chaining', () => {
       g1.release()
       queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
       await agent.whenIdle()
-      const starts = agent.session.events.filter(event => event.type === 'turn/start')
+      const starts = agent.session.snapshotEvents().filter(event => event.type === 'turn/start')
       expect(starts).toHaveLength(2)
-      const users = agent.session.events.filter(event => event.type === 'user/message')
+      const users = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
       expect(users).toHaveLength(2)
       expect(queryMock).toHaveBeenCalledTimes(2)
     } finally {
@@ -308,7 +309,7 @@ describe('mid-turn input chaining', () => {
       g1.release()
       queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
       await agent.whenIdle()
-      const steps = agent.session.events.filter(event => event.type === 'step/start')
+      const steps = agent.session.snapshotEvents().filter(event => event.type === 'step/start')
       expect(steps).toHaveLength(2)
       expect(queryMock).toHaveBeenCalledTimes(2)
     } finally {
@@ -332,7 +333,7 @@ describe('mid-turn input chaining', () => {
       g1.release()
       await agent.whenIdle()
       expect(agent.inbox.nextTurn).toHaveLength(1)
-      const ends = agent.session.events.filter(event => event.type === 'turn/end')
+      const ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
       expect(ends[0]).toMatchObject({ data: { reason: { kind: 'aborted', reason: { kind: 'disposed' } } } })
       expect(ends).toHaveLength(1)
     } finally {
@@ -462,8 +463,14 @@ describe('resume cancellation and ownership', () => {
       { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
       { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
     ]
-    const session = ctx.sessions.create(sessionId, { seed })
-    await ctx.sessions.flush(session)
+    // Seed through a write handle directly: an unpublished session's events
+    // never route into a backend (live routing starts at agent publication).
+    const session = ctx.sessions.prepare(sessionId, { seed })
+    const handle = await ctx.sessionPersistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+    })
+    await handle.append(session.snapshotEvents())
+    await handle.close()
     await ctx.fiber.dispose()
   }
 
@@ -496,17 +503,17 @@ describe('resume cancellation and ownership', () => {
     }
   })
 
-  it('releases an abandoned preparation when the resume caller cancels the load', async () => {
+  it('releases an abandoned write handle when the resume caller cancels the load', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-resume-'))
     try {
       const sessionId = SessionId('resume-abandoned')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<SessionHandle>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ctx.sessionPersistence.prepare = () => {
+        const closed = vi.fn(async () => {})
+        ctx.sessionPersistence.open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -517,10 +524,10 @@ describe('resume cancellation and ownership', () => {
         })
         await started.promise
         controller.abort(new Error('cancel load'))
-        gate.resolve({ session: null, [Symbol.dispose]: released } as unknown as SessionPreparation)
+        gate.resolve({ close: closed } as unknown as SessionHandle)
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).toHaveBeenCalledTimes(1)
+        expect(closed).toHaveBeenCalledTimes(1)
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -553,20 +560,17 @@ describe('resume cancellation and ownership', () => {
     }
   })
 
-  it('propagates a preparation failure that is not a cancellation', async () => {
+  it('propagates an open failure that is not a cancellation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-resume-'))
     try {
-      const sessionId = SessionId('resume-prepare-boom')
+      const sessionId = SessionId('resume-open-boom')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const released = vi.fn()
-        ctx.sessionPersistence.prepare = () => Promise.reject(new Error('prepare boom'))
+        ctx.sessionPersistence.open = () => Promise.reject(new Error('open boom'))
         await expect(ctx.agents.resume({
           resumeSessionId: sessionId,
-        })).rejects.toThrow('prepare boom')
-        await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).not.toHaveBeenCalled()
+        })).rejects.toThrow('open boom')
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
@@ -576,17 +580,42 @@ describe('resume cancellation and ownership', () => {
     }
   })
 
-  it('swallows a preparation that fails after the resume caller cancels', async () => {
+  it('keeps the read failure primary when the abandoned handle close also fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-resume-'))
+    try {
+      const sessionId = SessionId('resume-read-boom')
+      await seedSession(root, sessionId)
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.open = () => Promise.resolve({
+          read: () => Promise.reject(new Error('read boom')),
+          close: closed,
+        } as unknown as SessionHandle)
+        await expect(ctx.agents.resume({
+          resumeSessionId: sessionId,
+        })).rejects.toThrow('read boom')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(sessionId)).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('swallows an open that fails after the resume caller cancels', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-resume-'))
     try {
       const sessionId = SessionId('resume-late-failure')
       await seedSession(root, sessionId)
       const ctx = await persistentHarness(root)
       try {
-        const gate = Promise.withResolvers<SessionPreparation>()
+        const gate = Promise.withResolvers<SessionHandle>()
         const started = Promise.withResolvers<undefined>()
-        const released = vi.fn()
-        ctx.sessionPersistence.prepare = () => {
+        const closed = vi.fn(async () => {})
+        ctx.sessionPersistence.open = () => {
           started.resolve(undefined)
           return gate.promise
         }
@@ -600,13 +629,151 @@ describe('resume cancellation and ownership', () => {
         gate.reject(new Error('late failure'))
         await expect(resuming).rejects.toThrow('cancel load')
         await new Promise<void>((resolve) => { setImmediate(resolve) })
-        expect(released).not.toHaveBeenCalled()
+        expect(closed).not.toHaveBeenCalled()
         expect(ctx.agents.get(sessionId)).toBeUndefined()
       } finally {
         await ctx.fiber.dispose()
       }
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('create persistence and cancellation', () => {
+  async function persistentHarness(root: string): Promise<Context> {
+    const ctx = await harness(false)
+    await ctx.plugin(loopPlugin, {})
+    await ctx.plugin(JsonlSessionPersistence, { root })
+    return ctx
+  }
+
+  it('closes an abandoned write handle when the create caller cancels the store claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const gate = Promise.withResolvers<SessionHandle>()
+        const started = Promise.withResolvers<undefined>()
+        // A rejecting close proves the abandonment release swallows it.
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => {
+          started.resolve(undefined)
+          return gate.promise
+        }
+        const controller = new AbortController()
+        const creating = ctx.agents.create({
+          sessionId: SessionId('create-abandoned'),
+          meta: { cwd: process.cwd() },
+          signal: controller.signal,
+        })
+        await started.promise
+        controller.abort(new Error('cancel create'))
+        gate.resolve({ close: closed } as unknown as SessionHandle)
+        await expect(creating).rejects.toThrow('cancel create')
+        await new Promise<void>((resolve) => { setImmediate(resolve) })
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-abandoned'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('closes the claimed handle when agent preparation fails after the store claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => Promise.resolve({ close: closed } as unknown as SessionHandle)
+        const loop = ctx.agentLoopClaudeCode as unknown as { prepare: (...args: never[]) => unknown }
+        vi.spyOn(loop, 'prepare').mockImplementationOnce(() => { throw new Error('prepare boom') })
+        await expect(ctx.agents.create({
+          sessionId: SessionId('create-prepare-boom'),
+          meta: { cwd: process.cwd() },
+        })).rejects.toThrow('prepare boom')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-prepare-boom'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('propagates a prepare failure without a backend and leaves no residue', async () => {
+    const ctx = await harness()
+    try {
+      const loop = ctx.agentLoopClaudeCode as unknown as { prepare: (...args: never[]) => unknown }
+      vi.spyOn(loop, 'prepare').mockImplementationOnce(() => { throw new Error('prepare boom') })
+      await expect(ctx.agents.create({
+        sessionId: SessionId('create-prepare-bare'),
+        meta: { cwd: process.cwd() },
+      })).rejects.toThrow('prepare boom')
+      expect(ctx.agents.get(SessionId('create-prepare-bare'))).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('treats a signal aborted before the store claim settles as a cancelled create', async () => {
+    const ctx = await harness()
+    try {
+      const controller = new AbortController()
+      const creating = ctx.agents.create({
+        sessionId: SessionId('create-sync-abort'),
+        meta: { cwd: process.cwd() },
+        signal: controller.signal,
+      })
+      // No persistence backend: the store claim resolves empty; the abort
+      // landing first cancels the create before setup starts.
+      controller.abort(new Error('sync abort'))
+      await expect(creating).rejects.toThrow('sync abort')
+      expect(ctx.agents.get(SessionId('create-sync-abort'))).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the setup failure primary when the rollback handle close fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-cov-create-'))
+    try {
+      const ctx = await persistentHarness(root)
+      try {
+        const closed = vi.fn(async () => { throw new Error('close boom') })
+        ctx.sessionPersistence.create = () => Promise.resolve({ close: closed } as unknown as SessionHandle)
+        await expect(ctx.agents.create({
+          sessionId: SessionId('create-setup-close-boom'),
+          meta: { cwd: process.cwd() },
+          setup: () => { throw new Error('setup failed') },
+        })).rejects.toThrow('setup failed')
+        expect(closed).toHaveBeenCalledTimes(1)
+        expect(ctx.agents.get(SessionId('create-setup-close-boom'))).toBeUndefined()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('forwards seed and inheritedEventCount into the prepared session', async () => {
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('create-seeded-count'),
+        meta: { cwd: process.cwd(), isSeeded: true },
+        seed: [{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } }],
+        inheritedEventCount: SessionLogOffset(1),
+      })
+      expect(agent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(true)
+      expect(agent.session.inheritedEventCount).toBe(1)
+    } finally {
+      await ctx.fiber.dispose()
     }
   })
 })

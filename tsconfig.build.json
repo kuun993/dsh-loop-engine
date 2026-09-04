@@ -1,4 +1,5 @@
 {
+  "extends": "./tsconfig.json",
   "compilerOptions": {
     "target": "es2024",
     "module": "esnext",
@@ -19,9 +20,33 @@
     "types": ["node"],
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
+    // Build emits declarations, so the dev config's noEmit must be lifted.
+    "noEmit": false,
     "rootDir": "src",
     "outDir": "lib/types",
-    "verbatimModuleSyntax": false
+    "verbatimModuleSyntax": false,
+    // Emit cannot pull monorepo SOURCES into the program (rootDir would reject
+    // them), and the monorepo source graph does not compile under this
+    // package's flags, so this config REPLACES the inherited source paths with
+    // the artifact plane: npm packages, except dsh-session-persistence whose
+    // published 0.1.2-rc.1 types predate the handle-based persistence refactor
+    // (the only post-publish breaking change on this plugin's import surface —
+    // verified via `git diff dsh-v0.1.2-rc.1 HEAD` in the harness checkout).
+    // That one resolves to the sibling checkout's BUILT declarations; rebuild
+    // the harness (`pnpm run build` there) after touching its
+    // session-persistence sources. tsconfig.json (dev/IDE) keeps the source
+    // plane via the inherited paths.
+    "paths": {
+      "@deepseek-ai/cordis": ["./node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"],
+      "@deepseek-ai/schemastery": ["./node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-session-persistence": ["../deepseek-harness/packages/session/session-persistence/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-session": ["../deepseek-harness/packages/core/session/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-session/*": ["../deepseek-harness/packages/core/session/lib/types/*"],
+      "@deepseek-ai/dsh-llm": ["../deepseek-harness/packages/llm/llm/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-llm/*": ["../deepseek-harness/packages/llm/llm/lib/types/*"],
+      "@deepseek-ai/dsh-attachment": ["../deepseek-harness/packages/attachment/attachment/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-brand": ["../deepseek-harness/packages/util/brand/lib/types/index.d.ts"]
+    }
   },
   "include": ["src"]
 }

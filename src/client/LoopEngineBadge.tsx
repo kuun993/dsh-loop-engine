@@ -10,7 +10,7 @@
  */
 
 import type { CSSProperties, JSX } from 'react'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the ui-conversation SlotMap merge (the header actions).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'

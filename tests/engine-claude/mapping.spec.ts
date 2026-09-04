@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import type { BetaMessage, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import { CallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import {
   mapAssistantMessage,
   mapStreamEvent,
@@ -97,10 +97,10 @@ describe('mapAssistantMessage', () => {
     }))
     expect(mapped.content).toEqual([
       { type: 'text', text: 'reading' },
-      { type: 'tool-call', id: CallId('toolu_001'), name: 'Read', arguments: '{"file_path":"a.ts"}' },
+      { type: 'tool-call', id: ToolCallId('toolu_001'), name: 'Read', arguments: '{"file_path":"a.ts"}' },
     ])
     expect(mapped.toolCalls).toEqual([{
-      callId: CallId('toolu_001'),
+      callId: ToolCallId('toolu_001'),
       name: 'Read',
       arguments: '{"file_path":"a.ts"}',
     }])
@@ -229,7 +229,7 @@ describe('mapStreamEvent', () => {
       content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { path: 'a.ts' } },
     }), tools)
     expect(chunks).toEqual([{ type: 'block-start', index: 1, blockType: 'tool-call' }])
-    expect(tools.get(1)).toEqual({ callId: CallId('toolu_1'), name: 'Read' })
+    expect(tools.get(1)).toEqual({ callId: ToolCallId('toolu_1'), name: 'Read' })
   })
 
   it('maps thinking block starts to reasoning block starts', () => {
@@ -249,7 +249,7 @@ describe('mapStreamEvent', () => {
   })
 
   it('maps an input_json_delta to a tool-call-delta named by the recorded call', () => {
-    const tools = calls().set(1, { callId: CallId('toolu_1'), name: 'Read' })
+    const tools = calls().set(1, { callId: ToolCallId('toolu_1'), name: 'Read' })
     expect(mapStreamEvent(event({
       type: 'content_block_delta',
       index: 1,
@@ -257,7 +257,7 @@ describe('mapStreamEvent', () => {
     }), tools)).toEqual([{
       type: 'tool-call-delta',
       index: 1,
-      id: CallId('toolu_1'),
+      id: ToolCallId('toolu_1'),
       name: 'Read',
       argumentsDelta: '{"path":"a.ts"}',
     }])
@@ -271,7 +271,7 @@ describe('mapStreamEvent', () => {
     }), calls())).toEqual([{
       type: 'tool-call-delta',
       index: 3,
-      id: CallId('call-3'),
+      id: ToolCallId('call-3'),
       argumentsDelta: '{}',
     }])
   })
@@ -329,7 +329,7 @@ describe('serializeHistory', () => {
         id: MessageId('m-assistant-1'),
         content: [
           { type: 'text' as const, text: 'Hi!' },
-          { type: 'tool-call' as const, id: CallId('t1'), name: 'Read', arguments: '{}' },
+          { type: 'tool-call' as const, id: ToolCallId('t1'), name: 'Read', arguments: '{}' },
         ],
         source: { kind: 'model' as const, provider: 'claude-code', model: 'x' },
       },
@@ -338,10 +338,10 @@ describe('serializeHistory', () => {
         id: MessageId('m-tool-result-1'),
         content: [{
           type: 'tool-result' as const,
-          toolCallId: CallId('t1'),
+          toolCallId: ToolCallId('t1'),
           content: [{ type: 'text' as const, text: 'contents of file' }],
         }],
-        source: { kind: 'tool' as const, callId: CallId('t1') },
+        source: { kind: 'tool' as const, callId: ToolCallId('t1') },
       },
     ]
     const prompt = serializeHistory(messages)
@@ -391,11 +391,11 @@ describe('serializeHistory', () => {
         id: MessageId('m-tool-error'),
         content: [{
           type: 'tool-result' as const,
-          toolCallId: CallId('e1'),
+          toolCallId: ToolCallId('e1'),
           content: [{ type: 'text' as const, text: 'failed' }],
           isError: true,
         }],
-        source: { kind: 'tool' as const, callId: CallId('e1') },
+        source: { kind: 'tool' as const, callId: ToolCallId('e1') },
       },
     ])
     expect(prompt).toContain(OMITTED_IMAGE_TEXT)
@@ -424,14 +424,14 @@ describe('serializeHistory', () => {
       id: MessageId('m-tool-child'),
       content: [{
         type: 'tool-result' as const,
-        toolCallId: CallId('c1'),
+        toolCallId: ToolCallId('c1'),
         content: [
           { type: 'image' as const, attachment: { attachmentId: AttachmentId('img-1'), bytes: 2, mediaType: 'image/png', width: 4, height: 4 } },
           { type: 'reasoning' as const, text: 'quiet thinking' },
         ],
         isError: false,
       }],
-      source: { kind: 'tool' as const, callId: CallId('c1') },
+      source: { kind: 'tool' as const, callId: ToolCallId('c1') },
     }])
     expect(prompt).toBe(`<tool-result>\n${OMITTED_IMAGE_TEXT}\n</tool-result>`)
   })
@@ -442,11 +442,11 @@ describe('serializeHistory', () => {
       id: MessageId('m-empty-tool'),
       content: [{
         type: 'tool-result' as const,
-        toolCallId: CallId('c2'),
+        toolCallId: ToolCallId('c2'),
         content: [],
         isError: false,
       }],
-      source: { kind: 'tool' as const, callId: CallId('c2') },
+      source: { kind: 'tool' as const, callId: ToolCallId('c2') },
     }])
     expect(prompt).toBe('<tool-result>\n(no content)\n</tool-result>')
   })

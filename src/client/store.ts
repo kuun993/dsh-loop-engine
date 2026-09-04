@@ -4,8 +4,9 @@
  * @module dsh-loop-engine/client/store
  */
 
-import type { SettingsScope, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { LoopEngineId } from '../settings.ts'
 
 /** State rendered by the loop engine section. */

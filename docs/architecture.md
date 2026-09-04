@@ -74,13 +74,13 @@ managed block 本身是**根级 block sequence**，这带来两个真实踩过�
 2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`（`src/index.ts:260`）。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
 3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:612-618`）。
 4. `steerPresetDefault(fileEngine)`：把会话的命令/技能面导向匹配当前引擎的 preset（见 §3.5）。
-5. `installSettingsSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:643`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
+5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:643-644`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
 
-`installSettingsSection` 的契约（主仓 `packages/settings/settings/src/index.ts:863-897`）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:640-642` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:647`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
+`installSection` 的契约（主仓 `packages/settings/settings/src/index.ts:472-496` 的 provider 方法）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:640-642` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:648`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
 
 ### 3.2 运行时切换：onChange 管线
 
-settings 提交后的 `onChange`（`src/index.ts:645-670`）：
+settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 
 1. `next = source!().engine`；与 `fileEngine` 相同则返回。
 2. `mountedEngine !== next` 时先 `unmountEngine()` 再 `mountEngine(next)`——切回 `in-process` 即卸载托管 fiber，让基础 loop 重占槽位；在托管引擎之间互切则先卸后挂（`tests/index.spec.ts:611-639` 等逐个验证）。重复进入已挂载引擎是 no-op。
@@ -150,7 +150,7 @@ settings 提交后的 `onChange`（`src/index.ts:645-670`）：
 
 ### 4.1 namespace 常量的拆分原因
 
-段名 `'agent-loop-engine'` 放在**零运行时导入**的 `src/namespace.ts`（`src/namespace.ts:9`）。原因（`src/settings.ts:1-11` 的模块注释）：浏览器 bundle 也要引用这个字面量，而 node 侧的品牌函数 `settingsNamespace()` 来自宿主侧服务包 `dsh-settings`——若字面量与品牌函数同文件，client bundle 会把整个 `dsh-settings` 拖进浏览器产物。于是 node 半通过 `loopEngineSettingsNamespace()` 品牌（`src/settings.ts:42-44`），浏览器半直接引字面量，两边共享一个字符串。
+段名 `'agent-loop-engine'` 放在**零运行时导入**的 `src/namespace.ts`（`src/namespace.ts:9`）。原因（`src/settings.ts:1-11` 的模块注释）：浏览器 bundle 也要引用这个字面量，而 node 侧的 `SettingsNamespace` 品牌类型来自宿主侧服务包 `dsh-settings`——若字面量与品牌类型引用同文件，client bundle 会把整个 `dsh-settings` 拖进浏览器产物。于是 node 半通过 `loopEngineSettingsNamespace()` 把字面量断言为品牌类型（`src/settings.ts:41-43`），浏览器半直接引字面量，两边共享一个字符串。
 
 schema（`src/settings.ts:36-39`）：`engine` 五选一并默认 `in-process`，`showInComposer` 默认 `true`（控制对话页 composer 是否显示引擎选择器）。
 
