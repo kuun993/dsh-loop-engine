@@ -26,6 +26,25 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 > your project root) and retry. Only the installing project can grant this;
 > the plugin cannot pre-approve its own dependencies.
 
+## Version compatibility
+
+dsh-loop-engine is versioned **independently** of the harness (`1.0.0-rcN`) but
+is bound to a specific harness release via `peerDependencies`. The two must be
+matched — a mismatch fails loudly at boot or session resume:
+
+| dsh-loop-engine | Requires harness |
+|---|---|
+| 1.0.0-rc8 | **0.1.2-rc.1** |
+| 1.0.0-rc7 | 0.1.1-rc.2 |
+
+- **1.0.0-rc8 is not compatible with harness 0.1.1-rc.2 or earlier.** It uses
+  the 0.1.2 persistence seam (`SessionPersistence.create` / `open` +
+  `SessionHandle`), the `installSection` settings API, `ToolCallId`, and
+  `Session.snapshotEvents()` — none of which exist in older harnesses.
+- To use the plugin with an older harness, install the loop-engine release that
+  matches it (e.g. `npm i dsh-loop-engine@1.0.0-rc7` for harness 0.1.1-rc.2).
+- The GitHub Release body of each tag states the harness version it targets.
+
 ### Requirements
 
 - For the Claude Code engine: the Claude Code CLI installed and logged in on
