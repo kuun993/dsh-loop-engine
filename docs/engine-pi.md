@@ -142,6 +142,8 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 | `piThinking` | `thinkingLevel` | 拼进 `--model`，见下 |
 | `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:66、125`） |
 | `sandboxMode`（与 codex 共用同一键） | `sandboxMode` | 钉死姿态，见第 6 节 |
+| `modelCatalog` | `listModels` | 探针缓存（`pi --list-models` 结果）；adapter 据此显示 /model 目录 |
+| `model`（动态覆写） | `model` | `spawnSpec` 优先读会话 `model/selection` 事件，其次此配置 |
 
 `--model` 拼接规则（`agent.ts:474-480`）：
 
@@ -149,9 +151,15 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 - 仅 `model` → `--model <model>`
 - 仅 `thinkingLevel` → `--model :<thinkingLevel>`（空 model 段，由 Pi 原生模型 + 指定思考档）
 
+> 新增：`spawnSpec` 计算 `--model` 时，先取本会话日志最新 `model/selection` 事件的 `model`（用户经 `/model` 选择），其次才回退到部署配置的 `model`。`model/selection` 为空或缺失时用配置值。
+
 固定 argv 前缀：`[bin, '--mode', 'rpc', '--no-session', ...]`（`agent.ts:484-489`）——`--no-session` 让 Pi 会话不落盘，与无状态 step 模型配套。
 
 模型标签：部署钉了 `model` 则用该值记入 `request/header` 与 assistant message 的 `source.model`；未钉则记 `'pi-native'`——web 会话的建议性模型选择**故意不**镜像进 header，因为它从不驱动查询（`agent.ts:53-58、452-454`）。provider 标签恒为 `'pi'`（`agent.ts:52`），在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+
+## 8.1 模型探针（pi --list-models）
+
+PiLoop 挂载时 spawn `pi --list-models`（RPC 模式，无会话）一次，解析其列对齐表格前两列（`provider` / `model`）得到模型清单，缓存进 `ResolvedConfig.listModels`。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层（每个条目的 `id`/`name` 为 `provider/model` 全名，`provider` 字段为 `'pi'`）。探针失败：目录为空、引擎照常工作。
 
 ## 9. 错误处理与已知边界
 
