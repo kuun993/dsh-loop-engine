@@ -142,8 +142,8 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 | `piThinking` | `thinkingLevel` | 拼进 `--model`，见下 |
 | `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:66、125`） |
 | `sandboxMode`（与 codex 共用同一键） | `sandboxMode` | 钉死姿态，见第 6 节 |
-| `modelCatalog` | `listModels` | 探针缓存（`pi --list-models` 结果）；adapter 据此显示 /model 目录 |
-| `model`（动态覆写） | `model` | `spawnSpec` 优先读会话 `model/selection` 事件，其次此配置 |
+
+> 注：`config.model` 在 `spawnSpec` 里是**回退值**——它优先读会话日志最新 `model/selection` 事件的 `model`（用户经 `/model` 选择），仅在无该事件时回退到部署配置（见下）。Pi 模型目录（`pi --list-models` 探针结果）经内部 `piCatalogHolder` 注入，而非本表所列的用户配置项，详见 §8.1。
 
 `--model` 拼接规则（`agent.ts:474-480`）：
 
@@ -159,7 +159,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 8.1 模型探针（pi --list-models）
 
-PiLoop 挂载时 spawn `pi --list-models`（RPC 模式，无会话）一次，解析其列对齐表格前两列（`provider` / `model`）得到模型清单，缓存进 `ResolvedConfig.listModels`。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层（每个条目的 `id`/`name` 为 `provider/model` 全名，`provider` 字段为 `'pi'`）。探针失败：目录为空、引擎照常工作。
+PiLoop 挂载时 spawn `pi --list-models`（RPC 模式，无会话）一次，解析其列对齐表格前两列（`provider` / `model`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层（每个条目的 `id`/`name` 为 `provider/model` 全名，`provider` 字段为 `'pi'`）。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
 
 ## 9. 错误处理与已知边界
 
