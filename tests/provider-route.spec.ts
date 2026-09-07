@@ -9,6 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { LlmError, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { HOSTED_PROVIDER_ROUTES, HostedEngineRouteAdapter } from '../src/provider-route.ts'
+import type { PiModelEntry } from '../src/engine-pi/probe.ts'
 import { LOOP_ENGINE_IDS } from '../src/settings.ts'
 
 describe('HOSTED_PROVIDER_ROUTES', () => {
@@ -53,5 +54,55 @@ describe('HostedEngineRouteAdapter', () => {
     } catch (error: unknown) {
       expect((error as LlmError).failure.code).toBe('HOSTED_ENGINE_ROUTE')
     }
+  })
+})
+
+describe('HostedEngineRouteAdapter with a model catalog source', () => {
+  it('advertises the injected Pi models under the pi provider group', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const llm = ctx.get('llm') as LlmRuntime
+    const catalog = (): readonly PiModelEntry[] => [
+      { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      { provider: 'deepseek', model: 'deepseek-v4-pro' },
+    ]
+    const release = llm.registerAdapter(
+      ['pi'],
+      new HostedEngineRouteAdapter('pi', { listModels: catalog }),
+    )
+
+    const models = await llm.listModels('pi')
+    expect(models.map(m => m.provider)).toEqual(['pi', 'pi'])
+    expect(models.map(m => m.id)).toEqual([
+      'anthropic/claude-sonnet-4-6',
+      'deepseek/deepseek-v4-pro',
+    ])
+    expect(models.map(m => m.name)).toEqual([
+      'anthropic/claude-sonnet-4-6',
+      'deepseek/deepseek-v4-pro',
+    ])
+    // A provider-group with non-empty models appears in the catalog.
+    expect(llm.listProviders()).toContainEqual({ id: 'pi', name: 'pi' })
+
+    release()
+    await ctx.fiber.dispose()
+  })
+
+  it('returns an empty catalog when no source is injected', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const llm = ctx.get('llm') as LlmRuntime
+    const release = llm.registerAdapter(['pi'], new HostedEngineRouteAdapter('pi'))
+    await expect(llm.listModels('pi')).resolves.toEqual([])
+    release()
+    await ctx.fiber.dispose()
+  })
+
+  it('still fails loud when a model query reaches the placeholder', () => {
+    const adapter = new HostedEngineRouteAdapter('pi', {
+      listModels: () => [{ provider: 'anthropic', model: 'claude-sonnet-4-6' }],
+    })
+    const options = undefined as unknown as GenerateOptions
+    expect(() => adapter.stream(options)).toThrow('provider "pi" is a hosted loop engine route, not a model endpoint')
   })
 })
