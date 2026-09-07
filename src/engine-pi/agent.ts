@@ -467,14 +467,32 @@ export class PiAgent implements Agent {
     this.requestHeaderLogged = true
   }
 
+  /**
+   * The harness Session's web-side model selection, if any was stored. The
+   * durable `model/selection` event carries `{ provider, model, ... }`; when a
+   * user picked a model via `/model`, this is the newest pick, and it overrides
+   * the deployment config (which stays the fallback). Returns `undefined` when
+   * no selection was stored, so the deployment config governs.
+   */
+  private dynamicModel(): string | undefined {
+    for (const event of [...this.session.snapshotEvents()].reverse()) {
+      if (event.type !== 'model/selection') continue
+      const data = event.data as { provider?: string; model?: string } | undefined
+      const model = data?.model
+      if (typeof model === 'string' && model.length > 0) return model
+    }
+    return undefined
+  }
+
   /** Build the `pi --mode rpc` argv/cwd/env for one step's child process. */
   private spawnSpec(cwd: string): PiSpawnSpec {
     const argv: string[] = []
+    const model = this.dynamicModel() ?? this.config.model
     if (this.config.provider !== undefined) argv.push('--provider', this.config.provider)
-    if (this.config.model !== undefined && this.config.thinkingLevel !== undefined) {
-      argv.push('--model', `${this.config.model}:${this.config.thinkingLevel}`)
-    } else if (this.config.model !== undefined) {
-      argv.push('--model', this.config.model)
+    if (model !== undefined && this.config.thinkingLevel !== undefined) {
+      argv.push('--model', `${model}:${this.config.thinkingLevel}`)
+    } else if (model !== undefined) {
+      argv.push('--model', model)
     } else if (this.config.thinkingLevel !== undefined) {
       argv.push('--model', `:${this.config.thinkingLevel}`)
     }

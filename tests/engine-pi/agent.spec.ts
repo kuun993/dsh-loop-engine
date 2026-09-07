@@ -673,6 +673,71 @@ describe('PiAgent deployment pinning', () => {
   })
 })
 
+describe('PiAgent session model selection override', () => {
+  it('uses the last model/selection event model over the pinned config model', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // Simulate a harness session.selectModel by appending a model/selection event.
+      agent.session.append('model/selection', {
+        provider: 'pi',
+        model: 'anthropic/claude-sonnet-4-6',
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('--model')
+      expect(argv).toContain('anthropic/claude-sonnet-4-6')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('falls back to the pinned config model when no selection event exists', async () => {
+    const ctx = await harness({ model: 'pi-deployment-model' })
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-empty-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('--model')
+      expect(argv).toContain('pi-deployment-model')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('prefers the most recent model/selection event over an earlier one', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-latest-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'pi', model: 'old/model' })
+      agent.session.append('model/selection', { provider: 'pi', model: 'new/model' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('new/model')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
 describe('PiAgent defensive guards', () => {
   it('fails a step without a working directory', async () => {
     const ctx = await harness()
