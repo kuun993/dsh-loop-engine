@@ -13,9 +13,10 @@
  * @module dsh-loop-engine/provider-route
  */
 
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type { LoopEngineId } from './settings.ts'
+import type { PiModelEntry } from './engine-pi/probe.ts'
 import { PROVIDER as CLAUDE_CODE_PROVIDER } from './engine-claude/agent.ts'
 import { PROVIDER as CODEX_PROVIDER } from './engine-codex/agent.ts'
 import { PROVIDER as PI_PROVIDER } from './engine-pi/agent.ts'
@@ -29,6 +30,16 @@ export const HOSTED_PROVIDER_ROUTES: Readonly<Record<Exclude<LoopEngineId, 'in-p
   kimi: KIMI_PROVIDER,
 }
 
+/** Injectable catalog source a hosted engine route can advertise over the placeholder. */
+export interface HostedEngineRouteAdapterOptions {
+  /**
+   * Optional model catalog generator. When present, `listModels` advertises
+   * these entries under this route's provider label; when absent, the catalog
+   * stays empty (the default, "engine owns its models" behavior).
+   */
+  readonly listModels?: () => readonly PiModelEntry[]
+}
+
 /**
  * Placeholder adapter serving one hosted engine's provider route label. It
  * inherits the empty catalog and default metadata (the engine's model is not a
@@ -39,9 +50,23 @@ export const HOSTED_PROVIDER_ROUTES: Readonly<Record<Exclude<LoopEngineId, 'in-p
 export class HostedEngineRouteAdapter extends LlmAdapter {
   /**
    * @param label - the provider route label this placeholder serves.
+   * @param options - optional catalog source; omit for an empty catalog.
    */
-  constructor(private readonly label: string) {
+  constructor(
+    private readonly label: string,
+    private readonly options: HostedEngineRouteAdapterOptions = {},
+  ) {
     super()
+  }
+
+  /** Advertise the injected Pi models (if any) under this route's provider label. */
+  override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    const catalog = this.options.listModels?.() ?? []
+    return catalog.map(entry => ({
+      provider: this.label,
+      id: `${entry.provider}/${entry.model}`,
+      name: `${entry.provider}/${entry.model}`,
+    }))
   }
 
   stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
