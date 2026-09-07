@@ -476,7 +476,8 @@ export class PiAgent implements Agent {
    */
   private dynamicModel(): string | undefined {
     for (const event of [...this.session.snapshotEvents()].reverse()) {
-      if (event.type !== 'model/selection') continue
+      const type = event.type as string
+      if (type !== 'model/selection') continue
       const data = event.data as { provider?: string; model?: string } | undefined
       const model = data?.model
       if (typeof model === 'string' && model.length > 0) return model
