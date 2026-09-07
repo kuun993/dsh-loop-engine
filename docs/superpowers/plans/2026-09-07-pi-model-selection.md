@@ -26,12 +26,11 @@
 
 | 文件 | 责任 | 动作 |
 |---|---|---|
-| `src/engine-pi/types.ts` | `ResolvedConfig` 增 `modelCatalog` 缓存源 | Modify |
 | `src/engine-pi/probe.ts` | spawn `pi --list-models` 并解析表格 → `PiModelEntry[]` | Create |
 | `src/provider-route.ts` | adapter 支持注入 `listModels` 源 | Modify |
 | `src/engine-pi/agent.ts` | `spawnSpec` 读 `model/selection` 事件覆写 `config.model` | Modify |
-| `src/engine-pi/loop.ts` | 探针缓存注入 `config` + 传给 adapter 源 | Modify |
-| `src/index.ts` | `mountPi`/`mountProviderRoute` 接线桥接探针缓存 | Modify |
+| `src/engine-pi/loop.ts` | `Config` 增 `piCatalogHolder`；构造时探针写入 holder | Modify |
+| `src/index.ts` | `piCatalogHolder` + `mountProviderRoute`/`mountPi` 接线桥接 | Modify |
 | `tests/engine-pi/probe.spec.ts` | 探针解析测试 | Create |
 | `tests/engine-pi/agent.spec.ts` | spawnSpec 读事件覆写测试 | Modify |
 | `tests/provider-route.spec.ts` | adapter 注入 listModels 测试 | Modify |
@@ -48,7 +47,7 @@
 **Interfaces:**
 - Produces:
   - `export interface PiModelEntry { readonly provider: string; readonly model: string }`
-  - `export async function probePiModels(spawn: (spec: PiSpawnSpec) => PiProcess): Promise<readonly PiModelEntry[]>`
+  - `export async function probePiModels(bin: string, spawn: (spec: PiSpawnSpec) => PiProcess): Promise<readonly PiModelEntry[]>`
   - `export function parsePiModelList(output: string): PiModelEntry[]`
 
 - [ ] **Step 1: Write the failing test**
@@ -95,7 +94,6 @@ describe('parsePiModelList', () => {
 describe('probePiModels', () => {
   it('spawns pi --list-models, reads stdout, and parses it', async () => {
     const spawn = vi.fn((): PiProcess => {
-      const out: string[] = []
       const process: PiProcess = {
         stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
         stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
@@ -103,25 +101,32 @@ describe('probePiModels', () => {
         onExit: (handler: (code: number | null) => void) => { void handler(0) },
         terminate: vi.fn(),
       }
-      ;(process.stdout as unknown as { on: (e: string, cb: (data: string) => void) => void }).on =
-        (event: string, cb: (data: string) => void) => {
-          if (event === 'data') {
-            out.push('provider   model\n')
-            out.push('anthropic  claude-opus-4-7\n')
-            cb('provider   model\n')
-            cb('anthropic  claude-opus-4-7\n')
-          }
-        }
+      // Drive data + end/close so the collector settles.
+      const handlers = new Map<string, (arg: unknown) => void>()
+      ;(process.stdout as unknown as {
+        on: (event: string, cb: (arg?: unknown) => void) => void
+      }).on = (event: string, cb: (arg?: unknown) => void) => {
+        if (event === 'data') handlers.set('data', cb as (arg: unknown) => void)
+        if (event === 'end' || event === 'close') handlers.set('end', cb as (arg: unknown) => void)
+      }
+      // collectStdout subscribes before the probe awaits exit; feed it now.
+      queueMicrotask(() => {
+        handlers.get('data')?.('provider   model\n')
+        handlers.get('data')?.('anthropic  claude-opus-4-7\n')
+        handlers.get('end')?.(undefined)
+      })
       return process
     })
 
-    const models = await probePiModels(spawn)
+    const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
 
     const spec = spawn.mock.calls[0]![0] as PiSpawnSpec
+    expect(spec.argv).toContain('/abs/path/pi')
     expect(spec.argv).toContain('--list-models')
     expect(spec.argv).toContain('--mode')
     expect(spec.argv).toContain('rpc')
+    expect(spec.argv).not.toContain(process.execPath) // node prefix added by piSubprocessSpec, not here
     expect(spec.env).toEqual({})
   })
 
@@ -137,7 +142,7 @@ describe('probePiModels', () => {
       return process
     })
 
-    const models = await probePiModels(spawn)
+    const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([])
   })
 
@@ -150,16 +155,23 @@ describe('probePiModels', () => {
         onExit: (handler: (code: number | null) => void) => { void handler(0) },
         terminate: vi.fn(),
       }
+      // No 'data' events, but emit 'end' so the collector settles with ''.
+      const close = new Map<string, (arg: unknown) => void>()
+      ;(process.stdout as unknown as { on: (e: string, cb: (arg?: unknown) => void) => void }).on =
+        (event: string, cb: (arg?: unknown) => void) => {
+          if (event === 'end' || event === 'close') close.set('end', cb as (arg: unknown) => void)
+        }
+      queueMicrotask(() => { close.get('end')?.(undefined) })
       return process
     })
 
-    const models = await probePiModels(spawn)
+    const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([])
   })
 })
 ```
 
-> 注意：`probePiModels` 是异步的 —— 它等待子进程退出（`onExit` 回调）后读取已累积的 stdout。测试中的 `onExit` 回调在 `vi.fn` 返回时同步触发；真实实现必须 `await` 一个由 `onExit` 驱动的 promise。
+> 注意：`probePiModels` 是异步的 —— 它等待子进程退出（`onExit` 回调）并等 stdout 流结束（`end`/`close`）后读取已累积文本。测试中的 `onExit` 与 `data`/`end` 在微任务里分发性触发；真实实现用 `Promise` 驱动，勿同步 resolve。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -186,7 +198,7 @@ function waitForExit(process: PiProcess): Promise<number> {
   })
 }
 
-/** Collect the child's full stdout as one string. */
+/** Collect the child's full stdout, resolving once the stream ends. */
 function collectStdout(process: PiProcess): Promise<string> {
   return new Promise<string>((resolve) => {
     let text = ''
@@ -194,15 +206,17 @@ function collectStdout(process: PiProcess): Promise<string> {
       resolve('')
       return
     }
-    ;(process.stdout.on as unknown as (
-      event: string,
-      cb: (data: string) => void,
-    ) => void)('data', (data: string) => {
-      text += data
-    })
-    ;(process.stdout as unknown as { setEncoding: (enc: string) => void })
-      .setEncoding('utf8')
-    resolve(text)
+    // Subscribe to data AND end; a child that never ends would hang the probe,
+    // so we also settle on 'close'. The `PiProcess.stdout` readonly surface is
+    // narrow here, so we reach the event methods through a structural cast.
+    const out = process.stdout as unknown as {
+      on(event: string, cb: (...args: unknown[]) => void): void
+      setEncoding(enc: string): void
+    }
+    out.setEncoding('utf8')
+    out.on('data', (data: string) => { text += data })
+    out.on('end', () => { resolve(text) })
+    out.on('close', () => { resolve(text) })
   })
 }
 
@@ -232,12 +246,16 @@ export function parsePiModelList(output: string): PiModelEntry[] {
  * Spawn `pi --list-models` and return the parsed model entries. Failures
  * (non-zero exit, no stdout, spawn throw) resolve to an empty array so the
  * catalog stays advisory and a probe glitch never breaks the engine mount.
+ * @param bin - the Pi CLI entrypoint (from `piCliEntrypoint()`); becomes spec.argv[0].
+ * @param spawn - the process-spawn adapter; `piSubprocessSpec` prepends the node
+ *   prefix, so spec.argv must NOT carry it.
  */
 export async function probePiModels(
+  bin: string,
   spawn: (spec: PiSpawnSpec) => PiProcess,
 ): Promise<readonly PiModelEntry[]> {
   const spec: PiSpawnSpec = {
-    argv: [process.execPath, '--mode', 'rpc', '--list-models'],
+    argv: [bin, '--mode', 'rpc', '--list-models'],
     cwd: process.cwd(),
     env: {},
   }
@@ -255,7 +273,7 @@ export async function probePiModels(
 }
 ```
 
-> `spec.argv` 以 `process.execPath` 开头以匹配 `piSubprocessSpec` 的运行方式（该函数在 argv 前再加 `process.execPath`）。若探针不走 subprocess seam 而是直接 spawn，则这里直接给 `[bin, '--mode', 'rpc', '--list-models']`；实现时以 Task 4 的接线为准。**本任务只保证 `probePiModels` 签名与解析行为被测试钉住，实际 spawn 的 argv 前缀在 Task 4 接线时才最终确定。**
+> **argv 契约（务必遵守）：** `probePiModels(bin, spawn)` 的 `spec.argv[0]` 是 Pi CLI bin 路径（由调用方经 `piCliEntrypoint()` 传入）。`spawn` 按 Task 4 `piSubprocessSpec` 的方式在 argv 前加 `process.execPath`。因此 spec 内不重复加 node 前缀。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -578,67 +596,110 @@ git commit -m "feat(engine-pi): honor the session model/selection event in the s
 
 ---
 
-### Task 4: 挂载接线 — 跑探针并把缓存注入 PiLoop 与 adapter
+### Task 4: 挂载接线 — PiLoop 内部探针 + 共享 catalog holder 注入 adapter
 
 **Files:**
-- Modify: `src/engine-pi/loop.ts` (optionally expose the probe cache on `ResolvedConfig`, or accept a probe runner)
-- Modify: `src/engine-pi/types.ts` (add `modelCatalog` to `ResolvedConfig` if needed)
-- Modify: `src/index.ts` (`mountPi` + `mountProviderRoute` bridge)
-- Test: covered by the manual integration note in Step 4; no isolated unit test file forces a real `pi --list-models` spawn.
+- Modify: `src/index.ts` (`apply` scope: `piCatalogHolder` + `mountProviderRoute` options + `mountPi` constructor arg)
+- Modify: `src/engine-pi/loop.ts` (`Config` gains `piCatalogHolder`)
+- Test: `tests/engine-pi/loop.spec.ts` + manual integration note. No isolated unit test forces a real `pi --list-models` spawn.
 
 **Interfaces:**
-- Consumes: `probePiModels` (Task 1), `HostedEngineRouteAdapterOptions` (Task 2), `ResolvedConfig` (Task 1/2).
-- Produces: the wiring that threads a shared probe cache from `mount` → both `mountProviderRoute(engine)` and `PiLoop` config.
+- Consumes: `probePiModels(bin, spawn)` (Task 1), `HostedEngineRouteAdapterOptions` (Task 2), `PiModelEntry` (Task 1).
+- Produces: the wiring that threads a shared, mutable Pi catalog holder from the mount into both the route adapter's `listModels` source and `PiLoop`'s constructor.
 
-- [ ] **Step 1: Verify the current wiring points**
+**Key design:** `mountProviderRoute` runs BEFORE `mountPi` (index.ts:613-617), and the probe is async. So the catalog is exposed through a **shared mutable holder** owned by the `apply` scope. `PiLoop`'s constructor runs the probe and writes the result into that holder; the route adapter's `listModels` reads the same holder through a live closure. `ResolvedConfig` is NOT modified (PiLoop never reads the catalog — only the adapter does; `PiAgent.spawnSpec` reads `model/selection` via Task 3), so no dead field.
 
-Read the current `mountEngine` → `mountProviderRoute` → `mountPi` sequence (already captured). `mountProviderRoute` (index.ts:366) constructs the adapter *before* `mountPi` (index.ts:570) runs. So the probe must be computed at the top of `mountEngine`/`mountPi` and passed to both.
+- [ ] **Step 1: Write the failing test in `loop.spec.ts`**
 
-- [ ] **Step 2: Decide the cache ownership**
-
-The cleanest: compute the probe result once and share a **mutable ref** (a small holder) so both the route adapter's `listModels` source and the PiLoop config point at the same cached array. Implement:
-
-In `src/engine-pi/types.ts`, add to `ResolvedConfig`:
+Append a describe block to `tests/engine-pi/loop.spec.ts`:
 
 ```ts
-  /** Cached probe result of `pi --list-models`; advisory, refreshed per mount. */
-  readonly listModels: () => readonly PiModelEntry[]
+describe('PiLoop catalog probe', () => {
+  it('writes the pi --list-models probe result into the shared holder when present', async () => {
+    const handle = fakeHandle()
+    // Simulation: the probe child's stdout carries a table, then exits 0.
+    const spawn = vi.fn((spec: unknown) => {
+      const sub = spec as { argv: string[] }
+      if (sub.argv.includes('--list-models')) {
+        const events: Array<{ 'data'?: string }> = []
+        const stdout = new Readable({
+          read: () => {},
+          // Manually push+end to feed the collector before exit resolves.
+        })
+        queueMicrotask(() => {
+          stdout.push('provider   model\n')
+          stdout.push('anthropic  claude-opus-4-7\n')
+          stdout.push(null)
+        })
+        return {
+          pid: 1,
+          stdin: new Writable({ write: (_c, _e, cb) => { cb() } }),
+          stdout,
+          stderr: new Readable({ read: () => {} }),
+          collected: {},
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          terminate: vi.fn(),
+          waitForExit: vi.fn(async () => true),
+        } as SubprocessHandle
+      }
+      return handle
+    })
+    const ctx = await loopCtx(spawn)
+    try {
+      const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
+      const loop = new PiLoop(ctx, { piCatalogHolder: holder })
+      // The probe is async; give the microtask queue a beat to flush.
+      await Promise.resolve()
+      expect(holder.entries).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
+      expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+        argv: expect.arrayContaining(['--list-models', '--mode', 'rpc']),
+      }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves the holder empty when no holder is provided (probe is skipped)', async () => {
+    const spawn = vi.fn(() => fakeHandle())
+    const ctx = await loopCtx(spawn)
+    try {
+      const loop = new PiLoop(ctx, {})
+      await Promise.resolve()
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
 ```
 
-Update `resolveConfig` in `loop.ts` to accept and carry it:
+> `probePiModels.waitForExit` awaits the process's `onExit`; the mock's `done` is `Promise.resolve({exitCode: 0})`, and the underlying `piSubprocessSpec` gets `process.execPath` prefixed — the assertion uses `arrayContaining` rather than strict equality so the node-prefix detail stays out of the test's focus. `PiModelEntry` needs importing in the spec.
+
+- [ ] **Step 2: Add a shared holder in `apply` scope**
+
+In `src/index.ts`, near the other `apply`-scope state (after `skillDisposer`, ~line 304), add:
 
 ```ts
-function resolveConfig(config: Config): ResolvedConfig {
-  return {
-    sandboxMode: config.sandboxMode,
-    provider: config.provider,
-    model: config.model,
-    thinkingLevel: config.thinkingLevel,
-    env: config.env ?? {},
-    listModels: config.modelCatalog ?? (() => []),
-  }
-}
+  /** Cached Pi model catalog from `pi --list-models`, shared by the Pi route adapter.
+   * Populated asynchronously by `PiLoop`'s constructor; the route adapter reads it
+   * through a live closure, so the probe need not finish before the mount returns. */
+  const piCatalogHolder: { entries: readonly PiModelEntry[] } = { entries: [] }
 ```
 
-Add to `Config` type in `loop.ts`:
+And import `PiModelEntry` at the top of `src/index.ts`:
 
 ```ts
-  /** Optional cached Pi model catalog source; absent yields an empty catalog. */
-  modelCatalog?: () => readonly PiModelEntry[]
+import type { PiModelEntry } from './engine-pi/probe.ts'
 ```
 
-> 说明：`ResolvedConfig.listModels` 是一个 `() => readonly PiModelEntry[]` 闭包。`PiLoop` 不消费它（模型读取发生在 `PiAgent.spawnSpec` 经 `model/selection` 事件 + `config.model`）。它主要是让 adapter 拿到缓存。若 `config.modelCatalog` 未提供，闭包返回 `[]`，adapter 目录为空。
+- [ ] **Step 3: Run the loop test to verify it fails**
 
-- [ ] **Step 3: Thread the cache through `mountProviderRoute` and `mountPi`**
+Run: `pnpm vitest run tests/engine-pi/loop.spec.ts`
+Expected: FAIL — `PiLoop` does not yet accept `piCatalogHolder`, so `new PiLoop(ctx, { piCatalogHolder: holder })` is a type/behavior error (the probe never runs; `holder.entries` stays `[]`).
 
-In `src/index.ts`, add a holder in the `apply` scope near `mountProviderRoute`:
+- [ ] **Step 4: Thread the holder into `mountProviderRoute`**
 
-```ts
-  /** Cached Pi model catalog shared by the Pi route adapter and the Pi loop. */
-  let piModelCatalog: (() => readonly PiModelEntry[]) = () => []
-```
-
-Update `mountProviderRoute` to pass the Pi source when the engine is `pi`:
+Update `mountProviderRoute` (index.ts:366) to pass the Pi catalog source when the engine is `pi`:
 
 ```ts
   const mountProviderRoute = (engine: LoopEngineId, attempt = 0): void => {
@@ -654,7 +715,7 @@ Update `mountProviderRoute` to pass the Pi source when the engine is `pi`:
       return
     }
     try {
-      const options = engine === 'pi' ? { listModels: piModelCatalog } : undefined
+      const options = engine === 'pi' ? { listModels: () => piCatalogHolder.entries } : undefined
       routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options))
       routeEngine = engine
     } catch (error: unknown) {
@@ -667,37 +728,65 @@ Update `mountProviderRoute` to pass the Pi source when the engine is `pi`:
   }
 ```
 
-Update `mountPi` to run the probe (fire-and-forget, cached) and pass `modelCatalog` to `PiLoop`:
+> `() => piCatalogHolder.entries` is a live read: after `PiLoop` writes into `piCatalogHolder.entries` (Step 5), the adapter's next `listModels` call sees the populated list.
+
+- [ ] **Step 5: `PiLoop` receives the holder and writes the probe result into it**
+
+Edit `src/engine-pi/loop.ts`. Add to the `Config` interface:
 
 ```ts
-  /** Mount the Pi loop factory plus its AGENTS.md + SKILL.md skill provider. */
+  /** Shared Pi model catalog holder; the loop writes its `pi --list-models` probe result here. */
+  piCatalogHolder?: { entries: readonly PiModelEntry[] }
+```
+
+Import `PiModelEntry` and `probePiModels` at the top of `loop.ts`:
+
+```ts
+import type { PiModelEntry } from './probe.ts'
+import { probePiModels } from './probe.ts'
+```
+
+In the constructor body, after `this.spawn` is assigned (line 189), add:
+
+```ts
+    // Probe discoverable Pi models once per mount and publish into the shared
+    // holder so the route adapter /model directory reflects the catalog. Failure
+    // leaves the holder empty (advisory): /model shows "no models", engine runs.
+    const holder = config.piCatalogHolder
+    if (holder !== undefined) {
+      void probePiModels(this.bin, (spec) => this.spawn(spec))
+        .then((models) => { holder.entries = [...models] })
+        .catch(() => { holder.entries = [] })
+    }
+```
+
+> `this.bin` is the resolved Pi CLI entrypoint (`piCliEntrypoint()`); `this.spawn` wraps `piSubprocessSpec` (which prepends `process.execPath`), so the spec argv must NOT carry it. This matches Task 1's `probePiModels(bin, spawn)` contract.
+
+- [ ] **Step 6: `mountPi` passes the holder in**
+
+Update `mountPi` (index.ts:570-580):
+
+```ts
   const mountPi = (): void => {
     const skills = ctx.get('skills') as SkillsService | undefined
     if (skills !== undefined) {
       skillDisposer = skills.registerProvider(control => new PiSkillProvider(control))
     }
-
-    // Probe discoverable Pi models once per mount; on failure the cache spans an
-    // empty catalog so /model shows "no models" rather than breaking the mount.
-    let models: readonly PiModelEntry[] = []
-    void probePiModels(ctx => (this as unknown as { spawn: (spec: PiSpawnSpec) => PiProcess }).spawn)
-      .then((found) => { models = found })
-    piModelCatalog = () => models
-
     hostFactory('pi', () => ctx.plugin(PiLoop, {
       ...piConfig(config),
-      modelCatalog: piModelCatalog,
+      piCatalogHolder,
     }))
   }
 ```
 
-> **注意：这里的 `probePiModels` 接线需要真实 spawn 一个子进程，且必须以 `pi` CLI 的 bin 路径为准。** 由于 `probePiModels` 的签名是 `(spawn: (spec) => PiProcess)`，`mountPi` 里应当复用 `PiLoop` 的 `spawn` 能力。但 `PiLoop` 是延迟创建的（经 `hostFactory` 才实例化），此时还没有可用的 spawn 函数。**因此 Task 4 的实际接线应改为：在 `mountPi` 里构造一个本地 spawn 闭包**（自 `piCliEntrypoint()` 拿 bin，走 `ctx.subprocess.spawn`），或把探针推迟到 `PiLoop` 构造时执行并把结果回填到 `piModelCatalog`。
->
-> **实现决策（请按此执行）：** 把探针移到 `PiLoop` 构造内部——`PiLoop` 构造时已持有 `this.execPath`/bin 与 `this.spawn`，可当场 `probePiModels(this.spawnAdapter)`，用结果填充 `this.config.modelCatalog`，并把同一个闭包（或一个原地更新的 holder）暴露给插件用于 adapter。这样避免在 `mountPi` 阶段为无 spawn 能力而临时拼装。
+- [ ] **Step 7: Commit**
 
-- [ ] **Step 4: 集成验证（手动）**
+```bash
+git add src/engine-pi/probe.ts src/engine-pi/loop.ts src/index.ts tests/engine-pi/probe.spec.ts tests/engine-pi/loop.spec.ts
+git commit -m "feat(engine-pi): wire the pi --list-models probe into the route and loop"
+```
 
-无法在单测里真实 spawn `pi --list-models`。验证方式：
+- [ ] **Step 8: 集成验证（手动）**
 
 ```bash
 # 构建并跑全部相关测试
@@ -707,16 +796,7 @@ Expected: PASS
 # 手动冒烟：用真实会话启动 pi 引擎，打开 /model 确认出现模型组，切换后驱动 spawn --model 反映新值
 ```
 
-> 暂不开真实的 `pi` 会话测试；设计已确认 host `selectModel` 放行，`/model` 目录经 adapter `listModels` 显示。若手动冒烟发现 adapter 未接线成功，回查 `mountProviderRoute` 传的 `options.listModels` 是否指向填充后的缓存。
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/engine-pi/types.ts src/engine-pi/loop.ts src/index.ts
-git commit -m "feat(engine-pi): wire the pi --list-models probe into the route and loop"
-```
-
-> 由于 Task 4 在第 3 步有"实现决策"注记（探针移入 PiLoop 构造），**统一以 PiLoop 构造内探针 + 原地回填 piModelCatalog 为准**，`mountProviderRoute` 的 `options.listModels` 用回填后的闭包。
+> 暂不开真实的 `pi` 会话测试；设计已确认 host `selectModel` 放行，`/model` 目录经 adapter `listModels` 显示。若手动冒烟发现 adapter 未接线成功，回查 `mountProviderRoute` 传的 `options.listModels` 是否指向填充后的 holder。
 
 ---
 
