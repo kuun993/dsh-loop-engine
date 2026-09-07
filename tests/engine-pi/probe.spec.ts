@@ -32,6 +32,11 @@ describe('parsePiModelList', () => {
     expect(parsePiModelList('')).toEqual([])
     expect(parsePiModelList('provider   model\n')).toEqual([])
   })
+
+  it('skips lines without a two-space-separated provider/model pair', () => {
+    expect(parsePiModelList('stray\n')).toEqual([])
+    expect(parsePiModelList('one   two\nstray\n')).toEqual([{ provider: 'one', model: 'two' }])
+  })
 })
 
 describe('probePiModels', () => {
@@ -44,19 +49,21 @@ describe('probePiModels', () => {
         onExit: (handler: (code: number | null) => void) => { void handler(0) },
         terminate: vi.fn(),
       }
-      // Drive data + end/close so the collector settles.
+      // Drive data + end + close so the collector settles; a real Readable
+      // emits `end` then `close`, so cover both resolvers.
       const handlers = new Map<string, (arg: unknown) => void>()
       ;(process.stdout as unknown as {
         on: (event: string, cb: (arg?: unknown) => void) => void
       }).on = (event: string, cb: (arg?: unknown) => void) => {
         if (event === 'data') handlers.set('data', cb as (arg: unknown) => void)
-        if (event === 'end' || event === 'close') handlers.set('end', cb as (arg: unknown) => void)
+        if (event === 'end' || event === 'close') handlers.set(event, cb as (arg: unknown) => void)
       }
       // collectStdout subscribes before the probe awaits exit; feed it now.
       queueMicrotask(() => {
         handlers.get('data')?.('provider   model\n')
         handlers.get('data')?.('anthropic  claude-opus-4-7\n')
         handlers.get('end')?.(undefined)
+        handlers.get('close')?.(undefined)
       })
       return process
     })
@@ -110,5 +117,41 @@ describe('probePiModels', () => {
 
     const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([])
+  })
+
+  it('treats a null exit code as success and parses stdout', async () => {
+    const spawn = vi.fn((): PiProcess => {
+      const process: PiProcess = {
+        stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
+        stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
+        stderr: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
+        onExit: (handler: (code: number | null) => void) => { void handler(null) },
+        terminate: vi.fn(),
+      }
+      const handlers = new Map<string, (arg: unknown) => void>()
+      ;(process.stdout as unknown as {
+        on: (event: string, cb: (arg?: unknown) => void) => void
+      }).on = (event: string, cb: (arg?: unknown) => void) => {
+        if (event === 'data') handlers.set('data', cb as (arg: unknown) => void)
+        if (event === 'end' || event === 'close') handlers.set('end', cb as (arg: unknown) => void)
+      }
+      queueMicrotask(() => {
+        handlers.get('data')?.('anthropic  claude-opus-4-7\n')
+        handlers.get('end')?.(undefined)
+      })
+      return process
+    })
+
+    const models = await probePiModels('/abs/path/pi', spawn)
+    expect(models).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
+  })
+
+  it('returns an empty array (not a throw) when spawn throws synchronously', async () => {
+    const spawn = vi.fn((): PiProcess => {
+      throw new Error('spawn boom')
+    })
+
+    await expect(probePiModels('/abs/path/pi', spawn)).resolves.toEqual([])
+    expect(spawn).toHaveBeenCalledTimes(1)
   })
 })
