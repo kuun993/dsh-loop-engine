@@ -1,5 +1,7 @@
 # 需求：claude 引擎会话隐藏/禁用模型选择器
 
+> **Pi 除外：** 本提案针对 claude-code 引擎"模型选择不生效"。Pi 引擎已改为让模型选择生效（见 `docs/superpowers/specs/2026-09-07-pi-model-selection-design.md`）：其 `/model` 目录由 `pi --list-models` 探针填充，选择经 `model/selection` 事件写入 spawn `--model`。claude-code / codex / kimi 仍保持本提案描述的"原生决定、不可选"行为。
+
 **目标仓库**：deepseek-harness（主仓）。本文件记录背景与建议改动，供提交为 GitHub issue。
 
 ## 背景
