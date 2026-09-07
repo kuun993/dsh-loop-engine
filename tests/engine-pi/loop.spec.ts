@@ -10,6 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { PiLoop, PI_SANDBOX_MODES, PI_DISPOSE_GRACE_MS } from '../../src/engine-pi/loop.ts'
+import type { PiModelEntry } from '../../src/engine-pi/probe.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { PiProcess } from '../../src/engine-pi/rpc/client.ts'
 
@@ -97,5 +98,66 @@ describe('PiLoop spawn plumbing', () => {
 
   it('exposes the accepted sandbox modes', () => {
     expect(PI_SANDBOX_MODES).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
+  })
+})
+
+describe('PiLoop catalog probe', () => {
+  it('writes the pi --list-models probe result into the shared holder when present', async () => {
+    const handle = fakeHandle()
+    // Simulation: the probe child's stdout carries a table, then exits 0.
+    const spawn = vi.fn((spec: unknown) => {
+      const sub = spec as { argv: string[] }
+      if (sub.argv.includes('--list-models')) {
+        const events: Array<{ 'data'?: string }> = []
+        const stdout = new Readable({
+          read: () => {},
+          // Manually push+end to feed the collector before exit resolves.
+        })
+        queueMicrotask(() => {
+          stdout.push('provider   model\n')
+          stdout.push('anthropic  claude-opus-4-7\n')
+          stdout.push(null)
+        })
+        return {
+          pid: 1,
+          stdin: new Writable({ write: (_c, _e, cb) => { cb() } }),
+          stdout,
+          stderr: new Readable({ read: () => {} }),
+          collected: {},
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          terminate: vi.fn(),
+          waitForExit: vi.fn(async () => true),
+        } as SubprocessHandle
+      }
+      return handle
+    })
+    const ctx = await loopCtx(spawn)
+    try {
+      const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
+      const loop = new PiLoop(ctx, { piCatalogHolder: holder })
+      // The probe is async and its stdout is a real Readable, which flushes only
+      // on a macrotask tick — so waitFor (which polls on macrotasks) rather than a
+      // single microtask breathe before asserting the populated catalog.
+      await vi.waitFor(() => {
+        expect(holder.entries).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
+      })
+      expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+        argv: expect.arrayContaining(['--list-models', '--mode', 'rpc']),
+      }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves the holder empty when no holder is provided (probe is skipped)', async () => {
+    const spawn = vi.fn(() => fakeHandle())
+    const ctx = await loopCtx(spawn)
+    try {
+      const loop = new PiLoop(ctx, {})
+      await Promise.resolve()
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })

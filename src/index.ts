@@ -47,6 +47,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
+import type { PiModelEntry } from './engine-pi/probe.ts'
 import { KimiLoop, type Config as KimiConfig } from './engine-kimi/loop.ts'
 import { KimiSkillProvider } from './engine-kimi/skills.ts'
 import { KIMI_COMMANDS } from './engine-kimi/commands.ts'
@@ -302,6 +303,10 @@ export function apply(ctx: Context, config: Config): void {
   let mountedEngine: LoopEngineId | undefined
   let commandDisposers: (() => void)[] | undefined
   let skillDisposer: (() => void) | undefined
+  /** Cached Pi model catalog from `pi --list-models`, shared by the Pi route adapter.
+   * Populated asynchronously by `PiLoop`'s constructor; the route adapter reads it
+   * through a live closure, so the probe need not finish before the mount returns. */
+  const piCatalogHolder: { entries: readonly PiModelEntry[] } = { entries: [] }
   /** Bounded retry bookkeeping for the AgentFactory slot race described below. */
   let mountAttempts = 0
   let mountRetry: ReturnType<typeof setTimeout> | undefined
@@ -378,7 +383,8 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     try {
-      routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label))
+      const options = engine === 'pi' ? { listModels: () => piCatalogHolder.entries } : undefined
+      routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options))
       routeEngine = engine
     } catch (error: unknown) {
       // A deployment whose own adapter already serves the label needs no placeholder.
@@ -576,7 +582,10 @@ export function apply(ctx: Context, config: Config): void {
       skillDisposer = skills.registerProvider(control => new PiSkillProvider(control))
     }
 
-    hostFactory('pi', () => ctx.plugin(PiLoop, piConfig(config)))
+    hostFactory('pi', () => ctx.plugin(PiLoop, {
+      ...piConfig(config),
+      piCatalogHolder,
+    }))
   }
 
   /** Mount the Kimi loop factory plus its slash-command bridge and skill provider. */

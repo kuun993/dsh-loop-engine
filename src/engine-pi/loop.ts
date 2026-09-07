@@ -32,6 +32,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { PiAgent } from './agent.ts'
+import { probePiModels } from './probe.ts'
+import type { PiModelEntry } from './probe.ts'
 import type { PiProcess, PiSpawnSpec } from './rpc/client.ts'
 import type { PiSandboxMode, ResolvedConfig } from './types.ts'
 import { FactoryOwnership, raceAbort, raceAbortCall } from '../driver-core/ownership.ts'
@@ -64,6 +66,8 @@ export interface Config {
   thinkingLevel?: string
   /** Explicit environment entries passed to the `pi` child. */
   env?: Record<string, string>
+  /** Shared Pi model catalog holder; the loop writes its `pi --list-models` probe result here. */
+  piCatalogHolder?: { entries: readonly PiModelEntry[] }
 }
 
 /** Schema of the Pi loop plugin configuration. */
@@ -73,6 +77,7 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   thinkingLevel: z.string(),
   env: z.dict(z.string()).default({}),
+  piCatalogHolder: z.any(),
 })
 
 /** Prepared-but-unpublished agent resources sharing one memoized teardown. */
@@ -145,7 +150,13 @@ function fromSubprocess(handle: SubprocessHandle): PiProcess {
     stdin,
     stdout,
     stderr,
-    onExit: (handler) => { void handle.done.then(handler, handler) },
+    onExit: (handler) => {
+      // `PiProcess.onExit` types its handler as zero-arg, but the probe's
+      // waitForExit structural-cast registers a code-bearing handler; unwrap the
+      // SubprocessOutcome to deliver the bare exit code as that cast expects.
+      const onExit = handler as (code: number | null) => void
+      void handle.done.then((outcome) => onExit(outcome.exitCode), handler)
+    },
     terminate: () => handle.terminate(),
   }
 }
@@ -187,6 +198,15 @@ export class PiLoop extends Service implements AgentFactory {
     this.runtime = { ctx }
     this.bin = piCliEntrypoint()
     this.spawn = (spec) => fromSubprocess(this.runtime.ctx.subprocess.spawn(piSubprocessSpec(spec, PI_DISPOSE_GRACE_MS)))
+    // Probe discoverable Pi models once per mount and publish into the shared
+    // holder so the route adapter /model directory reflects the catalog. Failure
+    // leaves the holder empty (advisory): /model shows "no models", engine runs.
+    const holder = config.piCatalogHolder
+    if (holder !== undefined) {
+      void probePiModels(this.bin, (spec) => this.spawn(spec))
+        .then((models) => { holder.entries = [...models] })
+        .catch(() => { holder.entries = [] })
+    }
     ctx.effect(() => () => this.ownership.dispose(), 'agentLoopPi.transactions()')
     ctx.effect(() => ctx.agents.setFactory(this), 'agentLoopPi.setFactory()')
     // Pi owns its prompt natively, so these variables feed only downstream
