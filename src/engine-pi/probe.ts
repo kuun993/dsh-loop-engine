@@ -7,28 +7,30 @@ export interface PiModelEntry {
 }
 
 /** Wait for a Pi child to exit, resolving with its exit code. */
-function waitForExit(process: PiProcess): Promise<number> {
+function waitForExit(child: PiProcess): Promise<number> {
   return new Promise<number>((resolve) => {
     // `PiProcess.onExit` is typed as a zero-arg handler, but the child's exit
     // code is delivered at runtime; reach it through a structural cast.
-    ;(process.onExit as unknown as (handler: (code: number | null) => void) => void)(
+    ;(child.onExit as unknown as (handler: (code: number | null) => void) => void)(
       (code) => resolve(code ?? 0),
     )
   })
 }
 
 /** Collect the child's full stdout, resolving once the stream ends. */
-function collectStdout(process: PiProcess): Promise<string> {
+function collectStdout(child: PiProcess): Promise<string> {
   return new Promise<string>((resolve) => {
     let text = ''
-    if (process.stdout.on === undefined) {
+    /* v8 ignore start -- a real PiProcess.stdout always exposes `.on`, so this backstop is unreachable in tests */
+    /* v8 ignore next -- see above */
+    if (child.stdout.on === undefined) {
       resolve('')
       return
-    }
+    } /* v8 ignore stop */
     // Subscribe to data AND end; a child that never ends would hang the probe,
     // so we also settle on 'close'. The `PiProcess.stdout` readonly surface is
     // narrow here, so we reach the event methods through a structural cast.
-    const out = process.stdout as unknown as {
+    const out = child.stdout as unknown as {
       on(event: string, cb: (arg?: unknown) => void): void
       setEncoding(enc: string): void
     }
