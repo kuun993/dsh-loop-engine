@@ -61,6 +61,8 @@ const BROWSER_EXTERNALS = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-locale/client',
   '@deepseek-ai/dsh-client-ui-settings/client',
   '@deepseek-ai/dsh-api-remotes/client',
@@ -93,20 +95,6 @@ await build({
   target: 'es2022',
   jsx: 'automatic',
   external: BROWSER_EXTERNALS,
-  // Inline font/image assets (e.g. katex) pulled in by bundled client deps so
-  // the single-file client bundle stays self-contained — the /plugins route
-  // serves only the bundle, not sibling asset files.
-  loader: {
-    '.woff': 'dataurl',
-    '.woff2': 'dataurl',
-    '.ttf': 'dataurl',
-    '.eot': 'dataurl',
-    '.otf': 'dataurl',
-    '.svg': 'dataurl',
-    '.png': 'dataurl',
-    '.jpg': 'dataurl',
-    '.gif': 'dataurl',
-  },
   sourcemap: true,
   banner: {
     js: `var module = { exports: {} }; var exports = module.exports; window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_ID)}, factory: (require) => {`,
