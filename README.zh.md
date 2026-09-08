@@ -21,6 +21,19 @@ dsh plugin --profile web add dsh-loop-engine
 - 使用 Pi 引擎时需要以 `pi` 要求的方式完成认证(其自身的 `~/.pi/agent/auth.json`,或提供方的 API-key 环境变量,如 `ANTHROPIC_API_KEY`)。
 - 使用 Kimi Code 引擎时需要本机已安装并登录 `kimi` CLI(例如 `kimi login`),且在 `PATH` 上(或在组合条目里用 `kimiBin` 固定为绝对路径)。
 
+## 版本兼容
+
+`dsh-loop-engine` 与 harness **独立**版本(`1.0.0-rcN`),但通过 `peerDependencies` 绑定到特定 harness 版本;两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
+
+| dsh-loop-engine | 需要 harness |
+|---|---|
+| 1.0.0-rc8 及以后 | **0.1.2-rc.1** |
+| 1.0.0-rc7 及更早 | 0.1.1-rc.2 |
+
+- **1.0.0-rc8 及以后不兼容 harness 0.1.1-rc.2 或更早版本。** 它使用 0.1.2 的持久化 seam(`SessionPersistence.create` / `open` + `SessionHandle`)、`installSection` settings API、`ToolCallId` 与 `Session.snapshotEvents()` —— 这些在更老的 harness 里都不存在。
+- 要在更老的 harness 上使用本插件,请安装与之匹配的 loop-engine 版本(例如 harness 0.1.1-rc.2 用 `npm i dsh-loop-engine@1.0.0-rc7`)。
+- 每个 tag 的 GitHub Release 正文会写明它针对的 harness 版本。
+
 ## 使用方法
 
 1. 在 **Settings → Loop engine** 选择引擎——`in-process`(默认)、`claude-code`、`codex`、`pi` 或 `kimi`——然后重启 `dsh web`。
