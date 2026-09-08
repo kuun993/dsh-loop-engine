@@ -106,6 +106,7 @@ dsh 里**恰好只有一个工厂**能占住 `AgentFactory` 槽位，而引擎�
 - `dispose()`（`:76-84`）：先关门（`accepting = false` + abort），再并发等待所有活体 agent teardown 与启动任务；
 - `raceAbort(operation, signal, id)`（`:88-104`）：operation 与 signal 竞速，abort 时抛出 signal 的 reason（非 Error 时包装成 `agent "<id>" creation aborted`）；
 - `raceAbortCall(..., releaseAbandoned)`（`:106-127`）：额外处理"operation 在取消后才产出值"的孤儿资源——取消后仍 then 一次 `releaseAbandoned` 释放它（典型场景：子进程/连接在取消后恰好建好了）。
+- `SessionPersistence` 双签名兼容（四个 loop 的 `createStoredSession` / `resumeWith`）：harness **源码**与**发布版 0.1.2-rc.1** 的持久化 seam API 不一致——源码版 `create(header, { inheritedEventCount, signal })` / `open(id, 'write')`＋`SessionHandle`，而发布版 `create(meta, inheritedEventCount)` / `prepare(id)`（无 `open`）。插件不依赖 agent-loop 包、而是自己调持久化，所以两处都做 duck-type：`createStoredSession` 先按源码版（第 2 参为对象）调，若发布版把对象误当 count 抛 `SessionLogOffset` 错，就回退成 `create(header, 数字)`；`resumeWith` 若 `persistence.open` 不是函数（发布版），改用 `persistence.prepare(id)`（发布版内部已完成崩溃修复+seed）。这样插件在源码/dev 与发布版/prod 都可用。
 
 ### 哪些引擎怎么用
 

@@ -370,6 +370,19 @@ export class ClaudeCodeLoop extends Service implements AgentFactory {
     const handle = await persistence.create(session.header, {
       inheritedEventCount: session.inheritedEventCount,
       ...signal === undefined ? {} : { signal },
+    }).catch((error: unknown) => {
+      // The harness's SessionPersistence.create signature changed between builds:
+      //   source/newer: create(header, { inheritedEventCount, signal })  (2nd arg = options object)
+      //   published 0.1.2-rc.1: create(meta, inheritedEventCount)       (2nd arg = the count number)
+      // Under the published build the options object is misread as the count and
+      // storageMetadata rejects with a SessionLogOffset TypeError; retry with the
+      // count as the 2nd argument so the plugin works on both API generations.
+      if (error instanceof TypeError && error.message.includes('SessionLogOffset')) {
+        // The published build's create(meta, inheritedEventCount) wants the count as
+        // the 2nd arg; the source type declares an options object, so cast through.
+        return persistence.create(session.header, session.inheritedEventCount as never)
+      }
+      throw error
     })
     return { handle, storedCount: 0 }
   }
@@ -430,30 +443,41 @@ export class ClaudeCodeLoop extends Service implements AgentFactory {
       let preparation: SessionPreparation | undefined
       try {
         try {
-          // Taking write ownership FIRST excludes a concurrent resume of the
-          // same id (in this process, a live agent's handle holds the claim).
-          handle = await raceAbortCall(
-            () => persistence.open(id, 'write', { signal: fused }),
-            fused,
-            id,
-            (abandoned) => { void abandoned.close() },
-          )
-          // Semantic crash repair is the agent layer's job: persistence hands
-          // back the physically valid log; an interrupted final turn receives
-          // synthetic closers (missing tool errors, step/end, turn/end) that
-          // are appended through the same handle as an ordinary batch.
-          const persisted = await handle.read(0, undefined, { signal: fused })
-          fused.throwIfAborted()
-          const closers = interruptedTurnClosers(persisted)
-          if (closers.length > 0) await handle.append(closers)
-          preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
-            seed: [...persisted, ...closers],
-            meta: structuredClone(handle.header),
-            inheritedEventCount: handle.inheritedEventCount,
-            seedSource: 'persistence',
-          }))
-          stored = { handle, storedCount: persisted.length + closers.length }
-          await this.appendUnstoredSuffix(stored, preparation.session)
+          if (typeof (persistence as { open?: unknown }).open === 'function') {
+            // source/newer API: open(id, 'write') then read/appends + build preparation.
+            handle = await raceAbortCall(
+              () => persistence.open(id, 'write', { signal: fused }),
+              fused,
+              id,
+              (abandoned) => { void abandoned.close() },
+            )
+            // Semantic crash repair is the agent layer's job: persistence hands
+            // back the physically valid log; an interrupted final turn receives
+            // synthetic closers (missing tool errors, step/end, turn/end) that
+            // are appended through the same handle as an ordinary batch.
+            const persisted = await handle.read(0, undefined, { signal: fused })
+            fused.throwIfAborted()
+            const closers = interruptedTurnClosers(persisted)
+            if (closers.length > 0) await handle.append(closers)
+            preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
+              seed: [...persisted, ...closers],
+              meta: structuredClone(handle.header),
+              inheritedEventCount: handle.inheritedEventCount,
+              seedSource: 'persistence',
+            }))
+            stored = { handle, storedCount: persisted.length + closers.length }
+            await this.appendUnstoredSuffix(stored, preparation.session)
+          } else {
+            // published 0.1.2-rc.1 API: prepare(id) returns a ready SessionPreparation
+            // (crash-repair + seed applied, write ownership taken internally).
+            const publishedApi = persistence as unknown as { prepare: (id: SessionId, signal?: AbortSignal) => Promise<SessionPreparation> }
+            preparation = await raceAbortCall(
+              () => publishedApi.prepare(id, fused),
+              fused,
+              id,
+              (abandoned: SessionPreparation) => { abandoned?.[Symbol.dispose]?.() },
+            )
+          }
         } finally {
           await unfollowOwner()
         }
