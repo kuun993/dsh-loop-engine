@@ -34,10 +34,11 @@ matched — a mismatch fails loudly at boot or session resume:
 
 | dsh-loop-engine | Requires harness |
 |---|---|
+| 1.0.0-rc9 | **0.1.2-rc.1** |
 | 1.0.0-rc8 | **0.1.2-rc.1** |
 | 1.0.0-rc7 | 0.1.1-rc.2 |
 
-- **1.0.0-rc8 is not compatible with harness 0.1.1-rc.2 or earlier.** It uses
+- **1.0.0-rc9 (and 1.0.0-rc8) is not compatible with harness 0.1.1-rc.2 or earlier.** It uses
   the 0.1.2 persistence seam (`SessionPersistence.create` / `open` +
   `SessionHandle`), the `installSection` settings API, `ToolCallId`, and
   `Session.snapshotEvents()` — none of which exist in older harnesses.

@@ -94,18 +94,18 @@ dsh 里**恰好只有一个工厂**能占住 `AgentFactory` 槽位，而引擎�
 2. 已发布的活体 agent 必须全部 teardown 完毕后，工厂 dispose 才能返回；
 3. setup 中途 fiber 状态已变（UNLOADING/DISPOSED/FAILED）时，新的创建请求必须被拒绝。
 
-`FactoryOwnership`（`src/driver-core/ownership.ts:25`）就是这三件事的统一答案，`raceAbort` / `raceAbortCall` 处理"setup await 与融合中止信号竞速"。
+`FactoryOwnership`（`src/driver-core/ownership.ts:40`）就是这三件事的统一答案，`raceAbort` / `raceAbortCall` 处理"setup await 与融合中止信号竞速"。
 
 ### 契约
 
-- `INACTIVE_STATES`（`src/driver-core/ownership.ts:18-22`）：`UNLOADING | DISPOSED | FAILED` 三种 fiber 状态不能拥有或服务新生命周期；
-- `isActive()`（`:39-41`）：`accepting` 标志与 fiber 状态双判；
-- `signal`（`:35-37`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:61-69`）；各 loop 用它做融合中止的一路输入（如 `src/engine-claude/loop.ts:173-175`）；
-- `track(dispose)`（`:44-47`）：登记一个活体 agent 的 teardown，返回反注册函数；
-- `trackStartup(job)`（`:50-54`）/ `trackWrapper(job)`（`:57-59`）：把 agent 尚未存在前的配置启动工作、以及 create/resume 的发布延续挂进工厂，dispose 会等它们全部 settle；
-- `dispose()`（`:61-69`）：先关门（`accepting = false` + abort），再并发等待所有活体 agent teardown 与启动任务；
-- `raceAbort(operation, signal, id)`（`:73-89`）：operation 与 signal 竞速，abort 时抛出 signal 的 reason（非 Error 时包装成 `agent "<id>" creation aborted`）；
-- `raceAbortCall(..., releaseAbandoned)`（`:91-112`）：额外处理"operation 在取消后才产出值"的孤儿资源——取消后仍 then 一次 `releaseAbandoned` 释放它（典型场景：子进程/连接在取消后恰好建好了）。
+- `INACTIVE_STATES`（`src/driver-core/ownership.ts:33-37`）：`UNLOADING | DISPOSED | FAILED` 三种 fiber 状态不能拥有或服务新生命周期；cordis 的 `FiberState` 是 `const enum`（`vendor/cordis/src/fiber.ts:147`），打包发布时会内联抹掉、不再有运行时导出，因此这里用本地数字常量镜像这三个状态（`FAILED 3`、`DISPOSED 4`、`UNLOADING 5`），**不能**从 `@deepseek-ai/cordis` 值导入 `FiberState`——否则插件树加载会报 `does not provide an export named 'FiberState'`（见 `src/driver-core/ownership.ts:16-30`）；
+- `isActive()`（`:54-56`）：`accepting` 标志与 fiber 状态双判；
+- `signal`（`:50-52`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:76-84`）；各 loop 用它做融合中止的一路输入（如 `src/engine-claude/loop.ts:173-175`）；
+- `track(dispose)`（`:59-62`）：登记一个活体 agent 的 teardown，返回反注册函数；
+- `trackStartup(job)`（`:65-69`）/ `trackWrapper(job)`（`:72-74`）：把 agent 尚未存在前的配置启动工作、以及 create/resume 的发布延续挂进工厂，dispose 会等它们全部 settle；
+- `dispose()`（`:76-84`）：先关门（`accepting = false` + abort），再并发等待所有活体 agent teardown 与启动任务；
+- `raceAbort(operation, signal, id)`（`:88-104`）：operation 与 signal 竞速，abort 时抛出 signal 的 reason（非 Error 时包装成 `agent "<id>" creation aborted`）；
+- `raceAbortCall(..., releaseAbandoned)`（`:106-127`）：额外处理"operation 在取消后才产出值"的孤儿资源——取消后仍 then 一次 `releaseAbandoned` 释放它（典型场景：子进程/连接在取消后恰好建好了）。
 
 ### 哪些引擎怎么用
 

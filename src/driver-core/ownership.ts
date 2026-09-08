@@ -10,15 +10,30 @@
  * @module dsh-loop-engine/driver-core/ownership
  */
 
-import { FiberState } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
+/**
+ * cordis declares `FiberState` as a `const enum` (vendor/cordis/src/fiber.ts:147),
+ * so a bundling build inlines and erases it — the published `@deepseek-ai/cordis`
+ * bundle does not export `FiberState` at runtime. Importing it as a value (as this
+ * module once did) broke the plugin tree load with "does not provide an export
+ * named 'FiberState'". Mirror only the members this module branches on as local
+ * numeric constants so no cordis value export is required. The values must stay
+ * aligned with cordis: PENDING 0, LOADING 1, ACTIVE 2, FAILED 3, DISPOSED 4,
+ * UNLOADING 5.
+ */
+const INACTIVE_FIBER_VALUES = {
+  FAILED: 3,
+  DISPOSED: 4,
+  UNLOADING: 5,
+} as const
+
 /** Fiber states that cannot own or serve a new lifecycle. */
-export const INACTIVE_STATES: ReadonlySet<FiberState> = new Set([
-  FiberState.UNLOADING,
-  FiberState.DISPOSED,
-  FiberState.FAILED,
+export const INACTIVE_STATES: ReadonlySet<number> = new Set([
+  INACTIVE_FIBER_VALUES.UNLOADING,
+  INACTIVE_FIBER_VALUES.DISPOSED,
+  INACTIVE_FIBER_VALUES.FAILED,
 ])
 
 /** Factory-level ownership: live agent teardowns plus load-time tracking. */
