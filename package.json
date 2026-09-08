@@ -1,7 +1,7 @@
 {
   "name": "dsh-loop-engine",
   "description": "Web-switchable agent loop engine selection for the DeepSeek Harness - out-of-tree plugin (Claude Code / Codex / Pi / Kimi Code drivers) maintained by @kuun993, zero main-repo changes",
-  "version": "1.0.0-rc11",
+  "version": "1.0.0-rc12",
   "publishConfig": {
     "access": "public"
   },
@@ -61,22 +61,21 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@anthropic-ai/sdk": "0.93.0",
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-scope": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-session-persistence": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-subprocess": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-timeout": "0.1.2-rc.1",
     "@deepseek-ai/schemastery": "3.18.1",
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@openai/codex": "0.149.1"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
     "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-settings": "0.1.2-rc.1"
+    "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-scope": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-subprocess": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-timeout": "0.1.2-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-attachment": "0.1.2-rc.1",
@@ -87,6 +86,7 @@
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.2-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.2-rc.1",
     "@deepseek-ai/dsh-subprocess-local": "0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
