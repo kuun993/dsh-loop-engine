@@ -37,7 +37,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 ### 3.1 KimiLoop（工厂）
 
 - `static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（loop.ts:95）；host 面 ctx key 为 `agentLoopKimi`（loop.ts:81-85）。
-- 构造时：解析配置（`resolveConfig`，loop.ts:72-78）；建 `FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:25-70`）；spawn capability 固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:41,113）；`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（loop.ts:115）。
+- 构造时：解析配置（`resolveConfig`，loop.ts:72-78）；建 `FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:40-85`）；spawn capability 固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:41,113）；`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（loop.ts:115）。
 - Kimi 原生拥有自己的 prompt，所以 `provider`/`model`/`cwd` 三个 systemPrompt 变量只服务 dsh 系统提示词的下游消费者，镜像默认 loop 的注册（loop.ts:116-121）。
 
 ### 3.2 创建/恢复事务
