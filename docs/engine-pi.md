@@ -9,7 +9,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 两个核心设计动机：
 
 - **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:183`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
-- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:495-516`、`src/driver-core/prompt.ts:93-127`）。Pi 子进程跨 step 存活、客户端复用，但每个 step 的 Pi 会话是全新的。
+- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:495-516`、`src/driver-core/prompt.ts:93-127`）。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:145-154`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
 
@@ -43,7 +43,7 @@ create/resume 走同一套"准备 → setup → 发布"事务（`loop.ts:201-329
 
 相位机与 Codex 驱动同构（`agent.ts:74-83`）：`idle` / `maintenance` / `running(turn, step)`。`wakeDriver` 从 idle 起一个 driver 跑 `kick()`，kick 循环 `turn()` 直到排空 inbox（`agent.ts:244-293`）。`send/followup/steer/inject/cancel/runMaintenance` 是对外控制面（`agent.ts:170-234`）。
 
-RPC 客户端**懒创建、跨 step 复用**：`rpcClient(cwd)` 每次先算 `spawnSpec`，与缓存的 `lastSpec` 用 `specsEqual` 逐字段比较（cwd、env 引用、argv 逐项），不同则 dispose 旧客户端重新 spawn（`agent.ts:146-154、64-72`）。agent scope 拆除时释放客户端（`agent.ts:139-142`）。
+RPC 客户端**懒创建、按 step 重建**：`rpcClient(cwd)` 每次先算 `spawnSpec`，若当前客户端已 disposed（或规格变化）则 dispose 旧客户端重新 spawn（`agent.ts:146-154、64-72`）；由于 Pi 进程单 session，`step()` 在 finally 里 dispose 掉本次客户端（`agent.ts` step 末尾），下一步自然换新进程。agent scope 拆除时亦释放客户端（`agent.ts:139-142`）。
 
 `turn()` 负责会话日志边界：`turn/start` → 循环 `preStep` + `step/start` + `step()` + `step/end` → `turn/end`（`agent.ts:372-449`）。`preStep` 走 `agent/pre-step` waterfall，之后追加技能注入（见第 7 节）。
 

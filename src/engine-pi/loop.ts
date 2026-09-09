@@ -187,6 +187,8 @@ export class PiLoop extends Service implements AgentFactory {
   readonly spawn: (spec: PiSpawnSpec) => PiProcess
   /** Resolved Pi CLI entrypoint; `argv[0]` of every Pi RPC child. */
   readonly bin: string
+  /** Discovered Pi model catalog, forwarded to each agent so it can validate the session-selected model against what pi can actually serve. */
+  private readonly catalog: { readonly entries: readonly PiModelEntry[] }
 
   constructor(
     ctx: Context,
@@ -197,6 +199,7 @@ export class PiLoop extends Service implements AgentFactory {
     this.ownership = new FactoryOwnership(ctx.fiber)
     this.runtime = { ctx }
     this.bin = piCliEntrypoint()
+    this.catalog = config.piCatalogHolder ?? { entries: [] }
     this.spawn = (spec) => fromSubprocess(this.runtime.ctx.subprocess.spawn(piSubprocessSpec(spec, PI_DISPOSE_GRACE_MS)))
     // Probe discoverable Pi models once per mount and publish into the shared
     // holder so the route adapter /model directory reflects the catalog. Failure
@@ -310,7 +313,10 @@ export class PiLoop extends Service implements AgentFactory {
       throw abort.signal.reason instanceof Error ? abort.signal.reason : new Error(String(abort.signal.reason))      /* v8 ignore stop */
     }
     try {
-      const agent = machine = new PiAgent(loopCtx, id, options, session, this.config, this.spawn, this.bin)
+      const agent = machine = new PiAgent(
+        loopCtx, id, options, session, this.config, this.spawn, this.bin,
+        this.catalog,
+      )
       machineReady.resolve()
       assertLive()
 
