@@ -108,21 +108,21 @@ describe('PiLoop catalog probe', () => {
     const spawn = vi.fn((spec: unknown) => {
       const sub = spec as { argv: string[] }
       if (sub.argv.includes('--list-models')) {
-        const events: Array<{ 'data'?: string }> = []
-        const stdout = new Readable({
-          read: () => {},
-          // Manually push+end to feed the collector before exit resolves.
-        })
+        // pi --mode rpc --list-models emits the table on STDERR, so feed it there
+        // and close BOTH streams so the probe's collectOutput settles.
+        const stdout = new Readable({ read: () => {} })
+        const stderr = new Readable({ read: () => {} })
         queueMicrotask(() => {
-          stdout.push('provider   model\n')
-          stdout.push('anthropic  claude-opus-4-7\n')
+          stderr.push('provider   model\n')
+          stderr.push('anthropic  claude-opus-4-7\n')
+          stderr.push(null)
           stdout.push(null)
         })
         return {
           pid: 1,
           stdin: new Writable({ write: (_c, _e, cb) => { cb() } }),
           stdout,
-          stderr: new Readable({ read: () => {} }),
+          stderr,
           collected: {},
           done: Promise.resolve({ exitCode: 0, signal: null }),
           terminate: vi.fn(),

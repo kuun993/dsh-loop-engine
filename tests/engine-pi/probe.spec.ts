@@ -40,33 +40,38 @@ describe('parsePiModelList', () => {
 })
 
 describe('probePiModels', () => {
-  it('spawns pi --list-models, reads stdout, and parses it', async () => {
-    const spawn = vi.fn((): PiProcess => {
-      const process: PiProcess = {
-        stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
-        stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        stderr: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        onExit: (handler: (code: number | null) => void) => { void handler(0) },
-        terminate: vi.fn(),
-      }
-      // Drive data + end + close so the collector settles; a real Readable
-      // emits `end` then `close`, so cover both resolvers.
-      const handlers = new Map<string, (arg: unknown) => void>()
-      ;(process.stdout as unknown as {
-        on: (event: string, cb: (arg?: unknown) => void) => void
-      }).on = (event: string, cb: (arg?: unknown) => void) => {
-        if (event === 'data') handlers.set('data', cb as (arg: unknown) => void)
-        if (event === 'end' || event === 'close') handlers.set(event, cb as (arg: unknown) => void)
-      }
-      // collectStdout subscribes before the probe awaits exit; feed it now.
-      queueMicrotask(() => {
-        handlers.get('data')?.('provider   model\n')
-        handlers.get('data')?.('anthropic  claude-opus-4-7\n')
-        handlers.get('end')?.(undefined)
-        handlers.get('close')?.(undefined)
-      })
-      return process
+  /** A mock PiProcess that emits `output` on STDERR (pi dumps --list-models
+   *  there), closes both streams, and resolves exit with `exitCode`. */
+  function mockProcess({ exitCode, output }: { exitCode: number | null; output: string }): PiProcess {
+    const streams = new Map<string, (arg: unknown) => void>()
+    const process: PiProcess = {
+      stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
+      stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
+      stderr: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
+      onExit: (handler: (code: number | null) => void) => { void handler(exitCode) },
+      terminate: vi.fn(),
+    }
+    const hook = (stream: unknown): void => {
+      ;(stream as unknown as { on: (e: string, cb: (arg?: unknown) => void) => void }).on =
+        (event: string, cb: (arg?: unknown) => void) => { streams.set(event, cb as (arg: unknown) => void) }
+    }
+    hook(process.stdout)
+    hook(process.stderr)
+    queueMicrotask(() => {
+      if (output.length > 0) streams.get('data')?.(output)
+      streams.get('close')?.(undefined) // arrives per stream; two closes settle collectOutput
+      // a single subscriber map means the same handler is registered on both
+      // streams; call it twice to close both.
+      streams.get('close')?.(undefined)
     })
+    return process
+  }
+
+  it('spawns pi --list-models, reads STDERR (where pi dumps the table), and parses it', async () => {
+    const spawn = vi.fn((): PiProcess => mockProcess({
+      exitCode: 0,
+      output: 'provider   model\nanthropic  claude-opus-4-7\n',
+    }))
 
     const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
@@ -80,24 +85,9 @@ describe('probePiModels', () => {
     expect(spec.env).toEqual({})
   })
 
-  it('returns an empty array when the probe fails (non-zero exit) without throwing', async () => {
+  it('merges models written across stdout and stderr', async () => {
     const spawn = vi.fn((): PiProcess => {
-      const process: PiProcess = {
-        stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
-        stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        stderr: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        onExit: (handler: (code: number | null) => void) => { void handler(1) },
-        terminate: vi.fn(),
-      }
-      return process
-    })
-
-    const models = await probePiModels('/abs/path/pi', spawn)
-    expect(models).toEqual([])
-  })
-
-  it('returns an empty array when the child emits nothing before exit', async () => {
-    const spawn = vi.fn((): PiProcess => {
+      const streams = new Map<string, (arg: unknown) => void>()
       const process: PiProcess = {
         stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
         stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
@@ -105,43 +95,41 @@ describe('probePiModels', () => {
         onExit: (handler: (code: number | null) => void) => { void handler(0) },
         terminate: vi.fn(),
       }
-      // No 'data' events, but emit 'end' so the collector settles with ''.
-      const close = new Map<string, (arg: unknown) => void>()
-      ;(process.stdout as unknown as { on: (e: string, cb: (arg?: unknown) => void) => void }).on =
-        (event: string, cb: (arg?: unknown) => void) => {
-          if (event === 'end' || event === 'close') close.set('end', cb as (arg: unknown) => void)
-        }
-      queueMicrotask(() => { close.get('end')?.(undefined) })
-      return process
-    })
-
-    const models = await probePiModels('/abs/path/pi', spawn)
-    expect(models).toEqual([])
-  })
-
-  it('treats a null exit code as success and parses stdout', async () => {
-    const spawn = vi.fn((): PiProcess => {
-      const process: PiProcess = {
-        stdin: { write: vi.fn(), end: vi.fn() } as unknown as NodeJS.WritableStream,
-        stdout: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        stderr: { on: vi.fn(), setEncoding: vi.fn() } as unknown as NodeJS.ReadableStream,
-        onExit: (handler: (code: number | null) => void) => { void handler(null) },
-        terminate: vi.fn(),
-      }
-      const handlers = new Map<string, (arg: unknown) => void>()
-      ;(process.stdout as unknown as {
-        on: (event: string, cb: (arg?: unknown) => void) => void
-      }).on = (event: string, cb: (arg?: unknown) => void) => {
-        if (event === 'data') handlers.set('data', cb as (arg: unknown) => void)
-        if (event === 'end' || event === 'close') handlers.set('end', cb as (arg: unknown) => void)
+      for (const stream of [process.stdout, process.stderr]) {
+        ;(stream as unknown as { on: (e: string, cb: (arg?: unknown) => void) => void }).on =
+          (event: string, cb: (arg?: unknown) => void) => { streams.set(event, cb as (arg: unknown) => void) }
       }
       queueMicrotask(() => {
-        handlers.get('data')?.('anthropic  claude-opus-4-7\n')
-        handlers.get('end')?.(undefined)
+        streams.get('data')?.('stdout-model  one\n')
+        streams.get('data')?.('stderr-model  two\n')
+        streams.get('close')?.(undefined)
+        streams.get('close')?.(undefined)
       })
       return process
     })
 
+    const models = await probePiModels('/abs/path/pi', spawn)
+    expect(models).toContainEqual({ provider: 'stdout-model', model: 'one' })
+    expect(models).toContainEqual({ provider: 'stderr-model', model: 'two' })
+  })
+
+  it('returns an empty array when the probe fails (non-zero exit) without throwing', async () => {
+    const spawn = vi.fn((): PiProcess => mockProcess({ exitCode: 1, output: '' }))
+    const models = await probePiModels('/abs/path/pi', spawn)
+    expect(models).toEqual([])
+  })
+
+  it('returns an empty array when the child emits nothing before exit', async () => {
+    const spawn = vi.fn((): PiProcess => mockProcess({ exitCode: 0, output: '' }))
+    const models = await probePiModels('/abs/path/pi', spawn)
+    expect(models).toEqual([])
+  })
+
+  it('treats a null exit code as success and parses STDERR', async () => {
+    const spawn = vi.fn((): PiProcess => mockProcess({
+      exitCode: null,
+      output: 'provider   model\nanthropic  claude-opus-4-7\n',
+    }))
     const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
   })

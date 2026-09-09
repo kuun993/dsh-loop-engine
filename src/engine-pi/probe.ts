@@ -17,27 +17,37 @@ function waitForExit(child: PiProcess): Promise<number> {
   })
 }
 
-/** Collect the child's full stdout, resolving once the stream ends. */
-function collectStdout(child: PiProcess): Promise<string> {
+/** Collect the child's full stdout AND stderr, resolving once both close. */
+function collectOutput(child: PiProcess): Promise<string> {
   return new Promise<string>((resolve) => {
-    let text = ''
-    /* v8 ignore start -- a real PiProcess.stdout always exposes `.on`, so this backstop is unreachable in tests */
+    /* v8 ignore start -- real child streams always expose `.on`; this backstop is unreachable in tests */
     /* v8 ignore next -- see above */
-    if (child.stdout.on === undefined) {
+    if ((child.stdout.on === undefined) || (child.stderr.on === undefined)) {
       resolve('')
       return
     } /* v8 ignore stop */
-    // Subscribe to data AND end; a child that never ends would hang the probe,
-    // so we also settle on 'close'. The `PiProcess.stdout` readonly surface is
-    // narrow here, so we reach the event methods through a structural cast.
+    let text = ''
+    let pending = 2
+    const finish = (): void => {
+      pending -= 1
+      if (pending === 0) resolve(text)
+    }
+    // pi --mode rpc --list-models emits the model table on STDERR (stdout is
+    // reserved for the JSONL RPC protocol), so read both and merge.
     const out = child.stdout as unknown as {
+      on(event: string, cb: (arg?: unknown) => void): void
+      setEncoding(enc: string): void
+    }
+    const err = child.stderr as unknown as {
       on(event: string, cb: (arg?: unknown) => void): void
       setEncoding(enc: string): void
     }
     out.setEncoding('utf8')
     out.on('data', (data) => { text += String(data) })
-    out.on('end', () => { resolve(text) })
-    out.on('close', () => { resolve(text) })
+    out.on('close', finish)
+    err.setEncoding('utf8')
+    err.on('data', (data) => { text += String(data) })
+    err.on('close', finish)
   })
 }
 
@@ -86,9 +96,9 @@ export async function probePiModels(
   } catch {
     return []
   }
-  const stdoutPromise = collectStdout(child)
+  const outputPromise = collectOutput(child)
   const exitCode = await waitForExit(child)
   if (exitCode !== 0) return []
-  const stdout = await stdoutPromise
-  return parsePiModelList(stdout)
+  const output = await outputPromise
+  return parsePiModelList(output)
 }
