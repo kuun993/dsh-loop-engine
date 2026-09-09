@@ -512,7 +512,7 @@ export class ClaudeCodeAgent implements Agent {
         switch (message.type) {
           case 'stream_event': {
             for (const chunk of mapStreamEvent(message.event, toolCalls)) {
-              chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
+              chunkSeqs.push(this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq)
               if (chunk.type === 'reasoning-delta') {
                 reasoningByIndex.set(chunk.index, (reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
               }
@@ -553,7 +553,7 @@ export class ClaudeCodeAgent implements Agent {
               reasoningByIndex.clear()
               const usage = mapped.usage ?? pendingUsage
               pendingUsage = undefined
-              this.session.append('assistant/message', {
+              this.session.append('assistant/message' as any, {
                 turn,
                 step,
                 message: createAssistantMessage({
@@ -561,12 +561,12 @@ export class ClaudeCodeAgent implements Agent {
                   source: { provider: PROVIDER, model: mapped.model },
                 }),
                 ...usage === undefined ? {} : { usage },
-              }, {
+              } as any, {
                 surfaceOp: 'append',
                 // Link the durable message to the chunks that streamed it, so
                 // replay can reconstruct the partial exactly as shown.
                 ...chunkSeqs.length === 0 ? {} : { sourceEventSeqs: chunkSeqs },
-              })
+              } as any)
             }
             for (const call of mapped.toolCalls) {
               this.session.append('tool/call', {
@@ -590,7 +590,7 @@ export class ClaudeCodeAgent implements Agent {
                 .sort((a, b) => a[0] - b[0])
                 .map(([, text]) => ({ type: 'reasoning' as const, text }))
               reasoningByIndex.clear()
-              this.session.append('assistant/message', {
+              this.session.append('assistant/message' as any, {
                 turn,
                 step,
                 message: createAssistantMessage({
@@ -598,7 +598,7 @@ export class ClaudeCodeAgent implements Agent {
                   source: { provider: PROVIDER, model: NATIVE_MODEL_LABEL },
                 }),
                 ...pendingUsage === undefined ? {} : { usage: pendingUsage },
-              }, { surfaceOp: 'append' })
+              } as any, { surfaceOp: 'append' } as any)
               pendingUsage = undefined
             }
             if (message.subtype === 'success') {

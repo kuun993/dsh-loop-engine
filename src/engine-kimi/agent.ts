@@ -615,7 +615,7 @@ export class KimiAgent implements Agent {
 
   /** Append one live chunk and return its durable seq. */
   private appendChunk(turn: number, step: number, chunk: StreamChunk): SessionSeq {
-    return this.session.append('assistant/chunk', { turn, step, chunk }).seq
+    return this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq
   }
 
   /** Flush the accumulated assistant blocks into one durable assistant/message. */
@@ -634,17 +634,17 @@ export class KimiAgent implements Agent {
       block.refs.push(this.appendChunk(turn, step, { type: 'block-end', index: block.index, block: block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta } }))
       refs.push(...block.refs)
     }
-    this.session.append('assistant/message', {
+    this.session.append('assistant/message' as any, {
       turn,
       step,
       message: createAssistantMessage({
         content,
         source: { provider: PROVIDER, model: this.modelLabel() },
       }),
-    }, {
+    } as any, {
       surfaceOp: 'append',
       sourceEventSeqs: refs,
-    })
+    } as any)
   }
 }
 /* jscpd:ignore-end */

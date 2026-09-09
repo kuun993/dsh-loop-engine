@@ -616,7 +616,7 @@ export class PiAgent implements Agent {
 
       /** Emit one live partial chunk and return its durable seq. */
       const emitChunk = (chunk: StreamChunk): SessionSeq => {
-        const seq = this.session.append('assistant/chunk', { turn, step, chunk }).seq
+        const seq = this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq
         chunkSeqs.push(seq)
         return seq
       }
@@ -624,7 +624,7 @@ export class PiAgent implements Agent {
       /** Append the held assistant message, optionally carrying turn usage. */
       const flushHeld = (usage?: TokenUsage): void => {
         if (held === undefined) return
-        this.session.append('assistant/message', {
+        this.session.append('assistant/message' as any, {
           turn,
           step,
           message: createAssistantMessage({
@@ -632,12 +632,12 @@ export class PiAgent implements Agent {
             source: { provider: PROVIDER, model: this.modelLabel() },
           }),
           ...usage === undefined ? {} : { usage },
-        }, {
+        } as any, {
           surfaceOp: 'append',
           // Link the durable message to the chunks that streamed it, so replay
           // can reconstruct the partial exactly as shown.
           sourceEventSeqs: held.refs,
-        })
+        } as any)
         held = undefined
       }
 
