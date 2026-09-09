@@ -31,6 +31,7 @@ import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from 
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './types.ts'
+import type { PiModelEntry } from './probe.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { resolveSessionPermission, toolsForSandbox, type PiPermission } from './permission.ts'
 import {
@@ -124,6 +125,7 @@ export class PiAgent implements Agent {
     private readonly config: ResolvedConfig,
     private readonly spawn: PiSpawnCapability,
     private readonly bin: string,
+    private readonly catalog: { readonly entries: readonly PiModelEntry[] },
   ) {
     this.dispatch = agentEvents(loopCtx, this)
     this.inbox = new Inbox(session, {
@@ -486,9 +488,29 @@ export class PiAgent implements Agent {
   }
 
   /** Build the `pi --mode rpc` argv/cwd/env for one step's child process. */
+  /**
+   * Resolve the `--model` for the RPC child. The session-selected model (last
+   * `model/selection` event) is honored only when it is one of pi's discovered
+   * models; an unknown harness model (e.g. another provider's model such as
+   * `anyai-v1`, which pi cannot serve) is dropped so the child falls back to pi's
+   * own default instead of exiting with "Model ... not found". An empty catalog
+   * (probe not concluded) keeps the candidate, matching prior behavior.
+   */
+  private pickModel(): string | undefined {
+    const candidate = this.dynamicModel() ?? this.config.model
+    if (candidate === undefined) return undefined
+    if (this.catalog.entries.length > 0) {
+      const known = this.catalog.entries.some(
+        entry => entry.model === candidate || `${entry.provider}/${entry.model}` === candidate,
+      )
+      if (!known) return undefined
+    }
+    return candidate
+  }
+
   private spawnSpec(cwd: string): PiSpawnSpec {
     const argv: string[] = []
-    const model = this.dynamicModel() ?? this.config.model
+    const model = this.pickModel()
     if (this.config.provider !== undefined) argv.push('--provider', this.config.provider)
     if (model !== undefined && this.config.thinkingLevel !== undefined) {
       argv.push('--model', `${model}:${this.config.thinkingLevel}`)
@@ -788,6 +810,12 @@ export class PiAgent implements Agent {
     } finally {
       signal.removeEventListener('abort', cancel)
       controller.abort()
+      // The Pi RPC process is single-session: after this step's session settles,
+      // the process no longer runs a second new_session/prompt (it hangs, then
+      // exits — "pi RPC process exited unexpectedly"). Dispose it so the next
+      // step respawns a fresh child per session.
+      this.rpc?.dispose()
+      this.rpc = undefined
     }
   }
 
