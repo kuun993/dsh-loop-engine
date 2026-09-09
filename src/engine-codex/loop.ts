@@ -24,7 +24,7 @@ import type {
   SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
 import { interruptedTurnClosers, SessionId, SessionLogOffset, SessionPreparation } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { CodexAgent } from './agent.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
@@ -446,7 +446,7 @@ export class CodexLoop extends Service implements AgentFactory {
             // back the physically valid log; an interrupted final turn receives
             // synthetic closers (missing tool errors, step/end, turn/end) that
             // are appended through the same handle as an ordinary batch.
-            const persisted = await handle.read(0, undefined, { signal: fused })
+            const persisted = await handle.read(0, undefined, { signal: fused }) as unknown as readonly SessionEvent[]
             fused.throwIfAborted()
             const closers = interruptedTurnClosers(persisted)
             if (closers.length > 0) await handle.append(closers)
@@ -455,7 +455,7 @@ export class CodexLoop extends Service implements AgentFactory {
               meta: structuredClone(handle.header),
               inheritedEventCount: handle.inheritedEventCount,
               seedSource: 'persistence',
-            }))
+            } as never))
             stored = { handle, storedCount: persisted.length + closers.length }
             await this.appendUnstoredSuffix(stored, preparation.session)
           } else {
