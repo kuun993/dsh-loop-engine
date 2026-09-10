@@ -6,7 +6,7 @@
 
 ## 1. 插件定位与核心问题：单 AgentFactory 槽位
 
-dsh（DeepSeek Harness）主仓里，agent 的创建由 `AgentRegistry.setFactory` 注册的**唯一** `AgentFactory` 提供；第二次注册直接抛 `an agent factory is already registered`（主仓 `packages/core/agent/src/index.ts:372-381`，README 明确"Throws on a second factory"）。默认情况下这个槽位由基础包 composition 里的 `agent-loop` 行（`@deepseek-ai/dsh-agent-loop`，主仓 `packages/bundle/base/cordis.patch.yml:436-437`）占住——它就是"in-process"引擎。
+dsh（DeepSeek Harness）主仓里，agent 的创建由 `AgentRegistry.setFactory` 注册的**唯一** `AgentFactory` 提供；第二次注册直接抛 `an agent factory is already registered`（主仓 `packages/core/agent/src/index.ts:355-364`，README 明确"Throws on a second factory"）。默认情况下这个槽位由基础包 composition 里的 `agent-loop` 行（`@deepseek-ai/dsh-agent-loop`，主仓 `packages/bundle/base/cordis.patch.yml:472-473`）占住——它就是"in-process"引擎。
 
 本插件要支持 web 设置页切换引擎，又不能改主仓一行代码，因此唯一的出路是：
 
@@ -15,7 +15,7 @@ dsh（DeepSeek Harness）主仓里，agent 的创建由 `AgentRegistry.setFactor
 
 引擎选择落在**两个平面**上，二者必须一致：
 
-1. **持久平面**：`$DSH_HOME/profiles/web/cordis.patch.yml` 里的一段 managed block。它是启动时的 ground truth——`apply()` 同步读它来决定挂载哪个工厂（`src/index.ts:258-260`）。
+1. **持久平面**：`$DSH_HOME/profiles/web/cordis.patch.yml` 里的一段 managed block。它是启动时的 ground truth——`apply()` 同步读它来决定挂载哪个工厂（`src/index.ts:258-261`）。
 2. **运行时平面**：当前进程内以 Cordis 插件 fiber 形式挂载/卸载的引擎工厂（`src/index.ts:492-522`）。运行中切换不能等重启，所以 fiber 必须同进程换槽。
 
 模块头注释（`src/index.ts:13-18`）点明了一个容易误解的事实：harness 的 config-only HMR watcher 会重新应用 patch 文件，但**无法在运行中重新注册 AgentFactory**。所以"写文件"与"换工厂"是两条独立路径，插件两条都要走。
@@ -68,15 +68,15 @@ managed block 本身是**根级 block sequence**，这带来两个真实踩过�
 
 ### 3.1 启动：`apply()` 的顺序
 
-`apply(ctx, config)`（`src/index.ts:257`）依次做：
+`apply(ctx, config)`（`src/index.ts:258`）依次做：
 
 1. `resolvePatchPath` 解析 patch 文件路径：`patchPath` 显式指定优先，否则 `$DSH_HOME/profiles/<profile>/<patchFilename>`，默认 `web/cordis.patch.yml`（`src/index.ts:136-144`）。空字符串 `patchPath` 视为未指定。
-2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`（`src/index.ts:260`）。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
-3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:612-618`）。
+2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`（`src/index.ts:261`）。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
+3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:620-627`）。
 4. `steerPresetDefault(fileEngine)`：把会话的命令/技能面导向匹配当前引擎的 preset（见 §3.5）。
-5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:643-644`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
+5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:653`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
 
-`installSection` 的契约（主仓 `packages/settings/settings/src/index.ts:472-496` 的 provider 方法）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:640-642` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:648`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
+`installSection` 的契约（主仓 `packages/settings/settings/src/index.ts:472-496` 的 provider 方法）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:649-650` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:657`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
 
 ### 3.2 运行时切换：onChange 管线
 
@@ -91,11 +91,11 @@ settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 
 `hostFactory`（`src/index.ts:492-522`）是挂载的核心，两个要点：
 
-- **触碰 fiber 使其立即启动**：Cordis 的插件 fiber 在 await 时才懒启动，而 settings 钩子是同步回调没有 await，所以 `void fiber.then(...)` 主动触发（`src/index.ts:497-500`）。
-- **有界槽位竞争重试**：运行时切到托管引擎时，patch 层的 reload（禁用基础 `agent-loop` 行）与新工厂注册是**竞争关系**——reload 落地前基础工厂仍占槽位，`setFactory` 以 `an agent factory is already registered` 拒绝。命中这条错误消息且未超上限时，每 50ms 重试一次，上限 `MAX_MOUNT_ATTEMPTS = 40`（约 2 秒窗口，`src/index.ts:84-85、511-518`）；reload 释放槽位后重试即成功（`tests/index.spec.ts:490-527`）。窗口耗尽或其他任何错误 → 一条 loud error，不无限循环（`tests/index.spec.ts:550-571`）。
-- 重试 timer 随插件 dispose 清理（`ctx.effect`，`src/index.ts:639`），否则在已停用的 context 上迟到的挂载会刷噪声日志（`tests/index.spec.ts:529-548`）。
+- **触碰 fiber 使其立即启动**：Cordis 的插件 fiber 在 await 时才懒启动，而 settings 钩子是同步回调没有 await，所以 `void fiber.then(...)` 主动触发（`src/index.ts:506`）。
+- **有界槽位竞争重试**：运行时切到托管引擎时，patch 层的 reload（禁用基础 `agent-loop` 行）与新工厂注册是**竞争关系**——reload 落地前基础工厂仍占槽位，`setFactory` 以 `an agent factory is already registered` 拒绝。命中这条错误消息且未超上限时，每 50ms 重试一次，上限 `MAX_MOUNT_ATTEMPTS = 40`（约 2 秒窗口，`src/index.ts:84-85、517-523`）；reload 释放槽位后重试即成功（`tests/index.spec.ts:490-527`）。窗口耗尽或其他任何错误 → 一条 loud error，不无限循环（`tests/index.spec.ts:550-571`）。
+- 重试 timer 随插件 dispose 清理（`ctx.effect`，`src/index.ts:648`），否则在已停用的 context 上迟到的挂载会刷噪声日志（`tests/index.spec.ts:529-548`）。
 
-注意重试靠**错误消息字符串匹配**（`src/index.ts:513`），这是对主仓 `packages/core/agent/src/index.ts:374` 文案的脆弱耦合——主仓改文案时这里会静默退化为"不重试、直接报错"。
+注意重试靠**错误消息字符串匹配**（`src/index.ts:519`），这是对主仓 `packages/core/agent/src/index.ts:357` 文案的脆弱耦合——主仓改文案时这里会静默退化为"不重试、直接报错"。
 
 ### 3.4 挂载的副作用：命令与技能注册
 
@@ -103,25 +103,25 @@ settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 
 | 引擎 | 斜杠命令 | 技能 Provider |
 |---|---|---|
-| claude-code | 内置 7 个 + 发现 `~/.claude/commands/*.md`（`src/index.ts:524-555`） | `ClaudeCodeSkillProvider`（`.claude/skills/`、`CLAUDE.md`，`src/skills.ts:219`） |
-| codex | 无 | `CodexSkillProvider`（AGENTS.md，`src/index.ts:558-568`） |
-| pi | 无 | `PiSkillProvider`（`src/index.ts:570-581`） |
-| kimi | `KIMI_COMMANDS`（`src/index.ts:583-609`） | `KimiSkillProvider` |
+| claude-code | 内置 7 个 + 发现 `~/.claude/commands/*.md`（`src/index.ts:530-561`，注册循环 `:543`） | `ClaudeCodeSkillProvider`（`.claude/skills/`、`CLAUDE.md`，`src/skills.ts:219`） |
+| codex | 无 | `CodexSkillProvider`（AGENTS.md，`src/index.ts:564-573`） |
+| pi | 无 | `PiSkillProvider`（`src/index.ts:576-589`） |
+| kimi | `KIMI_COMMANDS`（`src/index.ts:592-618`，注册循环 `:600`） | `KimiSkillProvider` |
 
-命令 handler 的语义是**转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎 CLI，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:64-72`）。注册的意义是让命令出现在 web 斜杠菜单里。与 dsh 原生命令撞名时记 warn 跳过，不让挂载失败（`src/index.ts:540-542`）。项目级 `.claude/commands/` 有意不注册——它按 cwd 生效，全局注册会跨项目冲突（`src/commands.ts:16-18`）。
+命令 handler 的语义是**转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎 CLI，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:64-72`）。注册的意义是让命令出现在 web 斜杠菜单里。与 dsh 原生命令撞名时记 warn 跳过，不让挂载失败（`src/index.ts:544-548`）。项目级 `.claude/commands/` 有意不注册——它按 cwd 生效，全局注册会跨项目冲突（`src/commands.ts:16-18`）。
 
-**命令注册的命名禁区**：web 客户端自带 `/model` 等 client 侧贡献，host 侧同名命令会让 `ui-commands` 直接把整个 command 菜单源判死（主仓 `packages/client/ui-commands/src/client/service.ts:259-261` 抛错，`ui-input-trigger` 降为 source-failed）——表现是斜杠菜单里命令全消失、只剩技能。Kimi 的 `/model` 因此刻意不桥接（`src/engine-kimi/commands.ts` 模块注释）。
+**命令注册的命名禁区**：web 客户端自带 `/model` 等 client 侧贡献，host 侧同名命令会让 `ui-commands` 直接把整个 command 菜单源判死（主仓 `packages/client/ui-commands/src/client/service.ts:214-215` 抛错，`ui-input-trigger` 降为 source-failed）——表现是斜杠菜单里命令全消失、只剩技能。Kimi 的 `/model` 因此刻意不桥接（`src/engine-kimi/commands.ts` 模块注释）。
 
 `skills.ts` 还内嵌了一个小型 YAML frontmatter 子集解析器（支持 `>`/`|` 块标量，`src/skills.ts:84-154`），因为 Claude 的 SKILL.md 大量使用折叠写法的 `description`。类型全部是本地镜像（`src/skills.ts:14-16`、`src/commands.ts:29-30`），刻意避免对 `dsh-skill` / `dsh-commands` 增加直接 peer 依赖。
 
-卸载或挂载失败时 `cleanupEngineRegistrations` 统一回收这些注册（`src/index.ts:472-481`、失败路径 `src/index.ts:500-504`）。
+卸载或挂载失败时 `cleanupEngineRegistrations` 统一回收这些注册（`src/index.ts:478-487`、失败路径 `src/index.ts:506-510`）。
 
 ### 3.5 会话命令/技能面的接管：hosted preset
 
 引擎注册自己的命令/技能（§3.4）只是"加"；真正让"切到某引擎就只剩该引擎的命令和技能"成立的是**减**掉 dsh 原生的那部分。dsh 原生面分两层，手段各不同：
 
 - **全局层命令**（`/goal` 等）：行在根树组合里，profile patch 够得着——managed block 直接禁用 `command-goal`（§2.1）。
-- **preset 层**（`/compact`、`/plan`、`skill-filesystem`、`tool-skill`、`tool-goal`）：这些行活在 `standard` agent preset 的组合文件里，由运行时独立的 `PresetTree` 挂载，**profile patch 够不到**（主仓 `packages/preset/agent-presets/src/mount.ts:340`）；`commands`/`skills` 服务也没有"注销别人注册"的 API。所以插件走了 preset 机制本身：
+- **preset 层**（`/compact`、`/plan`、`skill-filesystem`、`tool-skill`、`tool-goal`）：这些行活在 `standard` agent preset 的组合文件里，由运行时独立的 `PresetTree` 挂载，**profile patch 够不到**（主仓 `packages/preset/agent-presets/src/mount.ts:396`）；`commands`/`skills` 服务也没有"注销别人注册"的 API。所以插件走了 preset 机制本身：
 
 `src/preset.ts` 在每次需要托管引擎的启动时，把 roster 的 `standard` preset 组合读出来（经 `agentPresets.read`，`src/index.ts:448-469`），用纯行变换 `stripPresetRows` 剥掉 `skill-filesystem`、`tool-skill`、`tool-goal`、`planning`、`compaction` 五个顶层行（连同其节注释），写进用户 preset 根 `$DSH_HOME/.agent-presets/loop-engine/`（幂等：内容一致不动盘，standing mount 的 file-stamp 就不会被骗）。随后 `steerPresetDefault` 把 roster 的默认 preset 指到 `loop-engine`——用的是 `agent-presets` settings 命名空间的 `default` 字段（`settings.mutate`，热生效、只影响之后新建的会话），而不是 patch `agent-presets` 行的 config：patch 的 config 覆盖是**整体替换**语义（主仓 `vendor/include/src/index.ts:121-124`），会顺带抹掉部署方在同行配置的 `roots`，settings 层则天然叠在 config 之上、可 unset 还原。
 
@@ -129,20 +129,20 @@ settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 
 - **切回 `in-process` 时还原**：被替换的旧默认值记在 `savedPresetDefault`，切回时 set 回去；没有旧值（或启动时读到残留的本插件 id）则 unset，落回行配置的 `standard`（`src/index.ts:421-437`）。
 - **namespace 注册竞争**：roster 的 settings 段由它自己的 inject 回调注册，可能晚于本插件的 apply；mutate 撞上 `not registered` 时有界重试（30×100ms），其他错误 loud 一次（`src/index.ts:399-413`）。同理，in-process 启动时的"残留值清理"先读到的可能是 attach 前的 config 默认，所以干净首读也要按同一窗口复查几轮（`src/index.ts:421-437`）。
-- **authoring 失败不导默认值**：preset 没写成就绝不能把默认指过去，否则每个新会话都 loud 失败（`src/index.ts:455-463`）。
+- **authoring 失败不导默认值**：preset 没写成就绝不能把默认指过去，否则每个新会话都 loud 失败（`src/index.ts:461-469`）。
 - **preset 永不删除**：会话日志记着 `agent-preset/selected`，resume 要按它重新解析；留下的 `loop-engine` preset 目录是无害的（roster 发现是文件系统的，`tests/index.spec.ts:991` 起的分组覆盖以上每条）。
 - **活会话不迁移**：默认只影响之后新建的会话；已在跑的会话保持自己 join 的 preset，页面刷新（§4.3 的 reload）后新建会话自然落到新面。
 
 ### 3.6 provider 路由占位：为什么第二轮 prompt 需要它
 
-四个托管引擎各自把固定的 provider 标签（`claude-code` / `codex` / `pi` / `kimi`）写进会话的 `request/header`（各引擎文档的 request/header 节）。而 web 宿主侧从**最新一条 header** 推导会话的模型选择（主仓 `packages/host/apiproxy/src/api-proxy.ts:1095-1122` 的 `selectionFor`），并在 `session.prompt` 起点拒绝"没有任何 adapter 服务的 provider"（`routeServed` / `turnAgentFor`，主仓 `api-proxy.ts:1777-1808`，错误码 `model-unavailable`）。两个事实叠加：首轮 prompt 时空会话的模型选择回落到部署默认值（有 adapter 服务，放行），同时第一轮把 header 落进日志；第二轮 prompt 读到的会话选择就变成了 `kimi` / `kimi-native` 这类没有 adapter 的组合——**必被拒**。这就是"切引擎后第一次对话正常、第二次报 model-unavailable"的根因。
+四个托管引擎各自把固定的 provider 标签（`claude-code` / `codex` / `pi` / `kimi`）写进会话的 `request/header`（各引擎文档的 request/header 节）。而 web 宿主侧从**最新一条 header** 推导会话的模型选择（主仓 `packages/api/session-controller/src/agent.ts:276-303` 的 `selectionFor`，读日志里的 header 在 `:290-294`），并在 `session.prompt` 起点拒绝"没有任何 adapter 服务的 provider"（`routeServed`，主仓 `packages/api/session-controller/src/commands.ts:653-655`；拒绝时在 `:323-326` 抛 `model-unavailable`）。两个事实叠加：首轮 prompt 时空会话的模型选择回落到部署默认值（有 adapter 服务，放行），同时第一轮把 header 落进日志；第二轮 prompt 读到的会话选择就变成了 `kimi` / `kimi-native` 这类没有 adapter 的组合——**必被拒**。这就是"切引擎后第一次对话正常、第二次报 model-unavailable"的根因。
 
 插件的应对是在引擎挂载期间把该标签注册成一条**占位 provider 路由**（`src/provider-route.ts` 的 `HostedEngineRouteAdapter`，接线在 `mountProviderRoute`，`src/index.ts:366-396`）：
 
-- **目录零污染**：占位 adapter 继承默认的空 `listModels`，目录构建会丢弃不广告任何模型的组（主仓 `api-proxy.ts:315`），模型选择器看不到这条路由；`stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`——托管引擎原生持有模型，真有查询路由到这里就是接线 bug。
-- **生命周期跟随引擎**：`mountEngine` 注册（`src/index.ts:613`），`unmountEngine` 与插件 dispose 经 `releaseRoute` 回收（`src/index.ts:347-353、624、639`）。切回 `in-process` 后，带着托管 header 的旧会话再发 prompt 会被拒——这是正确语义：那些会话本就无法在 in-process loop 下继续。
-- **llm 服务缺席时有界重试**（30×100ms，与 preset 默认值的 attach 竞争同款，`src/index.ts:329-330、373-379`）：web profile 里 llm 是更靠前的 composition 行，但 fiber 启动顺序不是契约；完全没有 llm 服务的极简 composition 里 `routeServed` 直接放行（主仓 `api-proxy.ts:1774-1775`），不占位也无害。
-- **幂等与冲突**：同一引擎的挂载重入（§3.3 的槽位重试会再次进 `mountEngine`）靠 `routeEngine + routeHandle` 跳过（`src/index.ts:370`）；部署方自己的 adapter 已占该标签时记 warn 跳过，且卸载不会回收不属于自己的路由（`src/index.ts:383-390`）。
+- **目录零污染**：占位 adapter 继承默认的空 `listModels`，目录构建会丢弃不广告任何模型的组（主仓 `packages/api/session-controller/src/catalog.ts:63-64` 的 `.filter(group => group.models.length > 0)`），模型选择器看不到这条路由；`stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`——托管引擎原生持有模型，真有查询路由到这里就是接线 bug。
+- **生命周期跟随引擎**：`mountEngine` 注册（`src/index.ts:622`），`unmountEngine` 与插件 dispose 经 `releaseRoute` 回收（`src/index.ts:351-358、633、648`）。切回 `in-process` 后，带着托管 header 的旧会话再发 prompt 会被拒——这是正确语义：那些会话本就无法在 in-process loop 下继续。
+- **llm 服务缺席时有界重试**（30×100ms，与 preset 默认值的 attach 竞争同款，`src/index.ts:334-335、380-382`）：web profile 里 llm 是更靠前的 composition 行，但 fiber 启动顺序不是契约，所以注册路由要等注册表就绪。⚠️ 主仓 0.1.5 的 `routeServed` 改成**无条件**查 `ctx.llm.listProviders()`（`packages/api/session-controller/src/commands.ts:653-655`），0.1.2 时代的"没有 llm 服务就直接放行"兜底（`api-proxy.ts:1774-1775`）已不存在——完全没有 llm 服务的极简 composition 下的行为需按新代码重新评估。
+- **幂等与冲突**：同一引擎的挂载重入（§3.3 的槽位重试会再次进 `mountEngine`）靠 `routeEngine + routeHandle` 跳过（`src/index.ts:375`）；部署方自己的 adapter 已占该标签时记 warn 跳过，且卸载不会回收不属于自己的路由（`src/index.ts:389-396`）。
 
 行为钉在 `describe('apply provider route')`（`tests/index.spec.ts:851` 起）与 `tests/provider-route.spec.ts`。
 
@@ -190,7 +190,7 @@ schema（`src/settings.ts:36-39`）：`engine` 五选一并默认 `in-process`�
    - `lib/index.js`、`lib/invariant.js`：ESM、node 平台，只内联相对导入的 `./src` 模块（`build.mjs:76-87`）。
    - `lib/client.js`：CJS 闭包包进 `window.__ModuleLoader__.load({ id: 'dsh-loop-engine', factory })` 的 client-module 工厂（`build.mjs:90-106`），harness 的 web 模块加载器按此约定装载。没有 CSS loader，所以 section 组件用 token 内联样式而非 CSS module（`src/client/LoopEngineSection.tsx:9-11`）。
 
-**为什么所有 `@deepseek-ai/*` 保持 external**（`build.mjs:33-56`）：本仓库的 `node_modules` 里，harness 包往往是指向主仓**源码目录**的 junction；esbuild 基于 node_modules 的自动 external 判断会把它们当成本地源码**内联**进 bundle，后果是 cordis 实例一分为二——插件里的 `Context`/`Service` 与宿主不是同一个运行时，注册全部对不上。因此每个值导入都显式列入 `NODE_EXTERNALS`，运行时经包的 node_modules 解析，保证所有 harness 包是全进程单例。浏览器侧同理：`react`、`dsh-client-*` 等由宿主的模块表提供，列入 `BROWSER_EXTERNALS`（`build.mjs:60-70`），与 `package.json` 的 `dsh.client.external` 声明对应（`package.json:54-60`）。
+**为什么所有 `@deepseek-ai/*` 保持 external**（`build.mjs:33-56`）：harness 包必须全程只存在**一份实例**——出现两份会让 cordis 实例一分为二，插件里的 `Context`/`Service` 与宿主不是同一个运行时，注册全部对不上。这一点在 0.1.5 基线上比早期更强：本仓库的 harness 依赖现在按 `package.json` 的 peer 版本解析到**已安装的 npm 产物**（锁文件里没有任何指向主仓源码的 link/file 依赖），声明构建的 `tsconfig.build.json` 还用空 `paths` 把 `@deepseek-ai/*` 钉在产物面（见该文件注释）——"`node_modules` 里的 junction 指向主仓源码目录"那一层已经不存在（`build.mjs:32-35` 的注释仍在描述旧场景），但 esbuild 把 harness 包内联进 bundle 依然会造成双实例。因此每个值导入都显式列入 `NODE_EXTERNALS`，运行时经包的 node_modules 解析，保证所有 harness 包是全进程单例。浏览器侧同理：`react`、`dsh-client-*` 等由宿主的模块表提供，列入 `BROWSER_EXTERNALS`（`build.mjs:60-70`），与 `package.json` 的 `dsh.client.external` 声明对应（`package.json:54-60`）。
 
 `package.json` 的 `dsh` 字段是插件与 harness 的装配契约：
 
@@ -203,8 +203,8 @@ schema（`src/settings.ts:36-39`）：`engine` 五选一并默认 `in-process`�
 
 - **手改 patch 文件不会在运行中生效**。文件只在 `apply()` 启动时读、在 onChange 时写；HMR watcher 重放 patch 也换不了 AgentFactory（`src/index.ts:15-16`）。调试时改了文件请重启 `dsh web`。
 - **槽位竞争重试是字符串匹配**（见 §3.3）：主仓改 `setFactory` 的报错文案即破坏重试。2 秒窗口内 patch reload 不落地就 loud 失败。
-- **provider 路由占位依赖 llm 注册表文案**（见 §3.6）：与槽位重试同理，"部署方已占标签"的识别靠 `already registered` 消息匹配（主仓 `packages/llm/llm/src/index.ts:407`），主仓改文案时会退化成一条 error 日志且不占位——第二轮 prompt 的拒绝会复现。
-- **未知引擎 id 的降级路径有缺口**：begin 标记里出现当前版本不认识的引擎 id（如新版写、旧版读）时，`currentEngineOf` 读作 `in-process`（`src/patch-manager.ts:71-76`），插件不会挂载任何工厂；同时 managed block 仍在文件里禁用着基础 `agent-loop` 行，而启动路径里 `next === fileEngine` 会短路、**不会**清理这个块（`src/index.ts:647`）。净效果是没有任何 AgentFactory 注册，`ctx.agents.create` 全部拒绝。代码中没有针对该场景的修复路径，降级使用前先手工清块。
+- **provider 路由占位依赖 llm 注册表文案**（见 §3.6）：与槽位重试同理，"部署方已占标签"的识别靠 `already registered` 消息匹配（主仓 `packages/llm/llm/src/index.ts:429`），主仓改文案时会退化成一条 error 日志且不占位——第二轮 prompt 的拒绝会复现。
+- **未知引擎 id 的降级路径有缺口**：begin 标记里出现当前版本不认识的引擎 id（如新版写、旧版读）时，`currentEngineOf` 读作 `in-process`（`src/patch-manager.ts:71-76`），插件不会挂载任何工厂；同时 managed block 仍在文件里禁用着基础 `agent-loop` 行，而启动路径里 `next === fileEngine` 会短路、**不会**清理这个块（`src/index.ts:657`）。净效果是没有任何 AgentFactory 注册，`ctx.agents.create` 全部拒绝。代码中没有针对该场景的修复路径，降级使用前先手工清块。
 - **同步写盘不可改为异步**（§2.4）：onChange 无 await，提交即落盘是重启正确性的前提。
 - **managed block 之外的 patch 内容受字符串变换保护，但不要动标记行**：`MANAGED_BLOCK_BEGIN` 的子串匹配（`hasManagedBlock` 用 `includes`，`src/patch-manager.ts:63-65`）意味着用户手写一行同前缀注释也会被当成 managed span 吃掉。
 - **空行记账是功能不是洁癖**：`managedSpan` 的 `blankBefore` 与移除时的折叠逻辑保证往返 byte-for-byte（`tests/patch-manager.spec.ts:124-137`），改这里先跑 `tests/patch-manager.spec.ts`。

@@ -6,10 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent, type Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 
 /** Local plugin wrapper: mount constructs the Kimi loop factory. */
@@ -151,12 +151,12 @@ describe('KimiAgent turn mapping (streamed)', () => {
     mock.updates.mockReturnValue([text('Hello '), text('world')])
     const ctx = await harness()
     try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
       const { agent } = await ctx.agents.create({ sessionId: SessionId('text-s'), meta: { cwd: process.cwd() } })
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const types = agent.session.snapshotEvents().map(event => event.type)
-      expect(types).toContain('assistant/chunk')
       const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
         data: {
@@ -166,7 +166,20 @@ describe('KimiAgent turn mapping (streamed)', () => {
             content: [{ type: 'text', text: 'Hello world' }],
           },
         },
+        surfaceOp: 'append',
       })
+      // The durable message embeds its exact timed stream; `assistant/chunk`
+      // log events and `sourceEventSeqs` no longer exist.
+      expect(expandAssistantStream(assistant!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'Hello ' },
+        { type: 'text-delta', index: 0, text: 'world' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'Hello world' } },
+      ])
+      // The same attempt publishes live frames: open, one per chunk, settled.
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({ outcome: { kind: 'committed', eventType: 'assistant/message', seq: assistant!.seq } })
+      disposeFrames()
       expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
       // The prompt was delivered to the ACP session.
       expect(mock.client.newSession).toHaveBeenCalledWith(process.cwd())
@@ -503,9 +516,12 @@ describe('KimiAgent tool and chunk edges', () => {
       await agent.whenIdle()
       const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'real' }] } } })
-      const chunks = agent.session.snapshotEvents().filter(event => event.type === 'assistant/chunk')
-      // Only 'real' opened blocks: a block-start + text-delta + block-end.
-      expect(chunks.filter(event => (event.data.chunk as { type: string }).type === 'block-start')).toHaveLength(1)
+      // Only 'real' opened a block: one block-start, one text-delta, one block-end.
+      expect(expandAssistantStream(assistant!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'real' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'real' } },
+      ])
     } finally {
       await ctx.fiber.dispose()
     }

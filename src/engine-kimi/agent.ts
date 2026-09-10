@@ -21,16 +21,18 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
+import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
 import { ToolCallId, LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
+import { DriverInbox } from '../driver-core/inbox.ts'
+import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import type { KimiSpawnCapability, KimiSpawnSpec } from './process.ts'
 import { kimiAcpArgv } from './process.ts'
 import { AcpClient } from './acp/client.ts'
@@ -89,12 +91,11 @@ interface OpenBlock {
   readonly index: number
   readonly type: 'text' | 'reasoning'
   text: string
-  readonly refs: SessionSeq[]
 }
 
 /** Drives one session through turn and step boundaries on Kimi Code. */
 export class KimiAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: DriverInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -107,6 +108,9 @@ export class KimiAgent implements Agent {
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
+
+  /** Agent-lifecycle-local counter naming each streamed attempt. */
+  private streamAttempts = 0
 
   /** Lazily created ACP client, reused across steps and released on scope teardown. */
   private acp: AcpClient | undefined
@@ -123,7 +127,7 @@ export class KimiAgent implements Agent {
     private readonly bin: string,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
+    this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
@@ -518,28 +522,53 @@ export class KimiAgent implements Agent {
     const acpSessionId = await client.newSession(cwd)
     signal.throwIfAborted()
 
-    // Consume streamed updates via the callback as they arrive. The prompt
-    // response frame is dispatched after the turn's updates, so every update is
-    // applied before it resolves — no EOF or "finished" race. (The ACP child
-    // stays open between steps, so its stream never ends on its own.)
-    client.onUpdate((update) => this.applyUpdate(turn, step, update))
-
-    const cancel = (): void => { client.cancel(acpSessionId) }
-    signal.addEventListener('abort', cancel, { once: true })
+    /**
+     * The live attempt for the current streamed segment. Chunks open one; the
+     * durable assistant message they built settles it, so the step's message
+     * carries exactly its own stream.
+     */
+    let live: DriverAssistantStream | undefined
     try {
-      await raceAbort(client.prompt(acpSessionId, prompt), signal, this.id)
-    } finally {
-      signal.removeEventListener('abort', cancel)
-    }
+      const currentStream = (): DriverAssistantStream => {
+        if (live === undefined) {
+          live = new DriverAssistantStream(
+            this.id,
+            ++this.streamAttempts,
+            turn,
+            step,
+            frame => this.dispatch.emit('agent/assistant-stream', { frame }),
+          )
+          live.start()
+        }
+        return live
+      }
+      // Consume streamed updates via the callback as they arrive. The prompt
+      // response frame is dispatched after the turn's updates, so every update is
+      // applied before it resolves — no EOF or "finished" race. (The ACP child
+      // stays open between steps, so its stream never ends on its own.)
+      client.onUpdate((update) => this.applyUpdate(turn, step, update, currentStream))
 
-    this.flushAssistant(turn, step)
-    if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) {
-      throw new LlmError(
-        `agent "${this.id}": kimi query produced no assistant output`,
-        'KIMI_NO_RESULT',
-      )
+      const cancel = (): void => { client.cancel(acpSessionId) }
+      signal.addEventListener('abort', cancel, { once: true })
+      try {
+        await raceAbort(client.prompt(acpSessionId, prompt), signal, this.id)
+      } finally {
+        signal.removeEventListener('abort', cancel)
+      }
+
+      this.flushAssistant(turn, step, currentStream)
+      if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) {
+        throw new LlmError(
+          `agent "${this.id}": kimi query produced no assistant output`,
+          'KIMI_NO_RESULT',
+        )
+      }
+      return { kind: 'completed' }
+    } finally {
+      // A step that streamed without committing a durable message closes its
+      // live frames, so the client stops painting an abandoned partial.
+      if (live !== undefined && !live.ended) live.abandon()
     }
-    return { kind: 'completed' }
   }
 
   /** Per-step accumulation state for streamed assistant blocks and tool calls. */
@@ -557,20 +586,25 @@ export class KimiAgent implements Agent {
     // Reasoning leads the assistant message; text follows. Indexes stay
     // contiguous in the order blocks first appear.
     const index = this.blocks.length
-    const block: OpenBlock = { index, type, text: '', refs: [] }
+    const block: OpenBlock = { index, type, text: '' }
     this.blocks.push(block)
     return block
   }
 
-  /** Append one streamed update's durable effect for the current step. */
-  private applyUpdate(turn: number, step: number, update: AcpUpdate): void {
+  /** Apply one streamed update to the current step's blocks and stream. */
+  private applyUpdate(
+    turn: number,
+    step: number,
+    update: AcpUpdate,
+    currentStream: () => DriverAssistantStream,
+  ): void {
     if (isThoughtChunk(update)) {
       const delta = chunkDelta(update)
       if (delta === '') return
       const block = this.ensureBlock('reasoning')
-      const started = block.refs.length === 0
-      if (started) block.refs.push(this.appendChunk(turn, step, { type: 'block-start', index: block.index, blockType: 'reasoning' }))
-      block.refs.push(this.appendChunk(turn, step, { type: 'reasoning-delta', index: block.index, text: delta }))
+      // An empty block has published nothing yet, so it opens with a block-start.
+      if (block.text === '') currentStream().push({ type: 'block-start', index: block.index, blockType: 'reasoning' })
+      currentStream().push({ type: 'reasoning-delta', index: block.index, text: delta })
       block.text += delta
       return
     }
@@ -578,9 +612,9 @@ export class KimiAgent implements Agent {
       const delta = chunkDelta(update)
       if (delta === '') return
       const block = this.ensureBlock('text')
-      const started = block.refs.length === 0
-      if (started) block.refs.push(this.appendChunk(turn, step, { type: 'block-start', index: block.index, blockType: 'text' }))
-      block.refs.push(this.appendChunk(turn, step, { type: 'text-delta', index: block.index, text: delta }))
+      // An empty block has published nothing yet, so it opens with a block-start.
+      if (block.text === '') currentStream().push({ type: 'block-start', index: block.index, blockType: 'text' })
+      currentStream().push({ type: 'text-delta', index: block.index, text: delta })
       block.text += delta
       return
     }
@@ -613,38 +647,45 @@ export class KimiAgent implements Agent {
     // plan, …) are not part of the faithful model context projection.
   }
 
-  /** Append one live chunk and return its durable seq. */
-  private appendChunk(turn: number, step: number, chunk: StreamChunk): SessionSeq {
-    return this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq
-  }
-
-  /** Flush the accumulated assistant blocks into one durable assistant/message. */
-  private flushAssistant(turn: number, step: number): void {
+  /**
+   * Flush the accumulated assistant blocks into one durable assistant/message
+   * carrying the exact stream the attempt published live.
+   * @param turn - durable turn owning the message.
+   * @param step - durable step owning the message.
+   * @param currentStream - the step's live attempt accessor; a step whose
+   *   blocks streamed always has one open, while a tool-only step has none.
+   */
+  private flushAssistant(turn: number, step: number, currentStream: () => DriverAssistantStream): void {
     // A step with no assistant content and no tool activity produced nothing to
     // publish; tool-only steps still emit an (possibly empty) assistant message so
     // the `tool/call` + `tool/result` events have a parent message to pair with.
     if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) return
     const content: ContentBlock[] = []
-    const refs: SessionSeq[] = []
+    // Blocks exist only because a non-empty delta opened the attempt, so the
+    // accessor hands back the already-open attempt rather than creating one.
+    const attempt = this.blocks.length === 0 ? undefined : currentStream()
     for (const block of this.blocks) {
       // Blocks are created only when a non-empty delta arrives, so block.text is
       // always non-empty here — no `if (delta !== '')` guard needed.
       const delta = block.text
       content.push(block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta })
-      block.refs.push(this.appendChunk(turn, step, { type: 'block-end', index: block.index, block: block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta } }))
-      refs.push(...block.refs)
+      attempt?.push({ type: 'block-end', index: block.index, block: block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta } })
     }
-    this.session.append('assistant/message' as any, {
+    const data = {
       turn,
       step,
       message: createAssistantMessage({
         content,
         source: { provider: PROVIDER, model: this.modelLabel() },
       }),
-    } as any, {
-      surfaceOp: 'append',
-      sourceEventSeqs: refs,
-    } as any)
+      // The attempt's exact timed stream travels with its message.
+      stream: attempt?.stream ?? [],
+    }
+    if (attempt === undefined) {
+      this.session.append('assistant/message', data, { surfaceOp: 'append' })
+    } else {
+      attempt.settle(() => this.session.append('assistant/message', data, { surfaceOp: 'append' }).seq)
+    }
   }
 }
 /* jscpd:ignore-end */

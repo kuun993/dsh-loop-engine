@@ -28,21 +28,26 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 
 ## Version compatibility
 
-dsh-loop-engine is versioned **independently** of the harness (`1.0.0-rcN`) but
-is bound to a specific harness release via `peerDependencies`. The two must be
-matched — a mismatch fails loudly at boot or session resume:
+dsh-loop-engine is versioned **in lockstep with the harness it targets**: the
+version is the harness version plus a plugin release counter (`0.1.5-rc1`
+targets harness `0.1.5-rc.1`), and every harness package it consumes is pinned
+exactly in `peerDependencies`. The two must be matched — a mismatch fails
+loudly at boot or session resume:
 
 | dsh-loop-engine | Requires harness |
 |---|---|
-| 1.0.0-rc8 and later | **0.1.2-rc.1** |
+| 0.1.5-rc1 | **0.1.5-rc.1** |
+| 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 and earlier | 0.1.1-rc.2 |
 
-- **1.0.0-rc8 and later is not compatible with harness 0.1.1-rc.2 or earlier.** It uses
-  the 0.1.2 persistence seam (`SessionPersistence.create` / `open` +
-  `SessionHandle`), the `installSection` settings API, `ToolCallId`, and
-  `Session.snapshotEvents()` — none of which exist in older harnesses.
-- To use the plugin with an older harness, install the loop-engine release that
-  matches it (e.g. `npm i dsh-loop-engine@1.0.0-rc7` for harness 0.1.1-rc.2).
+- **0.1.5-rc1 requires harness 0.1.5-rc.1.** It uses the 0.1.5 assistant-stream
+  contract (`assistant/message` embeds its exact timed `stream` and rejects
+  `sourceEventSeqs`), the driver-owned `Inbox` interface, the two-argument
+  `AgentSetup`, and the `SessionPersistence.create` / `open` handle seam.
+- Releases up to `1.0.0-rc15` used the plugin's own version series and target
+  harness `0.1.2-rc.1`; they are not compatible with harness `0.1.5-rc.1`.
+- To use the plugin with an older harness, install the release matching it
+  (e.g. `npm i dsh-loop-engine@1.0.0-rc15` for harness 0.1.2-rc.1).
 - The GitHub Release body of each tag states the harness version it targets.
 
 ### Requirements
@@ -99,8 +104,9 @@ they were created with.
   Protocol over stdio) and speaks one stateless `session/new` + `session/prompt`
   per dsh step; the durable dsh session log is the sole model context. It streams
   assistant text (`agent_message_chunk`) and thinking (`agent_thought_chunk`)
-  incrementally into the log, and maps tool calls/streams (`tool_call` /
-  `tool_call_update`) into `tool/call` + `tool/result`. ACP surfaces tool
+  incrementally as live `agent/assistant-stream` frames, and the step's durable
+  `assistant/message` embeds that exact timed stream; it maps tool calls/streams
+  (`tool_call` / `tool_call_update`) into `tool/call` + `tool/result`. ACP surfaces tool
   approvals as `session/request_permission`, which the driver answers from the
   session's dsh approval knobs (an `ask` policy denies, fail-closed). The child
   is spawned through the dsh subprocess seam — the only privilege boundary

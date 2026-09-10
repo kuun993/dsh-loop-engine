@@ -5,10 +5,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 
@@ -262,9 +263,11 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
-  it('streams the full-text chunks of an agent message and links the durable message to them', async () => {
+  it('streams an agent message chunk by chunk and embeds the attempt stream in the durable message', async () => {
     const ctx = await harness()
     try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
       mock.runStreamed.mockImplementation(() => stream([
         itemStarted('agentMessage', 'msg-hello'),
         agentDelta('msg-hello', 'hello world'),
@@ -278,19 +281,20 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({ surfaceOp: 'append' })
+      // The durable message embeds its exact timed stream; `assistant/chunk`
+      // log events and `sourceEventSeqs` no longer exist.
+      expect(expandAssistantStream(assistant!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'hello world' },
       ])
-
-      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
-      expect(assistant).toMatchObject({
-        surfaceOp: 'append',
-        sourceEventSeqs: chunks.map(event => event.seq),
+      // The same attempt publishes live frames: open, one per chunk, settled.
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({
+        outcome: { kind: 'committed', eventType: 'assistant/message', seq: assistant!.seq },
       })
+      disposeFrames()
     } finally {
       await ctx.fiber.dispose()
     }
@@ -321,8 +325,8 @@ describe('CodexAgent turn mapping', () => {
         { type: 'reasoning', text: 'split thinking' },
         { type: 'text', text: 'answer' },
       ])
-      const chunks = agent.session.snapshotEvents().filter(event => event.type === 'assistant/chunk')
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      // Both blocks streamed into the single message this step committed.
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'reasoning' },
         { type: 'reasoning-delta', index: 0, text: 'split thinking' },
         { type: 'block-start', index: 1, blockType: 'text' },
@@ -358,6 +362,16 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants[0]?.data.usage).toBeUndefined()
       expect(assistants[1]?.data.message.content).toEqual([{ type: 'reasoning', text: 'trailing thought' }])
       expect(assistants[1]?.data.usage).toMatchObject({ outputTokens: 7 })
+      // Each message embeds only the chunks its own content streamed: the
+      // trailing reasoning belongs to the second message, not the first.
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'answer' },
+      ])
+      expect(expandAssistantStream(assistants[1]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'trailing thought' },
+      ])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -388,6 +402,15 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants[0]?.data.usage).toBeUndefined()
       expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
       expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // Each message keeps its own streamed chunks.
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'first' },
+      ])
+      expect(expandAssistantStream(assistants[1]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'second' },
+      ])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -410,16 +433,14 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
+      // Multiple deltas stay separate boundaries inside one attempt stream.
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'hello ' },
         { type: 'text-delta', index: 0, text: 'world' },
       ])
-      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -445,21 +466,18 @@ describe('CodexAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'reasoning' },
-        { type: 'reasoning-delta', index: 0, text: 'think ' },
-        { type: 'reasoning-delta', index: 0, text: 'more' },
-        { type: 'block-start', index: 1, blockType: 'text' },
-        { type: 'text-delta', index: 1, text: 'answer' },
-      ])
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'think more' },
         { type: 'text', text: 'answer' },
+      ])
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'think ' },
+        { type: 'reasoning-delta', index: 0, text: 'more' },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'answer' },
       ])
     } finally {
       await ctx.fiber.dispose()
@@ -490,6 +508,40 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: '' },
         { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('folds a reasoning item that streamed no deltas', async () => {
+    const ctx = await harness()
+    try {
+      // The app-server may report an item only once it completed: no attempt
+      // exists yet, so the reasoning contributes content but no chunks.
+      mock.runStreamed.mockImplementation(() => stream([
+        itemCompleted(reasoningItem('quiet thought')),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('unstreamed-reason-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'quiet thought' },
+        { type: 'text', text: 'answer' },
+      ])
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'answer' },
       ])
     } finally {
       await ctx.fiber.dispose()
@@ -717,6 +769,36 @@ describe('CodexAgent turn mapping', () => {
       })
       // The partial transcript survived the failure.
       expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('abandons the live attempt when a step streams chunks but commits no message', async () => {
+    const ctx = await harness()
+    try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-partial'),
+        agentDelta('msg-partial', 'partial answer'),
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'dangling'),
+        { kind: 'error', error: { message: 'model overloaded' }, willRetry: false },
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('abandon-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // Neither item completed, so no durable message claims the streamed
+      // chunks: the attempt closes its live frames as abandoned instead.
+      expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(false)
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({ outcome: { kind: 'abandoned' } })
+      disposeFrames()
     } finally {
       await ctx.fiber.dispose()
     }

@@ -17,12 +17,12 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { query as officialQuery, type SDKResultError } from '@anthropic-ai/claude-agent-sdk'
@@ -34,6 +34,8 @@ import {
   type StreamToolCall,
 } from './mapping.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
+import { DriverInbox } from '../driver-core/inbox.ts'
+import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
 import {
@@ -90,7 +92,7 @@ function failureCode(subtype: SDKResultError['subtype']): string {
 
 /** Drives one session through turn and step boundaries on Claude Code. */
 export class ClaudeCodeAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: DriverInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -104,6 +106,9 @@ export class ClaudeCodeAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
 
+  /** Agent-lifecycle-local counter naming each streamed attempt. */
+  private streamAttempts = 0
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -112,7 +117,7 @@ export class ClaudeCodeAgent implements Agent {
     private readonly config: ResolvedConfig,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
+    this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
@@ -485,6 +490,12 @@ export class ClaudeCodeAgent implements Agent {
     }
     signal.addEventListener('abort', cancel, { once: true })
     const diagnostics: string[] = []
+    /**
+     * The live attempt for the current streamed segment. Chunks open one; the
+     * durable assistant message they built settles it and the next chunk
+     * opens a fresh attempt, so every message carries exactly its own stream.
+     */
+    let live: DriverAssistantStream | undefined
     try {
       const options = claudeQueryOptions({
         cwd,
@@ -498,8 +509,19 @@ export class ClaudeCodeAgent implements Agent {
       }, controller)
       const query = officialQuery({ prompt, options })
       let finished = false
-      /** Seq numbers of the `assistant/chunk` events that streamed one message, for replay linking. */
-      const chunkSeqs: SessionSeq[] = []
+      const currentStream = (): DriverAssistantStream => {
+        if (live === undefined) {
+          live = new DriverAssistantStream(
+            this.id,
+            ++this.streamAttempts,
+            turn,
+            step,
+            frame => this.dispatch.emit('agent/assistant-stream', { frame }),
+          )
+          live.start()
+        }
+        return live
+      }
       /** Per-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
       const toolCalls = new Map<number, StreamToolCall>()
       /** Accumulated reasoning per block index, for the durable-message fallback below. */
@@ -512,7 +534,7 @@ export class ClaudeCodeAgent implements Agent {
         switch (message.type) {
           case 'stream_event': {
             for (const chunk of mapStreamEvent(message.event, toolCalls)) {
-              chunkSeqs.push(this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq)
+              currentStream().push(chunk)
               if (chunk.type === 'reasoning-delta') {
                 reasoningByIndex.set(chunk.index, (reasoningByIndex.get(chunk.index) ?? '') + chunk.text)
               }
@@ -553,7 +575,8 @@ export class ClaudeCodeAgent implements Agent {
               reasoningByIndex.clear()
               const usage = mapped.usage ?? pendingUsage
               pendingUsage = undefined
-              this.session.append('assistant/message' as any, {
+              const attempt = live
+              const data = {
                 turn,
                 step,
                 message: createAssistantMessage({
@@ -561,12 +584,15 @@ export class ClaudeCodeAgent implements Agent {
                   source: { provider: PROVIDER, model: mapped.model },
                 }),
                 ...usage === undefined ? {} : { usage },
-              } as any, {
-                surfaceOp: 'append',
-                // Link the durable message to the chunks that streamed it, so
-                // replay can reconstruct the partial exactly as shown.
-                ...chunkSeqs.length === 0 ? {} : { sourceEventSeqs: chunkSeqs },
-              } as any)
+                // The attempt's exact timed stream travels with its message.
+                stream: attempt?.stream ?? [],
+              }
+              if (attempt === undefined) {
+                this.session.append('assistant/message', data, { surfaceOp: 'append' })
+              } else {
+                attempt.settle(() => this.session.append('assistant/message', data, { surfaceOp: 'append' }).seq)
+                live = undefined
+              }
             }
             for (const call of mapped.toolCalls) {
               this.session.append('tool/call', {
@@ -590,7 +616,8 @@ export class ClaudeCodeAgent implements Agent {
                 .sort((a, b) => a[0] - b[0])
                 .map(([, text]) => ({ type: 'reasoning' as const, text }))
               reasoningByIndex.clear()
-              this.session.append('assistant/message' as any, {
+              const attempt = live
+              const data = {
                 turn,
                 step,
                 message: createAssistantMessage({
@@ -598,7 +625,14 @@ export class ClaudeCodeAgent implements Agent {
                   source: { provider: PROVIDER, model: NATIVE_MODEL_LABEL },
                 }),
                 ...pendingUsage === undefined ? {} : { usage: pendingUsage },
-              } as any, { surfaceOp: 'append' } as any)
+                stream: attempt?.stream ?? [],
+              }
+              if (attempt === undefined) {
+                this.session.append('assistant/message', data, { surfaceOp: 'append' })
+              } else {
+                attempt.settle(() => this.session.append('assistant/message', data, { surfaceOp: 'append' }).seq)
+                live = undefined
+              }
               pendingUsage = undefined
             }
             if (message.subtype === 'success') {
@@ -623,6 +657,9 @@ export class ClaudeCodeAgent implements Agent {
       }
       return { kind: 'completed' }
     } finally {
+      // A segment that streamed without committing a durable message closes its
+      // live frames, so the client stops painting an abandoned partial.
+      if (live !== undefined && !live.ended) live.abandon()
       signal.removeEventListener('abort', cancel)
       controller.abort()
       for (const line of diagnostics) this.ctx.logger.warn('%s', line)

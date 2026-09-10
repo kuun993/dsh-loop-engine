@@ -8,8 +8,8 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 核心模型：
 
-- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:518,530`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:93-127`），保证 "Model-visible ⟺ logged"。
-- **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13,113`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
+- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:522,554`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:93-127`），保证 "Model-visible ⟺ logged"。
+- **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13,120`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
 - **方向辨析**：主仓自带 `@deepseek-ai/dsh-acp`（`../deepseek-harness/packages/acp/acp`）是 **ACP server**（把 dsh agent 暴露给外部 ACP 客户端）；本驱动是 **ACP client**（dsh 作客户端驱动 kimi CLI 这个 agent）。两者方向相反，不要混淆。
 - **kimiBin 解析**：`kimiBinResolver`（`src/engine-kimi/process.ts:59-64`）三级回退——① 配置钉死的路径（`kimiBin` 配置项，空字符串视为未配置）；② 探测标准安装位 `<kimi home>/bin/kimi[.exe]`，其中 kimi home = `KIMI_CODE_HOME` 环境变量或 `~/.kimi-code`（`kimiHomeDir`，`process.ts:47-50`）；③ 回退裸命令 `'kimi'`，由 spawner 经 PATH 解析。
 
@@ -28,41 +28,41 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 | `src/engine-kimi/commands.ts` | `KIMI_COMMANDS`：Kimi 内建斜杠命令的转发桥 |
 | `src/engine-kimi/types.ts` | `ResolvedConfig`（仅类型，无运行时代码） |
 
-共享基础设施（`src/driver-core/`）被引用的部分：`ownership.ts`（`FactoryOwnership`、`raceAbort`、`raceAbortCall`）、`prompt.ts`（`serializeHistory`）、`permission-knobs.ts`（`sessionApprovalPolicy`）、`skill-inject.ts`（手势扫描与 `<skill_content>` 渲染）、`context-files.ts`（cwd→git root 的目录链与文件读取）。
+共享基础设施（`src/driver-core/`）被引用的部分：`ownership.ts`（`FactoryOwnership`、`raceAbort`、`raceAbortCall`）、`prompt.ts`（`serializeHistory`）、`permission-knobs.ts`（`sessionApprovalPolicy`）、`skill-inject.ts`（手势扫描与 `<skill_content>` 渲染）、`context-files.ts`（cwd→git root 的目录链与文件读取）、`inbox.ts`（`DriverInbox`）、`assistant-stream.ts`（`DriverAssistantStream`）。
 
-插件入口侧：`src/index.ts` 的 `mountKimi`（index.ts:388-414）注册斜杠命令与技能 provider 后以子 fiber 挂载 `KimiLoop`；`kimiConfig`（index.ts:224-230）把组合条目的 `model`/`env`/`kimiBin` 透传为 `KimiLoop` 的 `model`/`env`/`bin`。
+插件入口侧：`src/index.ts` 的 `mountKimi`（index.ts:592-618）注册斜杠命令与技能 provider 后以子 fiber 挂载 `KimiLoop`；`kimiConfig`（index.ts:243-249）把组合条目的 `model`/`env`/`kimiBin` 透传为 `KimiLoop` 的 `model`/`env`/`bin`。
 
 ## 3. Loop 工厂与 Agent 生命周期
 
 ### 3.1 KimiLoop（工厂）
 
-- `static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（loop.ts:95）；host 面 ctx key 为 `agentLoopKimi`（loop.ts:81-85）。
-- 构造时：解析配置（`resolveConfig`，loop.ts:72-78）；建 `FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:40-85`）；spawn capability 固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:41,113）；`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（loop.ts:115）。
-- Kimi 原生拥有自己的 prompt，所以 `provider`/`model`/`cwd` 三个 systemPrompt 变量只服务 dsh 系统提示词的下游消费者，镜像默认 loop 的注册（loop.ts:116-121）。
+- `static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（loop.ts:102）；host 面 ctx key 为 `agentLoopKimi`（loop.ts:88-92）。
+- 构造时：解析配置（`resolveConfig`，loop.ts:79-85）；建 `FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:40-85`）；spawn capability 固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:42,120）；`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（loop.ts:122）。
+- Kimi 原生拥有自己的 prompt，所以 `provider`/`model`/`cwd` 三个 systemPrompt 变量只服务 dsh 系统提示词的下游消费者，镜像默认 loop 的注册（loop.ts:126-128）。
 
 ### 3.2 创建/恢复事务
 
-`createAgent`/`resume` 共享同一条 prepare→setup→publish 事务（loop.ts:124-236）：
+`createAgent`/`resume` 共享同一条 prepare→setup→publish 事务（loop.ts:138-288）：
 
-1. **prepare**：先验活（owner fiber 活跃、工厂接受中、调用方信号未中止），然后构造三重融合的 abort——调用方取消、owner fiber 卸载、工厂 teardown 任一触发即中止 setup（loop.ts:143-153）。拆除函数 `dispose` 在发布**之前**就注册进工厂跟踪集和 owner fiber effect，中途卸载会整体回滚（loop.ts:160-199）。
-2. **setup**：`raceAbort(setup?.(agent.ctx), fusedSignal, id)` 运行调用方 setup 并取其 commit（loop.ts:252-253）。
-3. **publish**：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → 发出 `agent/session-start` 事件，每步之间 `assertLive()`（loop.ts:215-226）。
+1. **prepare**：先验活（owner fiber 活跃、工厂接受中、调用方信号未中止），然后构造三重融合的 abort——调用方取消、owner fiber 卸载、工厂 teardown 任一触发即中止 setup（loop.ts:139-162）。拆除函数 `dispose` 在发布**之前**就注册进工厂跟踪集和 owner fiber effect，中途卸载会整体回滚（loop.ts:160-199）。
+2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 运行调用方 setup 并取其 commit（loop.ts:278-279）。
+3. **publish**：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → 发出 `agent/session-start` 事件，每步之间 `assertLive()`（loop.ts:231-242）。
 
-`resume` 额外要求 `sessionPersistence` 服务在场，否则直接抛错（loop.ts:292-298）；加载阶段用 `raceAbortCall` 保证取消后被遗弃的 preparation 仍能 `[Symbol.dispose]()` 释放（loop.ts:319-324）。
+`resume` 额外要求 `sessionPersistence` 服务在场，否则直接抛错（loop.ts:381-387）；加载阶段用 `raceAbortCall` 保证取消后被遗弃的 preparation 仍能 `[Symbol.dispose]()` 释放（loop.ts:414-419）。
 
 ### 3.3 KimiAgent（相位机）
 
-相位定义在 agent.ts:71-79：`idle` / `maintenance` / `running`（带 abort、turn、step、wakeRequested）。`status` 只有 idle/running 两种对外形态（agent.ts:142-144），相位切换经 `setPhase` 发 `agent/status`（147-154）。
+相位定义在 agent.ts:73-81：`idle` / `maintenance` / `running`（带 abort、turn、step、wakeRequested）。`status` 只有 idle/running 两种对外形态（agent.ts:146-148），相位切换经 `setPhase` 发 `agent/status`（150-158）。
 
-- **入口**：`followup`（next-turn + 唤醒）、`steer`（next-step + 唤醒）、`inject`（next-step 不唤醒）、`cancel`（agent.ts:156-193）。`send` 里有一个关键分类：abort 后再唤醒的消息会被重分类到 `next-turn`（agent.ts:157-158）。
-- **驱动循环**：`wakeDriver` → `kick` → `while (await this.turn())`（agent.ts:230-283）。`kick` 的 finally 负责把 running 相位收回 idle 并按 latch 的 wake 重放。
-- **turn**：`turn/start` → 循环 `preStep`（inbox claim + `agent/pre-step` waterfall + 技能注入）→ `step/start` → 落 `user/message` → `step()` → `step/end` → … → `turn/end`（agent.ts:346-427）。每个退出路径都保证写 `turn/end`（completed / blocked / aborted / error）。
-- **step**：每个 step 重置块/工具累积器（agent.ts:496-498）→ 校验 cwd（无 cwd 直接抛错，500-503）→ `deriveMessages` + `serializeHistory` 造 prompt（504-505）→ 写一次 request/header（见下）→ 取/建 ACP 客户端 → 注册权限回调 → `session/new` → 挂 `onUpdate` → `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（514-533）→ `flushAssistant` 落 `assistant/message`（535）。
-- **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:62-68,430-446）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:440-444）。provider 标签 `'kimi'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+- **入口**：`followup`（next-turn + 唤醒）、`steer`（next-step + 唤醒）、`inject`（next-step 不唤醒）、`cancel`（agent.ts:160-197）。`send` 里有一个关键分类：abort 后再唤醒的消息会被重分类到 `next-turn`（agent.ts:161-162）。
+- **驱动循环**：`wakeDriver` → `kick` → `while (await this.turn())`（agent.ts:234-287）。`kick` 的 finally 负责把 running 相位收回 idle 并按 latch 的 wake 重放。
+- **turn**：`turn/start` → 循环 `preStep`（inbox claim + `agent/pre-step` waterfall + 技能注入）→ `step/start` → 落 `user/message` → `step()` → `step/end` → … → `turn/end`（agent.ts:350-431）。每个退出路径都保证写 `turn/end`（completed / blocked / aborted / error）。
+- **step**：每个 step 重置块/工具累积器（agent.ts:498-502）→ 校验 cwd（无 cwd 直接抛错，504-507）→ `deriveMessages` + `serializeHistory` 造 prompt（508-513）→ 写一次 request/header（agent.ts:515，见下）→ 取/建 ACP 客户端 → 注册权限回调（521）→ `session/new`（522）→ 挂 `onUpdate`（549）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（551-557）→ `flushAssistant` 落 `assistant/message`（559）。
+- **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:63-70,434-449）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:447）。provider 标签 `'kimi'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ### 3.4 ACP 客户端缓存
 
-`AcpClient` 按 **agent 实例**缓存、跨 step 复用（agent.ts:112-114）；`acpClient(cwd)` 在 spec（argv/cwd/env）变化或进程已关闭时 dispose 旧客户端并重 spawn（agent.ts:449-476）。`initialize` 失败会清缓存、dispose 并抛错（467-475）。agent scope 拆除时释放客户端（136-139）。
+`AcpClient` 按 **agent 实例**缓存、跨 step 复用（agent.ts:115-118）；`acpClient(cwd)` 在 spec（argv/cwd/env）变化或进程已关闭时 dispose 旧客户端并重 spawn（agent.ts:464-480）。`initialize` 失败会清缓存、dispose 并抛错（471-478）。agent scope 拆除时释放客户端（139-143）。
 
 ## 4. ACP 客户端与进程管理
 
@@ -76,7 +76,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 - **帧切分**：裸 `\n` 分行，`StringDecoder('utf8')` 跨 chunk 拼字节，容忍行尾单个 `\r`；空行与非 JSON 行直接忽略（client.ts:183-205）。
 - **请求-响应关联**：自增数字 id，`pending` map 结算；响应帧带 `error` 时 reject（无 message 时回退 `'kimi acp request failed'`），无匹配 id 的响应丢弃（client.ts:114-121,230-240）。
-- **通知分发**：`session/update` 通知同时走 `onUpdate` 回调、内部 buffer 和 `updates()` 异步生成器三路（client.ts:217-223,160-170）。agent 实际只用 `onUpdate` 回调路径（agent.ts:525），生成器是保留接口。
+- **通知分发**：`session/update` 通知同时走 `onUpdate` 回调、内部 buffer 和 `updates()` 异步生成器三路（client.ts:217-223,160-170）。agent 实际只用 `onUpdate` 回调路径（agent.ts:549），生成器是保留接口。
 - **反向 RPC**：`session/request_permission` 交给注册的 handler 应答；**未注册 handler 时 fail-closed 答 `approved: false`**（client.ts:242-245）。未知反向 RPC 回 `-32601 Method not found`，防止对端悬挂（client.ts:225-227）。
 - **协议握手**：`initialize` 发 `protocolVersion: 1.0`、`clientInfo: { name: 'dsh-loop-engine', version: '1.0.0' }`（client.ts:130-132；版本号是硬编码字符串，与包版本无关）。
 - **会话操作**：`newSession` 校验返回里的 `sessionId` 非空字符串（client.ts:135-142）；`prompt` 体为 `{ sessionId, prompt: [{ type: 'text', text }] }`（145-147）；`cancel` 是 fire-and-forget，吞掉 rejection（150-152）。
@@ -85,23 +85,23 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 ## 5. 事件映射（ACP update ↔ dsh SessionEvent）
 
-映射分两层：`acp/mapping.ts` 是纯分类/提取，`agent.ts` 的 `applyUpdate`（agent.ts:566-614）负责落日志。
+映射分两层：`acp/mapping.ts` 是纯分类/提取，`agent.ts` 的 `applyUpdate`（agent.ts:594-648）负责落日志——每个 delta 都交给本步的 `DriverAssistantStream`（agent.ts:532-544）出 live 帧，块内容则累积进 `blocks`，最后交给 `flushAssistant` 合成 durable 消息。
 
 | ACP update | dsh 事件 | 说明 |
 |---|---|---|
-| `agent_thought_chunk` | `assistant/chunk`（block-start/reasoning-delta）+ `assistant/message` 的 reasoning 块 | 空 delta 忽略，不开块（agent.ts:567-575） |
-| `agent_message_chunk` | 同上，text 块 | agent.ts:577-585 |
-| `tool_call` | `tool/call` | `callId` 取 `toolCallId`，`name` 取 `title`；**arguments 恒为 `'{}'`**——ACP 公告不携带真实参数（agent.ts:587-594）。空 id 或重复 id 忽略 |
-| `tool_call_update` | `tool/result`（settled 时） | 文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套累积（mapping.ts:67-71）；status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:58-60），`failed/error/denied` 记 `isError`（mapping.ts:63-65）；空结果文本回退 `'(no content)'`（mapping.ts:77）。未announce过的 callId 的 update 被忽略（agent.ts:598） |
-| 其他（`available_commands_update`、`config_option_update`、`plan`…） | 无 | 不属于忠实模型上下文投影，直接跳过（agent.ts:612-614） |
+| `agent_thought_chunk` | live `agent/assistant-stream` 帧（block-start/reasoning-delta）+ `assistant/message` 的 reasoning 块 | 空 delta 忽略，不开块（agent.ts:601-609） |
+| `agent_message_chunk` | 同上，text 块 | agent.ts:611-619 |
+| `tool_call` | `tool/call` | `callId` 取 `toolCallId`，`name` 取 `title`；**arguments 恒为 `'{}'`**——ACP 公告不携带真实参数（agent.ts:621-628）。空 id 或重复 id 忽略 |
+| `tool_call_update` | `tool/result`（settled 时） | 文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套累积（mapping.ts:67-71）；status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:58-60），`failed/error/denied` 记 `isError`（mapping.ts:63-65）；空结果文本回退 `'(no content)'`（mapping.ts:77）。未announce过的 callId 的 update 被忽略（agent.ts:632） |
+| 其他（`available_commands_update`、`config_option_update`、`plan`…） | 无 | 不属于忠实模型上下文投影，直接跳过（agent.ts:646-647） |
 
-落日志的两个不变量：
+落日志的几个不变量：
 
-- **块序**：reasoning/text 块按首次出现顺序分配连续 index（agent.ts:554-563）；每步结束 `flushAssistant` 把所有块合成一条 `assistant/message`，`sourceEventSeqs` 引用该步全部 chunk 的持久 seq（agent.ts:622-648）。
-- **工具专属步**：一个只有工具活动、没有文本的 step 也会发一条（可能空的）`assistant/message`，让 `tool/call` + `tool/result` 有父消息可配对（agent.ts:622-626 注释）。
-- **空步报错**：prompt 返回后既无块也无工具调用，抛 `LlmError`，code `'KIMI_NO_RESULT'`（agent.ts:536-541）——防止模型静默空转。
+- **块序**：reasoning/text 块按首次出现顺序分配连续 index（agent.ts:583-592）；每步结束 `flushAssistant` 把所有块合成一条 `assistant/message`，并把这批块对应的 compact stream 内嵌成 `data.stream`（agent.ts:658-689）。
+- **工具专属步**：一个只有工具活动、没有文本的 step 也会发一条（可能空的）`assistant/message`——此时没有 open attempt，`data.stream` 落空数组，但 `tool/call` + `tool/result` 仍有父消息可配对（agent.ts:658-666 注释）。
+- **空步报错**：prompt 返回后既无块也无工具调用，抛 `LlmError`，code `'KIMI_NO_RESULT'`（agent.ts:560-564）——防止模型静默空转。
 
-时序保证：`session/prompt` 的响应帧在该轮全部 update 之后派发，因此每个 update 都在 prompt resolve 前应用完毕，无 EOF/"finished" 竞态；ACP 子进程跨 step 存活，其流不会自行结束（agent.ts:520-525 注释）。
+时序保证：`session/prompt` 的响应帧在该轮全部 update 之后派发，因此每个 update 都在 prompt resolve 前应用完毕，无 EOF/"finished" 竞态；ACP 子进程跨 step 存活，其流不会自行结束（agent.ts:545-548 注释）。
 
 ## 6. 权限模型
 
@@ -110,14 +110,14 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 - `resolveToolApproval(events)` = `sessionApprovalPolicy(events) !== 'ask'`（permission.ts:30-32）。即：**`ask` 策略降级为拒绝**（无人值守运行时唯一安全的答案，fail-closed）；`never` 或无旋钮一律自动批准。
 - **沙箱姿态不参与该折叠**（permission.ts:24-27 JSDoc）：Kimi 自己的工具策略约束工具能做什么，ACP 审批是 host 的闸门，信号只取 `approval/policy` 旋钮。沙箱姿态另由 subprocess 接缝在进程层生效。
 - `sessionApprovalPolicy` 从后往前取最后一条合法 `approval/policy` 事件（`src/driver-core/permission-knobs.ts:40-47`）。
-- 权限回调在每个 step 重新挂载：`client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))`（agent.ts:517），读的是**应答时刻**的会话日志，所以运行中切换策略即刻生效。
+- 权限回调在每个 step 重新挂载：`client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))`（agent.ts:521），读的是**应答时刻**的会话日志，所以运行中切换策略即刻生效。
 - 双保险：即使 agent 没挂 handler，client 未注册 handler 时默认拒绝（client.ts:243）。
 
 ## 7. 斜杠命令桥接与技能注入
 
 ### 7.1 斜杠命令（commands.ts）
 
-dsh `commands` 运行时本地执行注册命令，命令行不会到达模型；真实处理在 Kimi 引擎内的命令必须**转发原文行**给 agent：`forwardKimiCommand` 把 `/<name><rawInput>` 作为普通 user 消息 `followup` 给接收 agent（commands.ts:33-41）。
+dsh `commands` 运行时本地执行注册命令，命令行不会到达模型；真实处理在 Kimi 引擎内的命令必须**转发原文行**给 agent：`forwardKimiCommand` 把 `/<name><rawInput>` 作为普通 user 消息 `followup` 给接收 agent（commands.ts:40-48）。
 
 `KIMI_COMMANDS`（commands.ts:56-65）注册了 9 个对 ACP prompt 面有意义的内建命令：`help`、`status`、`compact`、`clear`、`plan`、`auto`、`usage`、`version`、`goal`。纯 TUI 控制类命令（`/login`、`/settings`、`/sessions` 等）不注册——ACP prompt 面不会像交互 TUI 那样展开它们（commands.ts:13-15）。`skill:` 类命令已由 dsh 技能注入接缝承载，不重复注册。
 
@@ -126,7 +126,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 - **`/model` 不桥接**：web 客户端自己占着 `/model` 贡献（`ui-model-selection`），host 侧同名命令会让 `ui-commands` 把整个 command 菜单源判死——表现为菜单里所有命令消失、只剩技能。这是真实踩过的坑，不是未雨绸缪。
 - **`/goal` 保留**：managed block 对托管引擎禁用了 dsh 的 `command-goal` 行（见 architecture.md §3.5），槽位空出，Kimi 自己的 goal 模式接管。注意运行时（不重启）从 in-process 切过来时 `command-goal` 仍在，本次 `/goal` 会被撞名跳过，重启后归位。
 
-`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:504-530）。
+`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:592-608）。
 
 ### 7.2 技能 provider（skills.ts）
 
@@ -146,41 +146,41 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 进程内引擎的技能注入由 agent-preset 链上的 dsh-tool-skill handler 完成，Kimi agent 的 context 不从该链派生，所以在 `preStep` 里自行复刻（agent.ts:296-306 注释）：
 
 - `invokedSkillNames` 扫直接用户消息里空白边界的 `/name` kebab-case 手势（`src/driver-core/skill-inject.ts:84-96`）。
-- 逐个 `skills.get(name, { signal, scope: this, cwd })`；加载失败、未找到、非 user-invocable 一律静默跳过（agent.ts:329-335）。
-- 注入的消息以 `source: { kind: 'skill-invocation', name, form: 'instructions' }` 落 `user/message`（agent.ts:337-340），正文是 `renderSkillContent` 的 `<skill_content>` 块（skill-inject.ts:67-81）。
-- 加载期间 step 被取消，整批注入丢弃（agent.ts:336）；`skills` 服务缺席时原样放行（agent.ts:320-321）。
+- 逐个 `skills.get(name, { signal, scope: this, cwd })`；加载失败、未找到、非 user-invocable 一律静默跳过（agent.ts:333-339）。
+- 注入的消息以 `source: { kind: 'skill-invocation', name, form: 'instructions' }` 落 `user/message`（agent.ts:341-344），正文是 `renderSkillContent` 的 `<skill_content>` 块（skill-inject.ts:67-81）。
+- 加载期间 step 被取消，整批注入丢弃（agent.ts:340）；`skills` 服务缺席时原样放行（agent.ts:324-325）。
 
 ## 8. 配置项一览
 
-组合条目层（`src/index.ts` 的 `Config`，index.ts:70-87,101-115）中 Kimi 相关字段，经 `kimiConfig`（index.ts:224-230）透传：
+组合条目层（`src/index.ts` 的 `Config`，index.ts:89-106,120-134）中 Kimi 相关字段，经 `kimiConfig`（index.ts:243-249）透传：
 
 | 组合字段 | KimiLoop 字段 | 含义 |
 |---|---|---|
-| `model` | `model?: string` | **只作 request/header 与消息 provenance 的模型标签**（agent.ts:430-432,644）。不进 argv——`kimiAcpArgv` 无模型旗标（process.ts:74-76），模型由 Kimi 原生配置持有。⚠️ `Config` 与 `ResolvedConfig` 的 JSDoc 仍写着"传给子进程的 `-m`/`--model`"（loop.ts:45、types.ts:17），与实际行为不符，见第 9 节 |
-| `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:47,56；spawn spec 原样带，agent.ts:479-485） |
-| `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:49-50,76） |
+| `model` | `model?: string` | **只作 request/header 与消息 provenance 的模型标签**（agent.ts:434-436,679）。不进 argv——`kimiAcpArgv` 无模型旗标（process.ts:74-76），模型由 Kimi 原生配置持有。⚠️ `Config` 与 `ResolvedConfig` 的 JSDoc 仍写着"传给子进程的 `-m`/`--model`"（loop.ts:46、types.ts:17），与实际行为不符，见第 9 节 |
+| `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:49,57；spawn spec 原样带，agent.ts:487） |
+| `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:50-51,83） |
 
 环境变量：
 
 - `KIMI_CODE_HOME`：影响 bin 探测的 kimi home（process.ts:47-50）与用户级 skills 目录（skills.ts:71-75，两处各自独立读取，注意是**进程环境**而非 `env` 配置项）。
 
-固定常量：`KIMI_DISPOSE_GRACE_MS = 3000`（loop.ts:41）。
+固定常量：`KIMI_DISPOSE_GRACE_MS = 3000`（loop.ts:42）。
 
 ## 9. 错误处理与已知边界
 
 ### 错误处理路径
 
-- **无 cwd**：step 开头抛 `no working directory`（agent.ts:500-503），turn 以 `error` 收场；ACP 客户端尚未创建。
-- **initialize 失败**：客户端 dispose、缓存清空，错误沿 step 上抛（agent.ts:467-475）。
-- **取消**：abort 信号触发 `session/cancel`（fire-and-forget），`raceAbort` 以中止原因拒掉 prompt await（agent.ts:527-533）；turn 以 `aborted` 收场。
+- **无 cwd**：step 开头抛 `no working directory`（agent.ts:504-507），turn 以 `error` 收场；ACP 客户端尚未创建。
+- **initialize 失败**：客户端 dispose、缓存清空，错误沿 step 上抛（agent.ts:471-478）。
+- **取消**：abort 信号触发 `session/cancel`（fire-and-forget），`raceAbort` 以中止原因拒掉 prompt await（agent.ts:551-557）；turn 以 `aborted` 收场。
 - **子进程意外退出**：pending 请求全部以 `kimi acp process exited unexpectedly` 拒绝（client.ts:79-84），客户端 closed，下一步 `acpClient` 会重 spawn。
-- **commit veto**：`turn/start`/`turn/end` 落日志被 veto 时经 `throwError` 上报 `agent/error` 并在驱动边界收容，inbox 不丢（agent.ts:258-267,358-362,414-420；测试 agent.spec.ts:771-831）。
-- **step 无产出**：`KIMI_NO_RESULT`（agent.ts:536-541）。
+- **commit veto**：`turn/start`/`turn/end` 落日志被 veto 时经 `throwError` 上报 `agent/error` 并在驱动边界收容，inbox 不丢（agent.ts:262-271,362-366,418-424；测试 agent.spec.ts:787-847）。
+- **step 无产出**：`KIMI_NO_RESULT`（agent.ts:560-564）。
 
 ### 已知边界与坑
 
-- **arguments 恒为 `'{}'`**：`tool/call` 没有真实参数可记（ACP `tool_call` 公告不含参数，agent.ts:592）。下游若依赖工具参数回放会拿不到。
-- **每步全新 ACP 会话**：`session/new` 每步一次（agent.ts:518），Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量的代价，与 claude/codex 驱动一致。
+- **arguments 恒为 `'{}'`**：`tool/call` 没有真实参数可记（ACP `tool_call` 公告不含参数，agent.ts:626）。下游若依赖工具参数回放会拿不到。
+- **每步全新 ACP 会话**：`session/new` 每步一次（agent.ts:522），Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量的代价，与 claude/codex 驱动一致。
 - **done-rejection 分支不拒 pending**：`done` 以 rejection 落定时在飞请求永不结算（client.ts:85-88），见 4.2。
 - **`config.model` 不进子进程**：想真正钉模型只能靠 Kimi 自己的配置；插件的 `model` 只是日志标签。
 - **撞名命令被跳过**：见 7.1。
@@ -189,17 +189,17 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 1. **`process.ts` 模块头过时**（process.ts:2-8）：描述的是"`kimi -p --output-format stream-json`、每步一个一次性子进程"，实际实现是常驻 `kimi acp` + JSON-RPC。`KimiSpawnSpec` 的 JSDoc（process.ts:19"one `kimi -p` child"）同样过时。
 2. **`types.ts` 模块头过时**（types.ts:4-10）：仍在讲 `-p` 面自动批准、无 `--tools` 旗标，与 ACP 驱动模型不符。
-3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:45"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
-4. **客户端生命周期注释**：client.ts:11 说子进程"long-lived (one per factory)"，实际客户端按 **agent** 缓存（agent.ts:112-114），一个工厂下多个会话各有自己的子进程。client.ts:54"once per driver scope"才是准确说法。
-5. **块序注释内部张力**：agent.ts:557-558 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
+3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:46"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
+4. **客户端生命周期注释**：client.ts:11 说子进程"long-lived (one per factory)"，实际客户端按 **agent** 缓存（agent.ts:115-118），一个工厂下多个会话各有自己的子进程。client.ts:53"once per driver scope"才是准确说法。
+5. **块序注释内部张力**：agent.ts:586-587 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
 6. **permission.ts 模块头易误导**（permission.ts:9-13）：大段谈论 full-access/workspace-write 沙箱如何自动批准，但函数根本不读沙箱旋钮（permission.ts:24-27 的函数 JSDoc 才是准的）。
 
 ## 10. 测试覆盖要点
 
-Kimi 相关 spec 共 9 个文件（约 2500 行），仓库覆盖门槛为 `src/**` 逐文件 100%（`src/client` 除外），所以源码里大量 `v8 ignore` 注释标记的是防御性 backstop，不是可删代码。
+Kimi 相关 spec 共 9 个文件（约 2730 行），仓库覆盖门槛为 `src/**` 逐文件 100%（`src/client` 除外），所以源码里大量 `v8 ignore` 注释标记的是防御性 backstop，不是可删代码。
 
-- `tests/engine-kimi/agent.spec.ts`（852 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含工具专属步的空父消息）；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
-- `tests/engine-kimi/index.spec.ts`（465 行）：工厂注册与 HMR 安全拆除（fiber dispose 后槽位清空）；create 的 seed/meta 透传、预中止信号（Error 与非 Error reason）、setup commit/失败回滚/挂起中止、owner fiber 中途卸载回滚（含 scope minting 竞态）；resume 全路径（无 persistence 报错、JSONL 后端恢复、预中止、取消加载时释放遗弃 preparation、加载后工厂失活、prepare 失败传播、取消后迟到失败吞掉）。
+- `tests/engine-kimi/agent.spec.ts`（868 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含工具专属步的空父消息）；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
+- `tests/engine-kimi/index.spec.ts`（692 行）：工厂注册与 HMR 安全拆除（fiber dispose 后槽位清空）；create 的 seed/meta 透传、预中止信号（Error 与非 Error reason）、setup commit/失败回滚/挂起中止、owner fiber 中途卸载回滚（含 scope minting 竞态）；resume 全路径（无 persistence 报错、JSONL 后端恢复、预中止、取消加载时释放遗弃 preparation、加载后工厂失活、prepare 失败传播、取消后迟到失败吞掉）。
 - `tests/engine-kimi/loop.spec.ts`（231 行）：spawn 管线——bin 解析优先级、spawn spec → 接缝投影（argv/stdio/graceMs/env/signal）、handle → 传输层 round-trip、stderr 排空；systemPrompt 变量在无 agent 时为 undefined。
 - `tests/engine-kimi/process.spec.ts`（125 行）：`kimiHomeDir`/`kimiBinResolver`（mock `existsSync` 与 homedir）、`kimiAcpArgv`、`kimiSubprocessSpec`（argv 复制、signal 透传）、`fromSubprocess`（缺 pipe 抛错）。
 - `tests/engine-kimi/acp/client.spec.ts`（372 行）：假 `KimiProcess` 上的全协议行为——请求关联（result/error/无 message 回退/孤儿响应）、session 生命周期（newSession 无 id 抛错、prompt 体形、cancel 吞 rejection）、update 缓冲与生成器、反向 RPC（批准/拒绝/未知 method → -32601/无 handler fail-closed）、`create` 的注入 spawn 与裸 spawn 回退、notify、帧健壮性（`\r\n`、空行、非 JSON、string chunk、method 非字符串）、封口后行为、子进程退出拒 pending、done rejection 只封口。

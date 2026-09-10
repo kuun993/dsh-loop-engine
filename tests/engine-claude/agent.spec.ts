@@ -10,10 +10,11 @@ import type {
   Query,
   SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
@@ -235,9 +236,11 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
-  it('streams assistant chunks and links the final message to them', async () => {
+  it('streams assistant chunks and embeds the attempt stream in the final message', async () => {
     const ctx = await harness()
     try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
       queryMock.mockImplementation(() => stream([
         streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '', citations: null } }),
         streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hello ' } }),
@@ -253,21 +256,21 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({ surfaceOp: 'append' })
+      // The durable message embeds its exact timed stream; `assistant/chunk`
+      // log events and `sourceEventSeqs` no longer exist.
+      expect(expandAssistantStream(assistant!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'hello ' },
         { type: 'text-delta', index: 0, text: 'world' },
       ])
-
-      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
-      expect(assistant).toMatchObject({
-        surfaceOp: 'append',
-        sourceEventSeqs: chunks.map(event => event.seq),
-      })
       expect(assistant?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
+
+      // The same attempt publishes live frames: open, one per chunk, settled.
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({ outcome: { kind: 'committed', eventType: 'assistant/message', seq: assistant!.seq } })
+      disposeFrames()
     } finally {
       await ctx.fiber.dispose()
     }
@@ -571,6 +574,58 @@ describe('ClaudeCodeAgent turn mapping', () => {
           },
         },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('abandons the live attempt when a step streams chunks but commits no message', async () => {
+    const ctx = await harness()
+    try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '', citations: null } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }),
+        {
+          type: 'result',
+          subtype: 'error_during_execution',
+          duration_ms: 5,
+          duration_api_ms: 5,
+          is_error: true,
+          num_turns: 1,
+          stop_reason: 'too_many_requests',
+          total_cost_usd: 0,
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            inference_geo: null,
+            input_tokens: 4,
+            iterations: null,
+            output_tokens: 1,
+            server_tool_use: null,
+          },
+          modelUsage: {},
+          permission_denials: [],
+          errors: ['stream broke'],
+          uuid: 'u-abandon',
+          session_id: 's-abandon',
+        } as unknown as SDKMessage,
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('abandon-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // No assistant message ever claimed the streamed chunks, so the attempt
+      // closes its live frames as abandoned instead of staying open.
+      expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(false)
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({ outcome: { kind: 'abandoned' } })
+      disposeFrames()
     } finally {
       await ctx.fiber.dispose()
     }

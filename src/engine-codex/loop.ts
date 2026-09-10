@@ -15,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type {
+  Agent,
   AgentFactory,
   AgentHandle,
   AgentOptions,
@@ -24,7 +25,7 @@ import type {
   SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
 import { interruptedTurnClosers, SessionId, SessionLogOffset, SessionPreparation } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { CodexAgent } from './agent.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
@@ -150,7 +151,7 @@ export class CodexLoop extends Service implements AgentFactory {
    * fuses caller cancellation with lifecycle teardown for setup awaits.
    */
   /* jscpd:ignore-start -- ownership/transaction machinery mirrors the Claude Code loop factory. */
-  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal, handle?: SessionHandle): PreparedAgent {
+  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal, handle?: SessionHandle, parentAgent?: Agent): PreparedAgent {
     ownerCtx.fiber.assertActive()
     /* v8 ignore start -- unreachable backstop, see above */
     /* v8 ignore next -- unreachable backstop, see above */
@@ -246,7 +247,7 @@ export class CodexLoop extends Service implements AgentFactory {
         publish: (source) => {
           assertLive()
           detachSession = agent.ctx.sessions.enter(session)
-          detachAgent = loopCtx.agents.enter(agent, ownerCtx.agent)
+          detachAgent = loopCtx.agents.enter(agent, parentAgent)
           agent.ctx.sessions.announce(session)
           assertLive()
           loopCtx.agents.announce(agent)
@@ -276,12 +277,13 @@ export class CodexLoop extends Service implements AgentFactory {
     signal: AbortSignal | undefined,
     source: SessionStartSource,
     stored?: StoredSession,
+    parentAgent?: Agent,
   ): Promise<AgentHandle> {
     using ownedPreparation = preparation
     const session = ownedPreparation.session
     let prepared: PreparedAgent
     try {
-      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, stored?.handle)
+      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, stored?.handle, parentAgent)
     } catch (error: unknown) {
       // A rejected prepare never took the handle: close it so write ownership
       // is released instead of leaking with the process.
@@ -289,7 +291,7 @@ export class CodexLoop extends Service implements AgentFactory {
       throw error
     }
     try {
-      const setupCommit = await raceAbort(setup?.(prepared.agent.ctx), prepared.signal, id)
+      const setupCommit = await raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)
       setupCommit?.commit()
       await this.appendUnstoredSuffix(stored, session)
       return prepared.publish(source)
@@ -306,7 +308,7 @@ export class CodexLoop extends Service implements AgentFactory {
    * the accessing fiber. When a persistence backend is mounted, the session's
    * durable identity is stored before publication.
    * @param ownerCtx - caller context that structurally owns the lifecycle.
-   * @param options - identities, session seed/metadata, loop options, setup, and cancellation.
+   * @param options - identities, optional live parent, session seed/metadata, loop options, setup, and cancellation.
    * @returns the published handle.
    */
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
@@ -341,6 +343,7 @@ export class CodexLoop extends Service implements AgentFactory {
         options.signal,
         'startup',
         stored,
+        options.parentAgent,
       )
     })()
     this.ownership.trackWrapper(published)
@@ -364,16 +367,6 @@ export class CodexLoop extends Service implements AgentFactory {
     const handle = await persistence.create(session.header, {
       inheritedEventCount: session.inheritedEventCount,
       ...signal === undefined ? {} : { signal },
-    }).catch((error: unknown) => {
-      // SessionPersistence.create signature changed between builds (options-object
-      // vs count-number 2nd arg); the published build misreads the object and
-      // throws a SessionLogOffset TypeError. Retry with the count for both.
-      if (error instanceof TypeError && error.message.includes('SessionLogOffset')) {
-        // The published build's create(meta, inheritedEventCount) wants the count as
-        // the 2nd arg; the source type declares an options object, so cast through.
-        return persistence.create(session.header, session.inheritedEventCount as never)
-      }
-      throw error
     })
     return { handle, storedCount: 0 }
   }
@@ -398,7 +391,7 @@ export class CodexLoop extends Service implements AgentFactory {
   /**
    * Resume an owned agent from the configured persistence service.
    * @param ownerCtx - caller context that owns load, setup, and the live lifecycle.
-   * @param options - persisted identity, loop options, setup, and cancellation.
+   * @param options - persisted identity, optional live parent, loop options, setup, and cancellation.
    * @returns the published handle.
    */
   async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
@@ -434,41 +427,29 @@ export class CodexLoop extends Service implements AgentFactory {
       let preparation: SessionPreparation | undefined
       try {
         try {
-          if (typeof (persistence as { open?: unknown }).open === 'function') {
-            // source/newer API: open(id, 'write') then read/appends + build preparation.
-            handle = await raceAbortCall(
-              () => persistence.open(id, 'write', { signal: fused }),
-              fused,
-              id,
-              (abandoned) => { void abandoned.close() },
-            )
-            // Semantic crash repair is the agent layer's job: persistence hands
-            // back the physically valid log; an interrupted final turn receives
-            // synthetic closers (missing tool errors, step/end, turn/end) that
-            // are appended through the same handle as an ordinary batch.
-            const persisted = await handle.read(0, undefined, { signal: fused }) as unknown as readonly SessionEvent[]
-            fused.throwIfAborted()
-            const closers = interruptedTurnClosers(persisted)
-            if (closers.length > 0) await handle.append(closers)
-            preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
-              seed: [...persisted, ...closers],
-              meta: structuredClone(handle.header),
-              inheritedEventCount: handle.inheritedEventCount,
-              seedSource: 'persistence',
-            } as never))
-            stored = { handle, storedCount: persisted.length + closers.length }
-            await this.appendUnstoredSuffix(stored, preparation.session)
-          } else {
-            // published 0.1.2-rc.1 API: prepare(id) returns a ready SessionPreparation
-            // (crash-repair + seed applied, write ownership taken internally).
-            const publishedApi = persistence as unknown as { prepare: (id: SessionId, signal?: AbortSignal) => Promise<SessionPreparation> }
-            preparation = await raceAbortCall(
-              () => publishedApi.prepare(id, fused),
-              fused,
-              id,
-              (abandoned: SessionPreparation) => { abandoned?.[Symbol.dispose]?.() },
-            )
-          }
+          handle = await raceAbortCall(
+            () => persistence.open(id, 'write', { signal: fused }),
+            fused,
+            id,
+            (abandoned) => { void abandoned.close() },
+          )
+          // Semantic crash repair is the agent layer's job: persistence hands
+          // back the physically valid log; an interrupted final turn receives
+          // synthetic closers (missing tool errors, step/end, turn/end) that
+          // are appended through the same handle as an ordinary batch.
+          const coldRead = await handle.read(0, undefined, { signal: fused })
+          fused.throwIfAborted()
+          const persisted = coldRead.events
+          const closers = interruptedTurnClosers(persisted)
+          if (closers.length > 0) await handle.append(closers)
+          preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
+            seed: [...persisted, ...closers],
+            meta: structuredClone(handle.header),
+            inheritedEventCount: handle.inheritedEventCount,
+            eventState: coldRead.eventState,
+          }))
+          stored = { handle, storedCount: persisted.length + closers.length }
+          await this.appendUnstoredSuffix(stored, preparation.session)
         } finally {
           await unfollowOwner()
         }
@@ -485,6 +466,7 @@ export class CodexLoop extends Service implements AgentFactory {
           options.signal,
           'resume',
           owned,
+          options.parentAgent,
         )
       } finally {
         preparation?.[Symbol.dispose]()

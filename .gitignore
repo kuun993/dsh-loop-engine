@@ -2,6 +2,7 @@ node_modules/
 lib/
 dist/
 *.tsbuildinfo
+coverage/
 .probe/
 tests/probe/
 # IDE

@@ -88,10 +88,11 @@ export function claudeQueryOptions(
       ...scrubbedParentEnv(),
       ...spec.env,
     },
-    // Emit `stream_event` partial messages so the loop can forward token
-    // deltas to the dsh session as `assistant/chunk` events (the web surface
-    // streams those). Without it the SDK yields only complete `assistant`
-    // messages, so the surface renders each response all at once.
+    // Emit `stream_event` partial messages so the loop can publish token
+    // deltas as live `agent/assistant-stream` frames and embed the attempt's
+    // timed stream in the durable `assistant/message` (the web surface streams
+    // those). Without it the SDK yields only complete `assistant` messages, so
+    // the surface renders each response all at once.
     includePartialMessages: true,
     persistSession: false,
     disallowedTools: spec.permissionMode === 'plan'
