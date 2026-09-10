@@ -22,17 +22,19 @@ import type {
   InboxTarget,
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
+import { DriverInbox } from '../driver-core/inbox.ts'
+import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { resolveSessionPermission, type CodexPermission } from './permission.ts'
 import { AppServerClient } from './appserver/client.ts'
 import { AppServerThread } from './appserver/thread.ts'
@@ -75,13 +77,13 @@ type PreparedStep =
 /** An assistant message held until the step knows whether turn usage attaches to it. */
 interface HeldMessage {
   readonly content: ContentBlock[]
-  /** Durable seqs of the chunks that already streamed this message's live partial. */
-  readonly refs: SessionSeq[]
+  /** The exact timed chunks this message's own content streamed. */
+  readonly stream: AssistantStreamRecord[]
 }
 
 /** Drives one session through turn and step boundaries on Codex. */
 export class CodexAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: DriverInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -95,6 +97,9 @@ export class CodexAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
 
+  /** Agent-lifecycle-local counter naming each streamed attempt. */
+  private streamAttempts = 0
+
   /** Lazily created app-server client, reused across steps and released on scope teardown. */
   private appServer: AppServerClient | undefined
 
@@ -106,7 +111,7 @@ export class CodexAgent implements Agent {
     private readonly config: ResolvedConfig,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
+    this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
@@ -472,6 +477,12 @@ export class CodexAgent implements Agent {
       }      /* v8 ignore stop */
     }
     signal.addEventListener('abort', cancel, { once: true })
+    /**
+     * The live attempt for the current streamed segment. Chunks open one; the
+     * durable assistant message they built settles it and the next chunk
+     * opens a fresh attempt, so every message carries exactly its own stream.
+     */
+    let live: DriverAssistantStream | undefined
     try {
       const permission = this.queryPermission()
       const client = await this.appServerClient()
@@ -494,10 +505,8 @@ export class CodexAgent implements Agent {
         let finished = false
         /** Reasoning texts accumulated since the last flush, folded into the next agent message or flushed as a trailing reasoning message. */
         const pendingReasoning: string[] = []
-        /** Seq refs of reasoning chunks already streamed for {@link pendingReasoning}. */
-        const pendingReasoningSeqs: SessionSeq[] = []
-        /** Seq refs of text chunks already streamed for the current agent message. */
-        const textSeqs: SessionSeq[] = []
+        /** The exact timed chunks the pending reasoning streamed, carried by whichever message folds them in. */
+        const pendingReasoningStream: AssistantStreamRecord[] = []
         /** The assistant message being assembled; its chunks stream live as items complete. */
         let held: HeldMessage | undefined
         /** Whether a reasoning block has been started (block-start emitted). */
@@ -507,14 +516,26 @@ export class CodexAgent implements Agent {
         /** Block index for the current text block. */
         let textBlockIndex = 0
 
-        /** Emit one live partial chunk and return its durable seq. */
-        const emitChunk = (chunk: StreamChunk): SessionSeq =>
-          this.session.append('assistant/chunk' as any, { turn, step, chunk } as any).seq
+        /** Open the live attempt on first use, publishing its opening frame before any chunk. */
+        const currentStream = (): DriverAssistantStream => {
+          if (live === undefined) {
+            live = new DriverAssistantStream(
+              this.id,
+              ++this.streamAttempts,
+              turn,
+              step,
+              frame => this.dispatch.emit('agent/assistant-stream', { frame }),
+            )
+            live.start()
+          }
+          return live
+        }
 
         /** Append the held assistant message, optionally carrying the turn's usage. */
         const flushHeld = (usage?: TokenUsage): void => {
           if (held === undefined) return
-          this.session.append('assistant/message' as any, {
+          const attempt = live
+          const data = {
             turn,
             step,
             message: createAssistantMessage({
@@ -522,12 +543,15 @@ export class CodexAgent implements Agent {
               source: { provider: PROVIDER, model: this.modelLabel() },
             }),
             ...usage === undefined ? {} : { usage },
-          } as any, {
-            surfaceOp: 'append',
-            // Link the durable message to the chunks that streamed it, so replay
-            // can reconstruct the partial exactly as shown.
-            sourceEventSeqs: held.refs,
-          } as any)
+            // Exactly the chunks this message's own content streamed.
+            stream: held.stream,
+          }
+          if (attempt === undefined) {
+            this.session.append('assistant/message', data, { surfaceOp: 'append' })
+          } else {
+            attempt.settle(() => this.session.append('assistant/message', data, { surfaceOp: 'append' }).seq)
+            live = undefined
+          }
           held = undefined
         }
         /** Flush accumulated reasoning as its own durable message; an agent message folds it instead. */
@@ -536,10 +560,10 @@ export class CodexAgent implements Agent {
           flushHeld()
           held = {
             content: pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
-            refs: [...pendingReasoningSeqs],
+            stream: [...pendingReasoningStream],
           }
           pendingReasoning.length = 0
-          pendingReasoningSeqs.length = 0
+          pendingReasoningStream.length = 0
           flushHeld(usage)
         }
 
@@ -561,9 +585,9 @@ export class CodexAgent implements Agent {
               // Token-level streaming of the agent's reply — live.
               if (!textBlockStarted) {
                 textBlockStarted = true
-                textSeqs.push(emitChunk({ type: 'block-start', index: textBlockIndex, blockType: 'text' }))
+                currentStream().push({ type: 'block-start', index: textBlockIndex, blockType: 'text' })
               }
-              textSeqs.push(emitChunk({ type: 'text-delta', index: textBlockIndex, text: event.delta }))
+              currentStream().push({ type: 'text-delta', index: textBlockIndex, text: event.delta })
               break
             }
             case 'reasoning-summary-delta':
@@ -573,9 +597,9 @@ export class CodexAgent implements Agent {
               const index = pendingReasoning.length
               if (!reasoningBlockStarted) {
                 reasoningBlockStarted = true
-                pendingReasoningSeqs.push(emitChunk({ type: 'block-start', index, blockType: 'reasoning' }))
+                currentStream().push({ type: 'block-start', index, blockType: 'reasoning' })
               }
-              pendingReasoningSeqs.push(emitChunk({ type: 'reasoning-delta', index, text: event.delta }))
+              currentStream().push({ type: 'reasoning-delta', index, text: event.delta })
               break
             }
             case 'item-completed': {
@@ -586,20 +610,25 @@ export class CodexAgent implements Agent {
                 const content = (item as { content?: string[] }).content
                 const text = summary?.join('\n') ?? content?.join('\n') ?? ''
                 pendingReasoning.push(text)
+                // Cut the chunks this reasoning streamed: they belong to the
+                // message that folds them in, not to the one before it.
+                pendingReasoningStream.push(...(live?.takeStream() ?? []))
                 reasoningBlockStarted = false
               } else if (item.type === 'agentMessage') {
                 // Agent message completed — fold reasoning + text into one message.
+                // Cut before flushing: a committed earlier message ends the
+                // attempt, and the cut must observe the live one.
+                const textStream = live?.takeStream() ?? []
                 flushHeld()
                 held = {
                   content: [
                     ...pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
                     { type: 'text' as const, text: item.text ?? '' },
                   ],
-                  refs: [...pendingReasoningSeqs, ...textSeqs],
+                  stream: [...pendingReasoningStream, ...textStream],
                 }
                 pendingReasoning.length = 0
-                pendingReasoningSeqs.length = 0
-                textSeqs.length = 0
+                pendingReasoningStream.length = 0
                 reasoningBlockStarted = false
                 textBlockStarted = false
               } else if (item.type === 'commandExecution') {
@@ -660,6 +689,9 @@ export class CodexAgent implements Agent {
         }
         return { kind: 'completed' }
     } finally {
+      // A segment that streamed without committing a durable message closes its
+      // live frames, so the client stops painting an abandoned partial.
+      if (live !== undefined && !live.ended) live.abandon()
       signal.removeEventListener('abort', cancel)
       controller.abort()
     }

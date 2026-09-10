@@ -11,13 +11,15 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 - **pi**：`pi --mode rpc` 严格 LF JSONL，没有任何原生权限系统，整个子进程靠 dsh 沙箱包裹；
 - **kimi**：`kimi acp` 子进程，权限以 ACP 反向 RPC `session/request_permission` 回调形式出现。
 
-引擎之间的差异集中在**传输层、权限映射、上下文文件策略、技能 provider** 四件事上，这四件事都留在各引擎自己的目录里。而以下五件事四个引擎完全一致，被抽到 `src/driver-core/`：
+引擎之间的差异集中在**传输层、权限映射、上下文文件策略、技能 provider** 四件事上，这四件事都留在各引擎自己的目录里。而以下七件事四个引擎完全一致，被抽到 `src/driver-core/`：
 
 | 模块 | 解决的问题 |
 |---|---|
 | `prompt.ts` | 把持久会话日志序列化成一次托管查询的 prompt 文本 |
 | `permission-knobs.ts` | 从会话日志折叠出 dsh 的沙箱/审批旋钮 |
 | `ownership.ts` | 工厂所有权、活体 agent 跟踪、setup 与中止信号的竞速 |
+| `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
+| `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
 
@@ -46,12 +48,12 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 
 四个 agent 的调用方式逐字一致——先取 `this.session.deriveMessages()`，再 `serializeHistory(history)`，空 prompt 抛错（v8-ignore 的兜底分支）：
 
-- `src/engine-claude/agent.ts:467-472`
-- `src/engine-codex/agent.ts:456`
-- `src/engine-pi/agent.ts:516`
-- `src/engine-kimi/agent.ts:504-509`
+- `src/engine-claude/agent.ts:472-477`
+- `src/engine-codex/agent.ts:461`
+- `src/engine-pi/agent.ts:559`
+- `src/engine-kimi/agent.ts:508-513`
 
-kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:530`），因为 ACP prompt 是一个需要等响应帧的 RPC。
+kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:554`），因为 ACP prompt 是一个需要等响应帧的 RPC。
 
 ### 改它会波及谁
 
@@ -78,7 +80,7 @@ dsh web 的权限预设（只读 / 工作区可写 / 完全放开 × ask / never
 | pi | `src/engine-pi/permission.ts:63-75` | 不剪 `--tools`，不包沙箱 | **降级为 read-only 拒绝**（pi 无审批回调） | `read-only` + 只读工具集（`:32-35`） |
 | kimi | `src/engine-kimi/permission.ts:30-31` | 不查 sandbox 旋钮 | `ask` → 拒绝 | 其他（`never`/无旋钮）→ 自动批准 |
 
-claude 还有一个**部署级覆盖**：`cordis.yml` 里钉死的 `config.permissionMode` 直接赢过会话旋钮（`src/engine-claude/agent.ts:335`）。kimi 不读 sandbox 旋钮是刻意的——Kimi 自己的工具策略约束工具能做什么，ACP 审批是宿主侧闸门，只由 `approval/policy` 信号驱动（`src/engine-kimi/permission.ts:22-27` 的头注）。
+claude 还有一个**部署级覆盖**：`cordis.yml` 里钉死的 `config.permissionMode` 直接赢过会话旋钮（`src/engine-claude/agent.ts:340`）。kimi 不读 sandbox 旋钮是刻意的——Kimi 自己的工具策略约束工具能做什么，ACP 审批是宿主侧闸门，只由 `approval/policy` 信号驱动（`src/engine-kimi/permission.ts:22-27` 的头注）。
 
 ### 改它会波及谁
 
@@ -100,35 +102,64 @@ dsh 里**恰好只有一个工厂**能占住 `AgentFactory` 槽位，而引擎�
 
 - `INACTIVE_STATES`（`src/driver-core/ownership.ts:33-37`）：`UNLOADING | DISPOSED | FAILED` 三种 fiber 状态不能拥有或服务新生命周期；cordis 的 `FiberState` 是 `const enum`（`vendor/cordis/src/fiber.ts:147`），打包发布时会内联抹掉、不再有运行时导出，因此这里用本地数字常量镜像这三个状态（`FAILED 3`、`DISPOSED 4`、`UNLOADING 5`），**不能**从 `@deepseek-ai/cordis` 值导入 `FiberState`——否则插件树加载会报 `does not provide an export named 'FiberState'`（见 `src/driver-core/ownership.ts:16-30`）；
 - `isActive()`（`:54-56`）：`accepting` 标志与 fiber 状态双判；
-- `signal`（`:50-52`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:76-84`）；各 loop 用它做融合中止的一路输入（如 `src/engine-claude/loop.ts:173-175`）；
+- `signal`（`:50-52`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:76-84`）；各 loop 用它做融合中止的一路输入（如 `src/engine-claude/loop.ts:182-184`）；
 - `track(dispose)`（`:59-62`）：登记一个活体 agent 的 teardown，返回反注册函数；
 - `trackStartup(job)`（`:65-69`）/ `trackWrapper(job)`（`:72-74`）：把 agent 尚未存在前的配置启动工作、以及 create/resume 的发布延续挂进工厂，dispose 会等它们全部 settle；
 - `dispose()`（`:76-84`）：先关门（`accepting = false` + abort），再并发等待所有活体 agent teardown 与启动任务；
 - `raceAbort(operation, signal, id)`（`:88-104`）：operation 与 signal 竞速，abort 时抛出 signal 的 reason（非 Error 时包装成 `agent "<id>" creation aborted`）；
 - `raceAbortCall(..., releaseAbandoned)`（`:106-127`）：额外处理"operation 在取消后才产出值"的孤儿资源——取消后仍 then 一次 `releaseAbandoned` 释放它（典型场景：子进程/连接在取消后恰好建好了）。
-- `SessionPersistence` 双签名兼容（四个 loop 的 `createStoredSession` / `resumeWith`）：harness **源码**与**发布版 0.1.2-rc.1** 的持久化 seam API 不一致——源码版 `create(header, { inheritedEventCount, signal })` / `open(id, 'write')`＋`SessionHandle`，而发布版 `create(meta, inheritedEventCount)` / `prepare(id)`（无 `open`）。插件不依赖 agent-loop 包、而是自己调持久化，所以两处都做 duck-type：`createStoredSession` 先按源码版（第 2 参为对象）调，若发布版把对象误当 count 抛 `SessionLogOffset` 错，就回退成 `create(header, 数字)`；`resumeWith` 若 `persistence.open` 不是函数（发布版），改用 `persistence.prepare(id)`（发布版内部已完成崩溃修复+seed）。这样插件在源码/dev 与发布版/prod 都可用。
+- 四个 loop 直接调用 harness 的 `SessionPersistence` **单签名** seam：新建走 `persistence.create(session.header, { inheritedEventCount, signal })`（`src/engine-claude/loop.ts:370-378`），恢复走 `persistence.open(id, 'write', { signal })` 拿 `SessionHandle`，`handle.read(0, undefined, { signal })` 返回 `{ eventState, events }`，再交给 `sessions.prepare(id, { seed, meta, inheritedEventCount, eventState })`（`src/engine-claude/loop.ts:436-456`；四个 loop 的对应实现逐字镜像）。
 
 ### 哪些引擎怎么用
 
-四个 loop 的使用方式逐字镜像（jscpd 注释里明说这套机制镜像默认 agent-loop 工厂，且禁止依赖 agent-loop 包——`src/engine-claude/loop.ts:152`）：
+四个 loop 的使用方式逐字镜像（jscpd 注释里明说这套机制镜像默认 agent-loop 工厂，且禁止依赖 agent-loop 包——`src/engine-claude/loop.ts:159`）：
 
 | 调用点 | claude | codex | pi | kimi |
 |---|---|---|---|---|
-| 构造 `FactoryOwnership` | loop.ts:134 | loop.ts:128 | loop.ts:180 | loop.ts:111 |
-| fiber effect 里 dispose | loop.ts:136 | loop.ts:130 | loop.ts:184 | loop.ts:114 |
-| prepare 入口 `isActive()` 守门 | loop.ts:157 | loop.ts:151 | loop.ts:205 | loop.ts:135 |
-| `track(dispose)` | loop.ts:206 | loop.ts:200 | loop.ts:254 | loop.ts:184 |
-| `trackWrapper(published)` | loop.ts:304 | loop.ts:298 | loop.ts:352 | loop.ts:282 |
-| setup `raceAbort` | loop.ts:274 | loop.ts:268 | loop.ts:322 | loop.ts:252 |
-| prepare `raceAbortCall` | loop.ts:341 | loop.ts:335 | loop.ts:389 | loop.ts:319 |
+| 构造 `FactoryOwnership` | loop.ts:141 | loop.ts:135 | loop.ts:200 | loop.ts:118 |
+| fiber effect 里 dispose | loop.ts:143 | loop.ts:137 | loop.ts:214 | loop.ts:121 |
+| prepare 入口 `isActive()` 守门 | loop.ts:164 | loop.ts:158 | loop.ts:235 | loop.ts:142 |
+| `track(dispose)` | loop.ts:222 | loop.ts:216 | loop.ts:293 | loop.ts:200 |
+| `trackWrapper(published)` | loop.ts:355 | loop.ts:349 | loop.ts:429 | loop.ts:333 |
+| setup `raceAbort` | loop.ts:300 | loop.ts:294 | loop.ts:374 | loop.ts:278 |
+| resume 加载 `raceAbortCall` | loop.ts:436 | loop.ts:430 | loop.ts:510 | loop.ts:414 |
 
-kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt 响应（`src/engine-kimi/agent.ts:530`）。
+kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt 响应（`src/engine-kimi/agent.ts:554`）。
 
 ### 改它会波及谁
 
-四个引擎的生命周期正确性全部压在这 112 行上。这里任何一个判定时序的变化（比如 `dispose()` 里 abort 与等待的顺序、`isActive()` 的双判条件）都是四份 loop 代码的共同行为；改完必须跑全部四个 `tests/engine-*/loop.spec.ts`。注意 `dispose()` 里的错误文案 `agent loop is not active` 同时被各 loop 的守门分支复用（如 `src/engine-codex/loop.ts:345`），改文案要全局搜。
+四个引擎的生命周期正确性全部压在这 127 行上。这里任何一个判定时序的变化（比如 `dispose()` 里 abort 与等待的顺序、`isActive()` 的双判条件）都是四份 loop 代码的共同行为；改完必须跑 kimi/pi 的 `tests/engine-*/loop.spec.ts`，以及 claude/codex 落在各自 `tests/engine-*/index.spec.ts` 里的工厂槽位与中途卸载场景。注意 `dispose()` 里的错误文案 `agent loop is not active` 同时被各 loop 的守门分支复用（如 `src/engine-codex/loop.ts:457`），改文案要全局搜。
 
-## 5. context-files.ts：上下文文件的发现与加载
+## 5. inbox.ts / assistant-stream.ts：驱动自有的收件箱与流式尝试
+
+### 解决什么问题
+
+harness 0.1.5 把两件原本由 `dsh-agent` 提供的东西收了回去：`Inbox` 从具体类变成**由驱动自己实现的接口**；逐 chunk 落盘的 session 事件 `assistant/chunk` 被删除，改为 `assistant/message` 内嵌精确计时的 `stream`，且该消息禁止再带 `sourceEventSeqs`。四个托管引擎不依赖 agent-loop 包，所以这两件事也在驱动层自建。
+
+### 契约
+
+- `DriverInbox`（`src/driver-core/inbox.ts:38`）实现 harness 的 `Inbox` 接口：读取面是 `nextTurn` / `nextStep` / `hasPending`（`src/driver-core/inbox.ts:56-68`），变更面是 `clear` / `claim` / `append` / `prepend` / `replace` / `remove` / `splice`（`:71-158`）。构造时重放本会话已有的 `agent/inbox/spliced` 事件（`:45-53`）；每次变更先 `session.append('agent/inbox/spliced', …)` 把归一化后的 splice **落盘**，再改内存列表并发出 live 通知（`:170-205`）——web 会话 reducer 与 session resume 都读这份持久事件流，所以语义与 harness 移除的那个类逐字对齐。持久 splice 非法时直接抛错：坐标越界抛 `invalid inbox splice`（`:218-221`），重复 id 抛 `message "<id>" is already pending`（`:223-230`）。
+- `DriverAssistantStream`（`src/driver-core/assistant-stream.ts:32`）框住**一次流式尝试**：`start()` 发 `agent/assistant-stream` 的 `start` 帧（`:61-69`）；`push(chunk)` 给 chunk 打时间戳、喂进 `AssistantStreamAccumulator` 并发 `chunk` 帧（`:72-82`）；`stream` getter 交出 compact stream 快照（`:85-87`）；`takeStream()` 关掉当前 record run 并把这段 stream 返回，后续 chunk 落进新的一段（`:97-101`）——协议能标出内容分段的引擎（codex）就在每个边界切一刀，使每条 durable 消息只内嵌自己流出的那段 chunk，而 live 帧仍走同一个 attempt。收尾二选一：`settle(append)` 在 durable 事件提交**之后**发 `end`（`committed`，带回落盘事件的类型与 seq，`:107-123`）；提交失败或整段没有 durable 落点则 `abandon()` 发 `end`（`abandoned`，`:126-135`）。它只发帧与压缩，**不组装内容块**——每个引擎仍从自己的协议组装权威转录。
+
+### 哪些引擎怎么用
+
+四个 agent 的调用方式高度一致（差异只有下面点出的两处）；下表路径均指各引擎目录下的 `src/engine-*/agent.ts`：
+
+| 用途 | claude | codex | pi | kimi |
+|---|---|---|---|---|
+| 构造 `DriverInbox` | agent.ts:120-124 | agent.ts:114-118 | agent.ts:133-137 | agent.ts:130-134 |
+| 开一次流式尝试 | agent.ts:512-524 | agent.ts:520-532 | agent.ts:591-603 | agent.ts:532-544 |
+| chunk 入流 | agent.ts:535-543 | agent.ts:584-604 | agent.ts:740-747 | agent.ts:601-619 |
+| 写 `assistant/message` 并 `settle` | agent.ts:587-593 | agent.ts:546-554 | agent.ts:648-656 | agent.ts:681-688 |
+| 段尾 `abandon()` | agent.ts:659-662 | agent.ts:691-694 | agent.ts:823-826 | agent.ts:567-570 |
+
+kimi 是唯一把 flush 抽成独立方法、并把 `currentStream` 作为参数下传的引擎（`src/engine-kimi/agent.ts:532-544`、`:658-689`）。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀，`HeldMessage.stream` 装的就是这一段自己的 chunk（`src/engine-codex/agent.ts:613-628`）；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
+
+### 改它会波及谁
+
+`inbox.ts` 的改动落在**会话并发语义**上：`claim` 的批次顺序、`splice` 的归一化坐标、以及"先落盘再改内存"的次序都由 `agent/inbox/spliced` 的持久流承载，而 web reducer 与 resume 都从该流重建，回滚或重放时的可见性因此同时受四个引擎的 followup/steer/inject 路径影响。`assistant-stream.ts` 的改动则同时改变四条流式路径的 live 帧节奏与内嵌 stream 内容——它是"web 实时 partial"与"replay 还原 partial"两条链路的唯一交汇点；改帧序或压缩规则必须让四个 `tests/engine-*/agent.spec.ts` 与 `tests/driver-core/assistant-stream.spec.ts` 一起过。
+
+## 6. context-files.ts：上下文文件的发现与加载
 
 ### 解决什么问题
 
@@ -158,20 +189,20 @@ claude **不用**这个模块：CLAUDE.md 由 `ClaudeCodeSkillProvider` 按"带 
 - `ContextFilePolicy` 加字段是安全的（各引擎用 `satisfies` 声明），但改 `dirContextFile` 的"每目录一个文件"上限是结构性变化，要同时审三个 provider 的 candidate 构造；
 - 注意它 import 了 `src/skills.ts` 的 `findProjectRoot`（`src/driver-core/context-files.ts:17`），两个文件存在**反向依赖**：改 `findProjectRoot` 的回退行为同时影响 claude 技能锚定和三个引擎的目录链。
 
-## 6. skill-inject.ts + skills.ts + commands.ts：技能与斜杠命令接缝
+## 7. skill-inject.ts + skills.ts + commands.ts：技能与斜杠命令接缝
 
-### 6.1 skill-inject.ts：为什么托管引擎要自己复刻 `/name`
+### 7.1 skill-inject.ts：为什么托管引擎要自己复刻 `/name`
 
-进程内引擎的技能注入由 dsh-tool-skill 的 handler 完成，但它挂在 agent-preset 上下文链上，而托管引擎 agent 的上下文**不从那条链派生**（`src/driver-core/skill-inject.ts:1-8` 头注；claude agent 里也有同样的注释，`src/engine-claude/agent.ts:277-280`）。所以四个 agent 各自复制同一段注入流程，共享部分抽在这里：
+进程内引擎的技能注入由 dsh-tool-skill 的 handler 完成，但它挂在 agent-preset 上下文链上，而托管引擎 agent 的上下文**不从那条链派生**（`src/driver-core/skill-inject.ts:1-8` 头注；claude agent 里也有同样的注释，`src/engine-claude/agent.ts:282-285`）。所以四个 agent 各自复制同一段注入流程，共享部分抽在这里：
 
 - `SKILL_GESTURE`（`:18`）：空白边界的 `/name` 手势正则，name 必须 kebab-case（`SKILL_NAME_RE`，`:15`）；
 - `invokedSkillNames(messages)`（`:84-97`）：只扫 `source.kind === 'user'` 的消息文本块，按首次出现顺序去重——**tool 结果、技能注入消息自身不会被递归扫描**；
 - `renderSkillContent(skill)`（`:67-81`）：渲染 `<skill_content>` XML；`resourceBase.kind === 'directory'` 时写明基目录让模型自行解析相对路径，否则声明资源由 provider 管理；`escapeText` / `escapeAttr`（`:57-64`）防注入；
 - `SkillInvocationSource`（`:38-42`）+ `MessageSourceMap` 模块增强（`:44-49`）：注入的消息带持久 source `{ kind: 'skill-invocation', name, form: 'instructions' }`，镜像 dsh-skill 的线上形状，保证重放时能被识别。
 
-四个 agent 的 `injectSkills` 逐字一致（claude `src/engine-claude/agent.ts:297-323`；codex `:304` 起；pi `:328` 起；kimi `src/engine-kimi/agent.ts:317-343`）：从 `loopCtx` 取 `skills` 服务（`SkillsService` 最小形状，`:52-54`），逐个 `skills.get(name, { cwd, signal, scope: this })`，加载失败静默跳过、`userInvocable === false` 跳过、中途 abort 整批放弃返回原消息，最后把注入消息**追加**到本步消息批末尾。
+四个 agent 的 `injectSkills` 逐字一致（claude `src/engine-claude/agent.ts:302-328`；codex `:308` 起；pi `:331` 起；kimi `src/engine-kimi/agent.ts:321-347`）：从 `loopCtx` 取 `skills` 服务（`SkillsService` 最小形状，`:52-54`），逐个 `skills.get(name, { cwd, signal, scope: this })`，加载失败静默跳过、`userInvocable === false` 跳过、中途 abort 整批放弃返回原消息，最后把注入消息**追加**到本步消息批末尾。
 
-### 6.2 skills.ts：ClaudeCodeSkillProvider 与各引擎 provider 的共性
+### 7.2 skills.ts：ClaudeCodeSkillProvider 与各引擎 provider 的共性
 
 `src/skills.ts` 有三重身份：
 
@@ -192,40 +223,42 @@ ClaudeCodeSkillProvider 的发现规则：项目侧锚定 git root（`findProjec
 
 共性：合并型上下文候选统一叫 `agents-md`、`modelInvocable + userInvocable` 双开、locator 记录路径集留待 `get()` 时用 `readSources` 拼正文（codex `src/engine-codex/skills.ts:64-80`；pi/kimi 同构）。pi 与 kimi 都**刻意不扫** `.agents/skills/`——dsh 自己的 skill-filesystem provider 已在 web profile 里覆盖了它（`src/engine-pi/skills.ts:16-21`、`src/engine-kimi/skills.ts:15-18` 头注）。
 
-### 6.3 commands.ts：斜杠命令转发桥
+### 7.3 commands.ts：斜杠命令转发桥
 
 dsh 的 `commands` 运行时**本地执行**已注册命令——这一行被消费、永远到不了模型（`src/commands.ts:1-13` 头注）。而 Claude Code 的命令真正展开发生在 CLI 内部，所以桥的语义是**转发**：handler 把原始行 `/<name> [args]` 作为普通 user 消息 `followup` 回给接收 agent，CLI 再原生展开（`forwardClaudeCodeCommand`，`src/commands.ts:64-72`）。注册内建命令（`CLAUDE_CODE_COMMANDS` 七条，`:80-88`）的意义是让 dsh web 斜杠菜单看得见命令面；未注册的 `/行` 也能透传为普通文本，但菜单会隐藏引擎的命令能力。
 
 `discoverUserSlashCommands()`（`:98-124`）同步扫描 `~/.claude/commands/*.md`：名字须过 dsh 命令文法（`COMMAND_NAME`，`:54`）、不得与内建重名、必须能产出描述——描述取 frontmatter `description` 字段，否则取正文首个非空非标题行，超 120 字符截断（`commandDescription`，`:138-162`）。同步扫描是为了在引擎选择 commit 返回前完成注册。**项目级 `.claude/commands/` 刻意不注册**：它随 cwd 变化，全局注册会跨项目串扰（`:16-18`）。
 
-kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `CommandDefinition` / `CommandInvocation` / `CommandResult` 类型（`src/engine-kimi/commands.ts:23`），转发模式相同（`forwardKimiCommand`，`:33-40`），但只注册 ACP prompt 面有意义的子集（TUI 控制类命令不注册，`skill:` 已由技能缝承载——`:12-17` 头注）。
+kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `CommandDefinition` / `CommandInvocation` / `CommandResult` 类型（`src/engine-kimi/commands.ts:30`），转发模式相同（`forwardKimiCommand`，`:40-48`），但只注册 ACP prompt 面有意义的子集（TUI 控制类命令不注册，`skill:` 已由技能缝承载——`:12-17` 头注）。
 
-### 6.4 注册点
+### 7.4 注册点
 
-所有 provider 与命令都在 `src/index.ts` 按引擎挂载：claude 命令 + provider（`src/index.ts:335-356`）、codex provider（`:366-368`）、pi provider（`:379-381`）、kimi 命令 + provider（`:389-410`）。宿主 `commands` / `skills` 服务都以最小形状结构取（`ctx.get`），缺失时静默跳过。
+所有 provider 与命令都在 `src/index.ts` 按引擎挂载：claude 命令 + provider（`src/index.ts:536-557`）、codex provider（`:567-569`）、pi provider（`:580-582`）、kimi 命令 + provider（`:593-614`）。宿主 `commands` / `skills` 服务都以最小形状结构取（`ctx.get`），缺失时静默跳过。
 
-## 7. 改动影响矩阵
+## 8. 改动影响矩阵
 
 | 改动点 | 直接受影响 | 必须跑的测试 |
 |---|---|---|
 | `prompt.ts` 序列化格式 | 四个引擎的全部 prompt | `tests/engine-claude/mapping.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `permission-knobs.ts` 读取/枚举 | 四个引擎每次查询的权限立场 | 四个 `tests/engine-*/permission.spec.ts`（claude 侧直接 import 读者，`tests/engine-claude/permission.spec.ts:8`） |
-| `ownership.ts` 生命周期/竞速 | 四个 loop 的创建/卸载正确性 | 四个 `tests/engine-*/loop.spec.ts` |
+| `ownership.ts` 生命周期/竞速 | 四个 loop 的创建/卸载正确性 | kimi/pi 的 `tests/engine-*/loop.spec.ts` + claude/codex 的 `tests/engine-*/index.spec.ts` |
+| `inbox.ts` 折叠与落盘 | 四个引擎的收件箱语义与 `agent/inbox/spliced` 持久流 | `tests/driver-core/inbox.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
+| `assistant-stream.ts` 帧与分段压缩 | 四条流式路径的 live 帧与内嵌 stream | `tests/driver-core/assistant-stream.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
 | `skills.ts` `parseSkillFile` | claude + pi + kimi 三个 provider 的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |
 | `commands.ts` 类型/转发 | claude 命令面 + kimi 命令桥（类型复用） | `tests/commands.spec.ts`、`tests/engine-kimi/commands.spec.ts`、`tests/index.spec.ts` |
 
-## 8. 测试覆盖要点
+## 9. 测试覆盖要点
 
-- **唯一直接的 driver-core spec** 是 `tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义。改 context-files 先改这里。
+- **driver-core 的直接 spec** 有三个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。
 - `prompt.ts` 由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；没有独立的 prompt spec，新增序列化分支时应在这里补用例。
 - `permission-knobs.ts` 没有独立 spec，靠四个 permission spec 的行为断言间接覆盖；改折叠逻辑时四个 spec 都要看。
-- `ownership.ts` 由四个 loop spec 的卸载/竞速场景覆盖，源码里大量 `v8 ignore` 注释标出了理论上不可达的兜底分支——改动时不要用"删分支"来凑覆盖率，这些注释本身就是设计文档。
+- `ownership.ts` 由 kimi/pi 的 loop spec 与 claude/codex 的 index spec 的卸载/竞速场景覆盖，源码里大量 `v8 ignore` 注释标出了理论上不可达的兜底分支——改动时不要用"删分支"来凑覆盖率，这些注释本身就是设计文档。
 - `skill-inject.ts` 由四个 agent spec 的 `/name` 步进场景覆盖。
 - `tests/commands.spec.ts` 用 hoisted 的 homedir mock + 临时目录覆盖转发、frontmatter 描述回退、120 字符截断、内建冲突、悬空 frontmatter 等边界；`tests/skills.spec.ts` 覆盖两种布局、rank、CLAUDE.md 三态（有 frontmatter / 无 / 是目录）、frontmatter 解析全部边界。
-- 四个 `tests/engine-*/skills.spec.ts` 覆盖各 provider 的目录策略与环境变量覆盖（`PI_CODING_AGENT_DIR`、`KIMI_CODE_HOME`）。
+- 三个 `tests/engine-*/skills.spec.ts`（codex/pi/kimi；claude 的技能 provider 由 `tests/skills.spec.ts` 覆盖）覆盖各 provider 的目录策略与环境变量覆盖（`PI_CODING_AGENT_DIR`、`KIMI_CODE_HOME`）。
 - 全仓覆盖率门槛是 per-file 100%（`pnpm run test:coverage`，`src/client` 除外），共享层任何新分支都必须有用例或显式 `v8 ignore` 理由。
 
 ## 附：代码与注释不一致之处（本文撰写时核实）

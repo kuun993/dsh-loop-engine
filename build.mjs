@@ -29,10 +29,12 @@ function runTsc() {
   run(process.execPath, [bin, '-p', 'tsconfig.build.json'])
 }
 
-// Node-half externals: every harness package must stay a single shared
-// runtime instance (junctions point at the monorepo SOURCE dir, so esbuild's
-// node_modules-based auto-external would inline them and split the cordis
-// instance). Explicitly externalize each value import here.
+// Node-half externals: every harness package must stay a single shared runtime
+// instance. The plugin's peers resolve to the installed npm artifacts (the
+// tsconfig's empty `paths` keeps the build on that artifact plane), but
+// inlining any of them still yields two copies of a module the host also
+// loads — for cordis that splits the Context/Service identity. Explicitly
+// externalize each value import here.
 const NODE_EXTERNALS = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/schemastery',

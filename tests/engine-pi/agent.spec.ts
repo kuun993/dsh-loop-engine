@@ -5,10 +5,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
@@ -193,9 +194,11 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
-  it('streams text deltas and links the durable message to them', async () => {
+  it('streams text deltas and embeds the attempt stream in the durable message', async () => {
     const ctx = await harness()
     try {
+      const frames: AssistantStreamFrame[] = []
+      const disposeFrames = ctx.on('agent/assistant-stream', ({ frame }) => { frames.push(frame) })
       mock.eventsYield.mockReturnValue([
         { type: 'message_start', message: assistantMessage('hello world') },
         messageDelta({ type: 'text_start', contentIndex: 0 }),
@@ -212,16 +215,23 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({ surfaceOp: 'append' })
+      // The durable message embeds its exact timed stream; `assistant/chunk`
+      // log events and `sourceEventSeqs` no longer exist.
+      expect(expandAssistantStream(assistant!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'hello ' },
         { type: 'text-delta', index: 0, text: 'world' },
       ])
-      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
-      expect(assistant).toMatchObject({ sourceEventSeqs: chunks.map(event => event.seq) })
+      expect(assistant?.data.message.content).toEqual([{ type: 'text', text: 'hello world' }])
+
+      // The same attempt publishes live frames: open, one per chunk, settled.
+      expect(frames.map(frame => frame.type)).toEqual(['start', 'chunk', 'chunk', 'chunk', 'end'])
+      expect(frames.at(-1)).toMatchObject({
+        outcome: { kind: 'committed', eventType: 'assistant/message', seq: assistant!.seq },
+      })
+      disposeFrames()
     } finally {
       await ctx.fiber.dispose()
     }
@@ -978,10 +988,9 @@ describe('PiAgent skill injection', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      const chunks = agent.session.snapshotEvents().filter(
-        (event): event is Extract<typeof event, { type: 'assistant/chunk' }> => event.type === 'assistant/chunk',
-      )
-      expect(chunks.map(event => event.data.chunk)).toEqual([
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      // The durable message embeds the exact chunk sequence it streamed.
+      expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'reasoning' },
         { type: 'reasoning-delta', index: 0, text: 'a' },
         { type: 'reasoning-delta', index: 0, text: 'b' },
@@ -990,7 +999,6 @@ describe('PiAgent skill injection', () => {
         { type: 'block-start', index: 2, blockType: 'text' },
         { type: 'text-delta', index: 2, text: 'x' },
       ])
-      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'ab' },
         { type: 'reasoning', text: 'c' },

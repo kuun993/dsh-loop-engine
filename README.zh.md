@@ -23,15 +23,17 @@ dsh plugin --profile web add dsh-loop-engine
 
 ## 版本兼容
 
-`dsh-loop-engine` 与 harness **独立**版本(`1.0.0-rcN`),但通过 `peerDependencies` 绑定到特定 harness 版本;两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
+`dsh-loop-engine` 与它针对的 harness **同版本对齐**:版本号即 harness 版本加插件发布序号(`0.1.5-rc1` 针对 harness `0.1.5-rc.1`),它消费的每个 harness 包都在 `peerDependencies` 里精确钉住。两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
 
 | dsh-loop-engine | 需要 harness |
 |---|---|
-| 1.0.0-rc8 及以后 | **0.1.2-rc.1** |
+| 0.1.5-rc1 | **0.1.5-rc.1** |
+| 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 及更早 | 0.1.1-rc.2 |
 
-- **1.0.0-rc8 及以后不兼容 harness 0.1.1-rc.2 或更早版本。** 它使用 0.1.2 的持久化 seam(`SessionPersistence.create` / `open` + `SessionHandle`)、`installSection` settings API、`ToolCallId` 与 `Session.snapshotEvents()` —— 这些在更老的 harness 里都不存在。
-- 要在更老的 harness 上使用本插件,请安装与之匹配的 loop-engine 版本(例如 harness 0.1.1-rc.2 用 `npm i dsh-loop-engine@1.0.0-rc7`)。
+- **0.1.5-rc1 需要 harness 0.1.5-rc.1。** 它使用 0.1.5 的 assistant-stream 契约(`assistant/message` 内嵌精确计时的 `stream`,并禁止 `sourceEventSeqs`)、由 driver 自己实现的 `Inbox` 接口、双参数 `AgentSetup`,以及 `SessionPersistence.create` / `open` 句柄 seam。
+- `1.0.0-rc15` 及以前的版本沿用插件自己的版本序列,针对 harness `0.1.2-rc.1`,与 harness `0.1.5-rc.1` 不兼容。
+- 要在更老的 harness 上使用本插件,请安装与之匹配的版本(例如 harness 0.1.2-rc.1 用 `npm i dsh-loop-engine@1.0.0-rc15`)。
 - 每个 tag 的 GitHub Release 正文会写明它针对的 harness 版本。
 
 ## 使用方法
