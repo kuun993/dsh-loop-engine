@@ -160,7 +160,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 8.1 模型探针（pi --list-models）
 
-PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:210`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层（每个条目的 `id`/`name` 为 `provider/model` 全名，`provider` 字段为 `'pi'`）。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
+PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:210`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层：条目的 `id` 是 `provider/model` 全名（即选择后提交、并回灌子进程 `--model` 的值），`name` 是**裸模型名**，所以选择器里顶层显示的就是模型本身；`provider` 字段为 `'pi'`。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
 
 ## 9. 错误处理与已知边界
 

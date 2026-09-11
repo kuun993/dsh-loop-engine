@@ -717,7 +717,7 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
-  it('handles a reasoning item with no summary or content', async () => {
+  it('falls back to the streamed thinking when the terminal reasoning item carries neither field', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -738,6 +738,66 @@ describe('CodexAgent turn mapping', () => {
 
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(1)
+      // The terminal item said nothing, so the thinking the user already
+      // watched streaming is what the transcript keeps.
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'think' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('takes the reasoning content when the summary array is present but empty', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-s'),
+        reasoningSummaryDelta('reason-s', 'streamed'),
+        itemCompleted({ type: 'reasoning', id: 'reason-s', summary: [], content: ['body'] }),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('summary-empty-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      // Both arrays are always present and either may be empty: an empty
+      // `summary` must not shadow a populated `content`.
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'body' },
+        { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records an empty reasoning text when nothing streamed and no field carries text', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemCompleted({ type: 'reasoning', id: 'reason-quiet', summary: [], content: [] }),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('quiet-reason-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: '' },
         { type: 'text', text: 'answer' },

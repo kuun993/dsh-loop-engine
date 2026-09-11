@@ -81,6 +81,11 @@ interface HeldMessage {
   readonly stream: AssistantStreamRecord[]
 }
 
+/** First of the given arrays that actually carries text, joined; undefined when none does. */
+function nonEmptyText(parts: readonly string[] | undefined): string | undefined {
+  return parts !== undefined && parts.some(part => part.length > 0) ? parts.join('\n') : undefined
+}
+
 /** Drives one session through turn and step boundaries on Codex. */
 export class CodexAgent implements Agent {
   readonly inbox: DriverInbox
@@ -507,6 +512,13 @@ export class CodexAgent implements Agent {
         const pendingReasoning: string[] = []
         /** The exact timed chunks the pending reasoning streamed, carried by whichever message folds them in. */
         const pendingReasoningStream: AssistantStreamRecord[] = []
+        /**
+         * Reasoning text seen streaming, keyed by item id. The terminal item's
+         * `summary`/`content` arrays are authoritative, but either can arrive
+         * empty; this keeps the thinking the user already watched from being
+         * logged as nothing.
+         */
+        const streamedReasoning = new Map<string, string>()
         /** The assistant message being assembled; its chunks stream live as items complete. */
         let held: HeldMessage | undefined
         /** Whether a reasoning block has been started (block-start emitted). */
@@ -600,15 +612,28 @@ export class CodexAgent implements Agent {
                 currentStream().push({ type: 'block-start', index, blockType: 'reasoning' })
               }
               currentStream().push({ type: 'reasoning-delta', index, text: event.delta })
+              // A plan's text is not reasoning, so it is excluded from the durable
+              // fallback below even though it paints through the same block.
+              if (event.kind !== 'plan-delta') {
+                streamedReasoning.set(event.itemId, (streamedReasoning.get(event.itemId) ?? '') + event.delta)
+              }
               break
             }
             case 'item-completed': {
               const item = event.item
               if (item.type === 'reasoning') {
-                // Reasoning item completed — accumulate for the fold.
-                const summary = (item as { summary?: string[] }).summary
-                const content = (item as { content?: string[] }).content
-                const text = summary?.join('\n') ?? content?.join('\n') ?? ''
+                // Reasoning item completed — accumulate for the fold. The item
+                // always carries an id, and both terminal arrays are always
+                // present though either may be empty, so take the first one that
+                // carries text; when neither does, fall back to what streamed, so
+                // the durable thinking cannot be emptier than what the user
+                // already watched.
+                const terminal = item as { id: string; summary?: string[]; content?: string[] }
+                const text = nonEmptyText(terminal.summary)
+                  ?? nonEmptyText(terminal.content)
+                  ?? streamedReasoning.get(terminal.id)
+                  ?? ''
+                streamedReasoning.delete(terminal.id)
                 pendingReasoning.push(text)
                 // Cut the chunks this reasoning streamed: they belong to the
                 // message that folds them in, not to the one before it.
