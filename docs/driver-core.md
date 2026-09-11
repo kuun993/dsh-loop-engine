@@ -49,7 +49,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 四个 agent 的调用方式逐字一致——先取 `this.session.deriveMessages()`，再 `serializeHistory(history)`，空 prompt 抛错（v8-ignore 的兜底分支）：
 
 - `src/engine-claude/agent.ts:472-477`
-- `src/engine-codex/agent.ts:466`
+- `src/engine-codex/agent.ts:496`
 - `src/engine-pi/agent.ts:545-546`
 - `src/engine-kimi/agent.ts:508-513`
 
@@ -76,7 +76,7 @@ dsh web 的权限预设（只读 / 工作区可写 / 完全放开 × ask / never
 | 引擎 | 映射位置 | full-access | ask | 无旋钮/其他 |
 |---|---|---|---|---|
 | claude | `src/engine-claude/permission.ts:33-37` | `bypass` | `ask`（转发 dsh 审批缝） | `deny`（无人值守默认全拒） |
-| codex | `src/engine-codex/permission.ts:39-46` | `danger-full-access` + `never` | `workspace-write` + `on-request` | `read-only` + `never`（`DEFAULT_CODEX_PERMISSION`，`:26-29`） |
+| codex | `src/engine-codex/permission.ts:41-48` | `danger-full-access` + `never` | `workspace-write` + `on-request` | `read-only` + `never`（`DEFAULT_CODEX_PERMISSION`，`:28-31`） |
 | pi | `src/engine-pi/permission.ts:63-75` | 不剪 `--tools`，不包沙箱 | **降级为 read-only 拒绝**（pi 无审批回调） | `read-only` + 只读工具集（`:32-35`） |
 | kimi | `src/engine-kimi/permission.ts:30-31` | 不查 sandbox 旋钮 | `ask` → 拒绝 | 其他（`never`/无旋钮）→ 自动批准 |
 
@@ -147,13 +147,13 @@ harness 0.1.5 把两件原本由 `dsh-agent` 提供的东西收了回去：`Inbo
 
 | 用途 | claude | codex | pi | kimi |
 |---|---|---|---|---|
-| 构造 `DriverInbox` | agent.ts:120-124 | agent.ts:119-123 | agent.ts:133-137 | agent.ts:130-134 |
-| 开一次流式尝试 | agent.ts:512-524 | agent.ts:532-544 | agent.ts:591-603 | agent.ts:532-544 |
-| chunk 入流 | agent.ts:535-543 | agent.ts:596-621 | agent.ts:740-747 | agent.ts:601-619 |
-| 写 `assistant/message` 并 `settle` | agent.ts:587-593 | agent.ts:558-566 | agent.ts:648-656 | agent.ts:681-688 |
-| 段尾 `abandon()` | agent.ts:659-662 | agent.ts:723-726 | agent.ts:823-826 | agent.ts:567-570 |
+| 构造 `DriverInbox` | agent.ts:120-124 | agent.ts:126-130 | agent.ts:133-137 | agent.ts:130-134 |
+| 开一次流式尝试 | agent.ts:512-524 | agent.ts:562-574 | agent.ts:591-603 | agent.ts:532-544 |
+| chunk 入流 | agent.ts:535-543 | agent.ts:626-651 | agent.ts:740-747 | agent.ts:601-619 |
+| 写 `assistant/message` 并 `settle` | agent.ts:587-593 | agent.ts:588-596 | agent.ts:648-656 | agent.ts:681-688 |
+| 段尾 `abandon()` | agent.ts:659-662 | agent.ts:754-757 | agent.ts:823-826 | agent.ts:567-570 |
 
-kimi 是唯一把 flush 抽成独立方法、并把 `currentStream` 作为参数下传的引擎（`src/engine-kimi/agent.ts:532-544`、`:658-689`）。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀，plan item 结束时也切一刀但这段 chunk 直接丢弃（plan 没有内容块），`HeldMessage.stream` 装的就是这一段自己的 chunk（`src/engine-codex/agent.ts:645-660`）；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
+kimi 是唯一把 flush 抽成独立方法、并把 `currentStream` 作为参数下传的引擎（`src/engine-kimi/agent.ts:532-544`、`:658-689`）。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀，plan item 结束时也切一刀但这段 chunk 直接丢弃（plan 没有内容块），`HeldMessage.stream` 装的就是这一段自己的 chunk（`src/engine-codex/agent.ts:675-690`）；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
 
 ### 改它会波及谁
 

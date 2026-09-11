@@ -30,6 +30,7 @@ type RunStreamed = (
 const mock = vi.hoisted(() => ({
   constructed: [] as Array<{ threadParams: Record<string, unknown> }>,
   runStreamed: vi.fn<RunStreamed>(),
+  requestHandler: undefined as undefined | ((method: string, params: unknown) => Promise<{ result?: unknown; error?: { code: number; message: string } }>),
 }))
 
 vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
@@ -40,6 +41,9 @@ vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
       turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
       turnInterrupt: async () => ({}),
       onNotification: () => {},
+      onRequest: (handler: (method: string, params: unknown) => Promise<{ result?: unknown; error?: { code: number; message: string } }>) => {
+        mock.requestHandler = handler
+      },
       onStderr: () => {},
       dispose: () => {},
     }),
@@ -66,6 +70,7 @@ vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
 beforeEach(() => {
   mock.constructed.length = 0
   mock.runStreamed.mockReset()
+  mock.requestHandler = undefined
 })
 
 function stream(events: AppServerEvent[]): RunStreamed {
@@ -1589,6 +1594,127 @@ describe('CodexAgent skill injection', () => {
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('CodexAgent interactive approvals', () => {
+  /** Drive one short turn so the lazily-created client registers its request handler. */
+  async function settle(ctx: Context): Promise<void> {
+    mock.runStreamed.mockImplementation(() => stream([
+      itemStarted('agentMessage', 'msg-a'),
+      agentDelta('msg-a', 'ok'),
+      itemCompleted(agentMessage('ok')),
+      turnCompleted(),
+    ]))
+    const { agent } = await ctx.agents.create({
+      sessionId: SessionId('approval-s'),
+      meta: { cwd: process.cwd() },
+    })
+    agent.followup(message('go'))
+    await agent.whenIdle()
+  }
+
+  it('answers a command approval from the dsh approval seam', async () => {
+    const ctx = await harness()
+    try {
+      let outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' = 'allowed-once'
+      const requests: Array<{ toolName: string; reason?: string }> = []
+      ctx.provide('approval', {
+        request: (req: { toolName: string; reason?: string }) => {
+          requests.push(req)
+          return Promise.resolve(outcome)
+        },
+      })
+      await settle(ctx)
+
+      expect(mock.requestHandler).toBeDefined()
+      expect(await mock.requestHandler!('item/commandExecution/requestApproval', { itemId: 'c', command: 'ls -la' }))
+        .toEqual({ result: { decision: 'accept' } })
+      expect(requests[0]).toMatchObject({ toolName: 'command', reason: expect.stringContaining('ls -la') })
+
+      outcome = 'rejected'
+      expect(await mock.requestHandler!('item/commandExecution/requestApproval', { itemId: 'c', command: 'rm -rf /' }))
+        .toEqual({ result: { decision: 'decline' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('grants a permissions request only on allow', async () => {
+    const ctx = await harness()
+    try {
+      let outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' = 'allowed-once'
+      ctx.provide('approval', {
+        request: () => Promise.resolve(outcome),
+      })
+      await settle(ctx)
+
+      const requested = { network: { enabled: true } }
+      expect(await mock.requestHandler!('item/permissions/requestApproval', { permissions: requested }))
+        .toEqual({ result: { permissions: requested, scope: 'turn' } })
+
+      outcome = 'cancelled'
+      expect(await mock.requestHandler!('item/permissions/requestApproval', { permissions: requested }))
+        .toEqual({ result: { permissions: {}, scope: 'turn' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails closed to a decline when no approval service is mounted', async () => {
+    const ctx = await harness()
+    try {
+      await settle(ctx)
+      expect(await mock.requestHandler!('item/fileChange/requestApproval', {}))
+        .toEqual({ result: { decision: 'decline' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails unknown approval methods with method-not-found', async () => {
+    const ctx = await harness()
+    try {
+      ctx.provide('approval', { request: () => Promise.resolve('allowed-once') })
+      await settle(ctx)
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {}))
+        .toEqual({ error: { code: -32601, message: 'Method not found' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('forwards the running turn signal to the approval seam', async () => {
+    const ctx = await harness()
+    try {
+      let receivedSignal: AbortSignal | undefined
+      ctx.provide('approval', {
+        request: (req: { signal?: AbortSignal }) => {
+          receivedSignal = req.signal
+          return Promise.resolve('allowed-once')
+        },
+      })
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      mock.runStreamed.mockImplementation(async function* () {
+        await gate
+        yield turnCompleted()
+      })
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('running-approval-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await vi.waitFor(() => { expect(mock.requestHandler).toBeDefined() })
+
+      expect(await mock.requestHandler!('item/commandExecution/requestApproval', { itemId: 'c', command: 'ls' }))
+        .toEqual({ result: { decision: 'accept' } })
+      expect(receivedSignal).toBeInstanceOf(AbortSignal)
+      release()
+      await agent.whenIdle()
     } finally {
       await ctx.fiber.dispose()
     }

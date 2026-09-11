@@ -18,6 +18,7 @@ interface FakeProcess extends EventEmitter {
 }
 
 let fakeProcess: FakeProcess
+const written: string[] = []
 
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(() => fakeProcess),
@@ -29,9 +30,11 @@ import { AppServerClient } from '../../../src/engine-codex/appserver/client.ts'
 
 beforeEach(() => {
   mocks.spawn.mockClear()
+  written.length = 0
   const proc = new EventEmitter() as FakeProcess
   proc.stdin = new Writable({
     write: (chunk, _encoding, callback) => {
+      written.push(chunk.toString())
       // Parse the request and auto-respond with a mock result
       try {
         const msg = JSON.parse(chunk.toString().trim())
@@ -116,6 +119,104 @@ describe('AppServerClient', () => {
       params: { itemId: 'msg-1', delta: 'hi' },
     })
     client.dispose()
+  })
+
+  it('answers a server-initiated request through the registered handler', async () => {
+    const client = await AppServerClient.create()
+    const handled: Array<{ method: string; params: unknown; id: number | string }> = []
+    client.onRequest((method, params, id) => {
+      handled.push({ method, params, id })
+      return { result: { decision: 'accept' } }
+    })
+
+    fakeProcess.stdout.push(JSON.stringify({
+      id: 'req-1',
+      method: 'item/commandExecution/requestApproval',
+      params: { itemId: 'item-1', command: 'ls -la' },
+    }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(handled).toEqual([{
+      method: 'item/commandExecution/requestApproval',
+      params: { itemId: 'item-1', command: 'ls -la' },
+      id: 'req-1',
+    }])
+    expect(written.some(line => line.trim() === JSON.stringify({ id: 'req-1', result: { decision: 'accept' } }))).toBe(true)
+    client.dispose()
+  })
+
+  it('answers an unhandled server request with method not found', async () => {
+    const client = await AppServerClient.create()
+    fakeProcess.stdout.push(JSON.stringify({ id: 7, method: 'unknown/method', params: {} }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(written.some(line => line.trim() === JSON.stringify({
+      id: 7,
+      error: { code: -32601, message: 'Method not found' },
+    }))).toBe(true)
+    client.dispose()
+  })
+
+  it('answers with an internal error when the request handler throws', async () => {
+    const client = await AppServerClient.create()
+    client.onRequest(() => { throw new Error('boom') })
+    fakeProcess.stdout.push(JSON.stringify({ id: 'req-x', method: 'x', params: {} }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(written.some(line => line.trim() === JSON.stringify({
+      id: 'req-x',
+      error: { code: -32603, message: 'boom' },
+    }))).toBe(true)
+    client.dispose()
+  })
+
+  it('answers with a generic internal error when the handler throws a non-Error', async () => {
+    const client = await AppServerClient.create()
+    client.onRequest(() => { throw 'plain string' })
+    fakeProcess.stdout.push(JSON.stringify({ id: 'req-y', method: 'y', params: {} }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(written.some(line => line.trim() === JSON.stringify({
+      id: 'req-y',
+      error: { code: -32603, message: 'internal error' },
+    }))).toBe(true)
+    client.dispose()
+  })
+
+  it('ignores an id-only message with a non-number id', async () => {
+    const client = await AppServerClient.create()
+    fakeProcess.stdout.push(JSON.stringify({ id: 'not-ours', result: {} }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(written.some(line => line.includes('not-ours'))).toBe(false)
+    client.dispose()
+  })
+
+  it('ignores a line that is neither a request, response, nor notification', async () => {
+    const client = await AppServerClient.create()
+    const notifications: unknown[] = []
+    client.onNotification((method, params) => { notifications.push({ method, params }) })
+    fakeProcess.stdout.push(JSON.stringify({ unrelated: true }) + '\n')
+
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(notifications).toHaveLength(0)
+    client.dispose()
+  })
+
+  it('does not write a reply when the client is disposed before the handler resolves', async () => {
+    const client = await AppServerClient.create()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    client.onRequest(async () => {
+      await gate
+      return { result: {} }
+    })
+    fakeProcess.stdout.push(JSON.stringify({ id: 'late', method: 'm', params: {} }) + '\n')
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    client.dispose()
+    release()
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(written.some(line => line.includes('late'))).toBe(false)
   })
 
   it('rejects pending requests when the process exits', async () => {

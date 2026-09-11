@@ -5,9 +5,11 @@
  * the source of truth and the thread input is a pure serialization of it.
  * The app-server streams token-level deltas via `item/agentMessage/delta` and
  * `item/reasoning/summaryTextDelta`, so the visible partial paints
- * progressively as the model generates — not all at once at the end. It offers
- * no interactive approval callback, so permissions are folded declaratively
- * into each thread's `sandboxMode`/`approvalPolicy`.
+ * progressively as the model generates — not all at once at the end. Native
+ * approval requests (the `item/…/requestApproval` family) are server-initiated
+ * requests, not notifications: the client answers them through the dsh approval
+ * seam (`agent/requestPermission` → `ctx.approval`), while the thread still
+ * starts with a declarative `sandboxMode`/`approvalPolicy` stance.
  *
  * @module dsh-loop-engine/engine-codex/agent
  */
@@ -35,8 +37,8 @@ import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
-import { resolveSessionPermission, type CodexPermission } from './permission.ts'
-import { AppServerClient } from './appserver/client.ts'
+import { approvalReason, approvalToolName, resolveApprovalRequest, resolveSessionPermission, type ApprovalOutcome, type CodexPermission } from './permission.ts'
+import { AppServerClient, type RequestOutcome } from './appserver/client.ts'
 import { AppServerThread } from './appserver/thread.ts'
 import { mapCommandExecution, mapFileChange, mapMcpToolCall, mapUsage } from './appserver/mapping.ts'
 import type { ThreadStartParams, TurnInput } from './appserver/types.ts'
@@ -56,6 +58,11 @@ export const PROVIDER = 'codex'
  * mirrored into the header (it never drives a query).
  */
 const NATIVE_MODEL_LABEL = 'codex-native'
+
+/** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
+interface ApprovalService {
+  request(req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<ApprovalOutcome>
+}
 
 /* jscpd:ignore-start -- mirrors the Claude Code driver; the two engines share the default agent-loop driver's phase machine. */
 type Phase =
@@ -136,7 +143,30 @@ export class CodexAgent implements Agent {
   private async appServerClient(): Promise<AppServerClient> {
     if (this.appServer !== undefined && !this.appServer.closed) return this.appServer
     this.appServer = await AppServerClient.create()
+    // Answer server-initiated requests (Codex approvals under an `ask` policy)
+    // through the dsh approval seam; a request with no answer stalls the turn.
+    this.appServer.onRequest((method, params) => this.answerApproval(method, params))
     return this.appServer
+  }
+
+  /** Resolve one native Codex approval request through the dsh approval seam. */
+  private async answerApproval(method: string, params: unknown): Promise<RequestOutcome> {
+    const outcome = await this.requestApproval(method, params)
+    return resolveApprovalRequest(method, params, outcome)
+  }
+
+  /** Ask the dsh approval seam; fail closed to a denial when it is absent. */
+  private async requestApproval(method: string, params: unknown): Promise<ApprovalOutcome> {
+    const approval = this.loopCtx.get('approval') as ApprovalService | undefined
+    if (approval === undefined) return 'unavailable'
+    const phase = this.phase
+    const signal = phase.kind === 'running' ? phase.abort.signal : undefined
+    return approval.request({
+      agent: this,
+      toolName: approvalToolName(method),
+      reason: approvalReason(method, params),
+      ...(signal === undefined ? {} : { signal }),
+    })
   }
 
   get status(): AgentStatus {

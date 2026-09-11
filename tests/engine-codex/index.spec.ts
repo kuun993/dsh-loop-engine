@@ -39,6 +39,7 @@ vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
       turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
       turnInterrupt: async () => ({}),
       onNotification: () => {},
+      onRequest: () => {},
       onStderr: () => {},
       dispose: () => {},
     }),
