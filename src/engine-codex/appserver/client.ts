@@ -25,6 +25,18 @@ import type {
 /** Callback for receiving server notifications. */
 export type NotificationHandler = (method: string, params: unknown) => void
 
+/** A JSON-RPC reply the client writes back for one inbound server request. */
+export type RequestOutcome =
+  | { readonly result: unknown }
+  | { readonly error: { readonly code: number; readonly message: string } }
+
+/** Callback answering one server-initiated JSON-RPC request. */
+export type RequestHandler = (
+  method: string,
+  params: unknown,
+  id: number | string,
+) => RequestOutcome | Promise<RequestOutcome>
+
 /** Callback for receiving raw stderr lines from the server process. */
 export type StderrHandler = (line: string) => void
 
@@ -42,6 +54,7 @@ export class AppServerClient {
   private reqId = 1
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   private notificationHandler: NotificationHandler | undefined
+  private requestHandler: RequestHandler | undefined
   private stderrHandler: StderrHandler | undefined
   private disposed = false
 
@@ -84,6 +97,11 @@ export class AppServerClient {
   /** Set the notification handler for streaming events. */
   onNotification(handler: NotificationHandler): void {
     this.notificationHandler = handler
+  }
+
+  /** Set the handler for server-initiated requests (e.g. approvals). */
+  onRequest(handler: RequestHandler): void {
+    this.requestHandler = handler
   }
 
   /** Set the stderr handler for server log lines. */
@@ -149,14 +167,26 @@ export class AppServerClient {
   /** Handle one line of stdout from the server. */
   private handleLine(line: string): void {
     if (!line.trim()) return
-    let obj: { id?: number; method?: string; result?: unknown; error?: { code: number; message: string }; params?: unknown }
+    let obj: {
+      id?: number | string
+      method?: string
+      result?: unknown
+      error?: { code: number; message: string }
+      params?: unknown
+    }
     try {
       obj = JSON.parse(line)
     } catch {
       return // non-JSON line, ignore
     }
+    if (obj.id !== undefined && obj.method !== undefined) {
+      // Server -> client request: it expects a reply, never a notification.
+      void this.answerRequest(obj.method, obj.params, obj.id)
+      return
+    }
     if (obj.id !== undefined) {
-      // Response to a request
+      // Response to one of our requests. Our request ids are numbers only.
+      if (typeof obj.id !== 'number') return
       const pending = this.pending.get(obj.id)
       if (pending) {
         this.pending.delete(obj.id)
@@ -166,10 +196,28 @@ export class AppServerClient {
           pending.resolve(obj.result)
         }
       }
+      return
     }
     if (obj.method !== undefined) {
       // Notification
       this.notificationHandler?.(obj.method, obj.params)
     }
+  }
+
+  /** Resolve one inbound server request and write the JSON-RPC reply to stdin. */
+  private async answerRequest(method: string, params: unknown, id: number | string): Promise<void> {
+    let outcome: RequestOutcome
+    try {
+      outcome = this.requestHandler !== undefined
+        ? await this.requestHandler(method, params, id)
+        : { error: { code: -32601, message: 'Method not found' } }
+    } catch (error: unknown) {
+      outcome = { error: { code: -32603, message: error instanceof Error ? error.message : 'internal error' } }
+    }
+    if (this.disposed) return
+    const reply = 'result' in outcome
+      ? { id, result: outcome.result }
+      : { id, error: outcome.error }
+    this.process.stdin?.write(JSON.stringify(reply) + '\n')
   }
 }
