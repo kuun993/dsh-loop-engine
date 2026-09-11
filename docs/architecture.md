@@ -139,12 +139,12 @@ settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 
 插件的应对是在引擎挂载期间把该标签注册成一条**占位 provider 路由**（`src/provider-route.ts` 的 `HostedEngineRouteAdapter`，接线在 `mountProviderRoute`，`src/index.ts:366-396`）：
 
-- **目录零污染**：占位 adapter 继承默认的空 `listModels`，目录构建会丢弃不广告任何模型的组（主仓 `packages/api/session-controller/src/catalog.ts:63-64` 的 `.filter(group => group.models.length > 0)`），模型选择器看不到这条路由；`stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`——托管引擎原生持有模型，真有查询路由到这里就是接线 bug。
+- **目录零污染（pi 除外）**：占位 adapter 默认继承空 `listModels`，目录构建会丢弃不广告任何模型的组（主仓 `packages/api/session-controller/src/catalog.ts:63-64` 的 `.filter(group => group.models.length > 0)`），选择器看不到未注入目录的这条路由。只有 **pi 例外**——`mountProviderRoute` 给它注入模型探针目录（`src/index.ts:386`，详见 `docs/engine-pi.md` §8.1），所以选择器会列出 pi 的模型；`stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`——托管引擎原生持有模型，真有查询路由到这里就是接线 bug。
 - **生命周期跟随引擎**：`mountEngine` 注册（`src/index.ts:622`），`unmountEngine` 与插件 dispose 经 `releaseRoute` 回收（`src/index.ts:351-358、633、648`）。切回 `in-process` 后，带着托管 header 的旧会话再发 prompt 会被拒——这是正确语义：那些会话本就无法在 in-process loop 下继续。
 - **llm 服务缺席时有界重试**（30×100ms，与 preset 默认值的 attach 竞争同款，`src/index.ts:334-335、380-382`）：web profile 里 llm 是更靠前的 composition 行，但 fiber 启动顺序不是契约，所以注册路由要等注册表就绪。⚠️ 主仓 0.1.5 的 `routeServed` 改成**无条件**查 `ctx.llm.listProviders()`（`packages/api/session-controller/src/commands.ts:653-655`），0.1.2 时代的"没有 llm 服务就直接放行"兜底（`api-proxy.ts:1774-1775`）已不存在——完全没有 llm 服务的极简 composition 下的行为需按新代码重新评估。
 - **幂等与冲突**：同一引擎的挂载重入（§3.3 的槽位重试会再次进 `mountEngine`）靠 `routeEngine + routeHandle` 跳过（`src/index.ts:375`）；部署方自己的 adapter 已占该标签时记 warn 跳过，且卸载不会回收不属于自己的路由（`src/index.ts:389-396`）。
 
-行为钉在 `describe('apply provider route')`（`tests/index.spec.ts:851` 起）与 `tests/provider-route.spec.ts`。
+行为钉在 `describe('apply provider route')`（`tests/index.spec.ts:853` 起）与 `tests/provider-route.spec.ts`。
 
 ## 4. settings 段与 web UI
 

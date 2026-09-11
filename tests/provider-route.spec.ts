@@ -78,8 +78,8 @@ describe('HostedEngineRouteAdapter with a model catalog source', () => {
       'deepseek/deepseek-v4-pro',
     ])
     expect(models.map(m => m.name)).toEqual([
-      'anthropic/claude-sonnet-4-6',
-      'deepseek/deepseek-v4-pro',
+      'claude-sonnet-4-6',
+      'deepseek-v4-pro',
     ])
     // A provider-group with non-empty models appears in the catalog.
     expect(llm.listProviders()).toContainEqual({ id: 'pi', name: 'pi' })

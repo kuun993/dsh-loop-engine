@@ -7,8 +7,9 @@
  * host derives a session's model selection from that header and refuses a turn
  * whose provider no registered adapter serves, so without a placeholder route
  * the SECOND prompt of every hosted session fails with `model-unavailable`.
- * The placeholder serves the label while advertising no models; catalog groups
- * that advertise nothing are dropped, so the model picker is unchanged.
+ * The placeholder serves the label and advertises no models unless a deployment
+ * injects a catalog (only `pi` does, from its model probe); catalog groups that
+ * advertise nothing are dropped, so the picker is otherwise unchanged.
  *
  * @module dsh-loop-engine/provider-route
  */
@@ -42,10 +43,11 @@ export interface HostedEngineRouteAdapterOptions {
 
 /**
  * Placeholder adapter serving one hosted engine's provider route label. It
- * inherits the empty catalog and default metadata (the engine's model is not a
- * harness-selectable endpoint), and {@link stream} fails loud: a call reaching
- * it means a real model query was routed to an engine that owns its model
- * natively — a wiring bug, not a request to serve.
+ * advertises the injected catalog when a deployment provides one and stays
+ * empty otherwise (the engine's model is not itself a harness-selectable
+ * endpoint), and {@link stream} fails loud: a call reaching it means a real
+ * model query was routed to an engine that owns its model natively — a wiring
+ * bug, not a request to serve.
  */
 export class HostedEngineRouteAdapter extends LlmAdapter {
   /**
@@ -59,13 +61,20 @@ export class HostedEngineRouteAdapter extends LlmAdapter {
     super()
   }
 
-  /** Advertise the injected Pi models (if any) under this route's provider label. */
+  /**
+   * Advertise the injected Pi models (if any) under this route's provider label.
+   *
+   * The model is what the picker shows at the top level, so `name` is the bare
+   * model; the `provider/model` composite stays the submitted `id`, which is
+   * both what the engine receives as `--model` and how the driver validates a
+   * session-selected model against its catalog.
+   */
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     const catalog = this.options.listModels?.() ?? []
     return catalog.map(entry => ({
       provider: this.label,
       id: `${entry.provider}/${entry.model}`,
-      name: `${entry.provider}/${entry.model}`,
+      name: entry.model,
     }))
   }
 
