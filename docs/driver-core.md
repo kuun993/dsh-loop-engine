@@ -151,9 +151,9 @@ harness 0.1.5 把两件原本由 `dsh-agent` 提供的东西收了回去：`Inbo
 | 开一次流式尝试 | agent.ts:512-524 | agent.ts:520-532 | agent.ts:591-603 | agent.ts:532-544 |
 | chunk 入流 | agent.ts:535-543 | agent.ts:584-604 | agent.ts:740-747 | agent.ts:601-619 |
 | 写 `assistant/message` 并 `settle` | agent.ts:587-593 | agent.ts:546-554 | agent.ts:648-656 | agent.ts:681-688 |
-| 段尾 `abandon()` | agent.ts:659-662 | agent.ts:691-694 | agent.ts:823-826 | agent.ts:567-570 |
+| 段尾 `abandon()` | agent.ts:659-662 | agent.ts:699-702 | agent.ts:823-826 | agent.ts:567-570 |
 
-kimi 是唯一把 flush 抽成独立方法、并把 `currentStream` 作为参数下传的引擎（`src/engine-kimi/agent.ts:532-544`、`:658-689`）。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀，`HeldMessage.stream` 装的就是这一段自己的 chunk（`src/engine-codex/agent.ts:613-628`）；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
+kimi 是唯一把 flush 抽成独立方法、并把 `currentStream` 作为参数下传的引擎（`src/engine-kimi/agent.ts:532-544`、`:658-689`）。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀，plan item 结束时也切一刀但这段 chunk 直接丢弃（plan 没有内容块），`HeldMessage.stream` 装的就是这一段自己的 chunk（`src/engine-codex/agent.ts:621-636`）；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
 
 ### 改它会波及谁
 

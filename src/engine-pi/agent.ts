@@ -62,17 +62,6 @@ const NATIVE_MODEL_LABEL = 'pi-native'
 /** CLI flag for the tool allowlist, derived from the resolved sandbox stance. */
 const TOOLS_FLAG = '--tools'
 
-/** Whether two spawn specs describe the same Pi child (so the client can be reused). */
-function specsEqual(a: PiSpawnSpec | undefined, b: PiSpawnSpec): boolean {
-  /* v8 ignore start -- specsEqual only runs once a client exists, so its lastSpec is always set */
-  /* v8 ignore next -- see above */
-  if (a === undefined) return false      /* v8 ignore stop */
-  return a.cwd === b.cwd
-    && a.env === b.env
-    && a.argv.length === b.argv.length
-    && a.argv.every((value, index) => value === b.argv[index])
-}
-
 /* jscpd:ignore-start -- mirrors the Codex driver; the two engines share the default agent-loop driver's phase machine. */
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -114,10 +103,8 @@ export class PiAgent implements Agent {
   /** Agent-lifecycle-local counter naming each streamed attempt. */
   private streamAttempts = 0
 
-  /** Lazily created RPC client, reused across steps and released on scope teardown. */
+  /** This step's RPC child; released by the step teardown and the scope teardown. */
   private rpc: PiRpcClient | undefined
-  /** The spawn spec the cached client was built from; a change forces a respawn. */
-  private lastSpec: PiSpawnSpec | undefined
 
   constructor(
     private loopCtx: Context,
@@ -146,14 +133,14 @@ export class PiAgent implements Agent {
     }, 'pi.rpcClient()')
   }
 
-  /** Return the cached RPC client, respawning when the spec or process changed. */
-  private async rpcClient(cwd: string): Promise<PiRpcClient> {
-    const spec = this.spawnSpec(cwd)
-    if (this.rpc !== undefined && !this.rpc.closed && specsEqual(this.lastSpec, spec)) return this.rpc
-    this.rpc?.dispose()
-    const client = PiRpcClient.create(spec, this.spawn)
+  /**
+   * Open this step's RPC child. The Pi RPC process is single-session, so a step
+   * never reuses one: the step teardown disposes it and the next step respawns
+   * a fresh child.
+   */
+  private rpcClient(cwd: string): PiRpcClient {
+    const client = PiRpcClient.create(this.spawnSpec(cwd), this.spawn)
     this.rpc = client
-    this.lastSpec = spec
     return client
   }
 
@@ -601,7 +588,7 @@ export class PiAgent implements Agent {
         }
         return live
       }
-      const client = await this.rpcClient(cwd)
+      const client = this.rpcClient(cwd)
       signal.throwIfAborted()
       await client.newSession()
       client.clearEvents()

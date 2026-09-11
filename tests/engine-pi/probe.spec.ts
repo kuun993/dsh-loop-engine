@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { Readable, Writable } from 'node:stream'
 import { parsePiModelList, probePiModels } from '../../src/engine-pi/probe.ts'
 import type { PiProcess, PiSpawnSpec } from '../../src/engine-pi/rpc/client.ts'
 import type { PiModelEntry } from '../../src/engine-pi/probe.ts'
@@ -111,6 +112,38 @@ describe('probePiModels', () => {
     const models = await probePiModels('/abs/path/pi', spawn)
     expect(models).toContainEqual({ provider: 'stdout-model', model: 'one' })
     expect(models).toContainEqual({ provider: 'stderr-model', model: 'two' })
+  })
+
+  it('parses the model table emitted on the child STDOUT', async () => {
+    // pi normally dumps `--list-models` on STDERR, but the probe merges both
+    // streams and parses the combined text. Distinct per-stream handler maps
+    // are required here: the shared-map fixtures above register the stderr
+    // handler last, so only ever reach that one.
+    const handlers: Record<'stdout' | 'stderr', Map<string, (arg?: unknown) => void>> = {
+      stdout: new Map(),
+      stderr: new Map(),
+    }
+    const instrument = (name: 'stdout' | 'stderr'): Readable => ({
+      on: (event: string, cb: (arg?: unknown) => void) => { handlers[name].set(event, cb) },
+      setEncoding: vi.fn(),
+    }) as unknown as Readable
+    const spawn = vi.fn((): PiProcess => ({
+      stdin: { write: vi.fn(), end: vi.fn() } as unknown as Writable,
+      stdout: instrument('stdout'),
+      stderr: instrument('stderr'),
+      onExit: (handler: (code: number | null) => void) => { void handler(0) },
+      terminate: vi.fn(),
+    }))
+
+    const models = probePiModels('/abs/path/pi', spawn)
+    // collectOutput registers both data/close handlers synchronously, so the
+    // child's output can be delivered before the promise is awaited.
+    handlers.stdout.get('data')?.('provider   model\nanthropic  claude-opus-4-7\n')
+    handlers.stderr.get('close')?.(undefined)
+    handlers.stdout.get('close')?.(undefined)
+
+    await expect(models).resolves.toEqual([{ provider: 'anthropic', model: 'claude-opus-4-7' }])
+    expect(spawn).toHaveBeenCalledTimes(1)
   })
 
   it('returns an empty array when the probe fails (non-zero exit) without throwing', async () => {

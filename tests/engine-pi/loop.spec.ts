@@ -149,6 +149,37 @@ describe('PiLoop catalog probe', () => {
     }
   })
 
+  it('leaves the holder empty and still mounts when the probe fails', async () => {
+    // A handle whose exit seam throws while the probe wires its exit hook, so
+    // `probePiModels` rejects instead of resolving to an empty catalog. The
+    // loop's failure arm must swallow that and keep the engine mounted.
+    const brokenExitHandle = (): SubprocessHandle => ({
+      ...fakeHandle(),
+      get done(): never {
+        throw new Error('exit seam unavailable')
+      },
+    } as SubprocessHandle)
+    const spawn = vi.fn((spec: unknown) => {
+      const sub = spec as { argv: string[] }
+      return sub.argv.includes('--list-models') ? brokenExitHandle() : fakeHandle()
+    })
+    const ctx = await loopCtx(spawn)
+    try {
+      // A seeded entry proves the failure arm actually cleared the catalog.
+      const holder: { entries: readonly PiModelEntry[] } = { entries: [{ provider: 'stale', model: 'stale' }] }
+      const loop = new PiLoop(ctx, { piCatalogHolder: holder })
+      await vi.waitFor(() => { expect(holder.entries).toEqual([]) })
+      // The mount survived the failed probe: the factory is live and carries
+      // the same resolved configuration the constructor was handed.
+      expect(ctx.get('agentLoopPi')?.config).toEqual(loop.config)
+      expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+        argv: expect.arrayContaining(['--list-models', '--mode', 'rpc']),
+      }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('leaves the holder empty when no holder is provided (probe is skipped)', async () => {
     const spawn = vi.fn(() => fakeHandle())
     const ctx = await loopCtx(spawn)

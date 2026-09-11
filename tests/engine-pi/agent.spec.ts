@@ -4,14 +4,17 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Readable, Writable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
+import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
+import type { PiModelEntry } from '../../src/engine-pi/probe.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
 
 /** Local plugin wrapper: mount constructs the Pi loop factory (the engine module is a library, not a Cordis plugin). */
@@ -742,6 +745,101 @@ describe('PiAgent session model selection override', () => {
 
       const argv = mock.created[0]?.spec.argv as string[]
       expect(argv).toContain('new/model')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('PiAgent model catalog validation', () => {
+  /** The aligned `pi --list-models` table the stubbed probe child emits. */
+  const CATALOG_TABLE = 'provider   model\nanthropic  claude-sonnet-4-6\n'
+  /** The catalog that table parses to, i.e. what the probe publishes. */
+  const CATALOG: readonly PiModelEntry[] = [{ provider: 'anthropic', model: 'claude-sonnet-4-6' }]
+
+  /** A subprocess handle for a probe child that emits `output`, closes both streams, and exits 0. */
+  function probeHandle(output: string): SubprocessHandle {
+    const stdout = new Readable({ read: () => {} })
+    const stderr = new Readable({ read: () => {} })
+    queueMicrotask(() => {
+      stdout.push(output)
+      stdout.push(null)
+      stderr.push(null)
+    })
+    return {
+      pid: 1,
+      stdin: new Writable({ write: (_chunk, _encoding, callback) => { callback() } }),
+      stdout,
+      stderr,
+      collected: {} as SubprocessHandle['collected'],
+      done: Promise.resolve({ exitCode: 0, signal: null }),
+      terminate: vi.fn(),
+      waitForExit: vi.fn(async () => true),
+    } as SubprocessHandle
+  }
+
+  /**
+   * Harness whose subprocess seam serves only the `pi --list-models` probe
+   * child (the RPC client is mocked, so a step never spawns), making the
+   * catalog deterministic instead of dependent on a real pi install.
+   */
+  async function harnessWithCatalog(config: Record<string, unknown>): Promise<Context> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('subprocess', { spawn: () => probeHandle(CATALOG_TABLE) })
+    await ctx.plugin(loopPlugin, config)
+    return ctx
+  }
+
+  it('keeps a session-selected model the catalog matches as provider/model', async () => {
+    const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
+    const ctx = await harnessWithCatalog({ piCatalogHolder: holder })
+    try {
+      // The probe is advisory and async: let it publish before the step spawns.
+      await vi.waitFor(() => { expect(holder.entries).toEqual(CATALOG) })
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('catalog-match-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // The catalog splits the identity into `provider` + `model`, while the
+      // session selection names the pair as one `provider/model` string; the
+      // second operand of pickModel's match is what keeps this candidate.
+      agent.session.append('model/selection', {
+        provider: 'anthropic',
+        model: 'anthropic/claude-sonnet-4-6',
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('--model')
+      expect(argv).toContain('anthropic/claude-sonnet-4-6')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops a candidate the populated catalog does not list, leaving no --model', async () => {
+    const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
+    const ctx = await harnessWithCatalog({ model: 'anyai-v1', piCatalogHolder: holder })
+    try {
+      await vi.waitFor(() => { expect(holder.entries).toEqual(CATALOG) })
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('catalog-unknown-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // `anyai-v1` is another provider's model, which pi cannot serve: with a
+      // concluded catalog it is dropped rather than passed to the child.
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).not.toContain('--model')
+      expect(argv).not.toContain('anyai-v1')
     } finally {
       await ctx.fiber.dispose()
     }
