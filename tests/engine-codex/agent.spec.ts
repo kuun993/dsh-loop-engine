@@ -167,6 +167,14 @@ function message(text: string) {
   return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 }
 
+/** One durable assistant message event, narrowed from the session event union. */
+type AssistantMessageEvent = Extract<SessionEvent, { type: 'assistant/message' }>
+
+/** The exact chunk sequence a durable assistant message embeds. */
+function embeddedChunks(event: AssistantMessageEvent) {
+  return expandAssistantStream(event.data.stream).map(member => member.chunk)
+}
+
 describe('CodexLoop factory registration', () => {
   it('registers the factory on ctx.agents so create works', async () => {
     const ctx = await harness()
@@ -410,6 +418,231 @@ describe('CodexAgent turn mapping', () => {
       expect(expandAssistantStream(assistants[1]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'second' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each([
+    ['commandExecution', commandItem()],
+    ['fileChange', fileChange()],
+    ['mcpToolCall', mcpToolCall()],
+  ])('splits the stream at a %s item interleaved between two agent messages', async (kind, toolItem) => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-first'),
+        agentDelta('msg-first', 'first'),
+        itemCompleted(agentMessage('first')),
+        itemCompleted(toolItem),
+        itemStarted('agentMessage', 'msg-second'),
+        agentDelta('msg-second', 'second'),
+        itemCompleted(agentMessage('second')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId(`tool-between-s-${kind}`),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const assistants = events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(2)
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
+      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The tool item settles the attempt mid-step; neither message may embed
+      // chunks streamed for the other one.
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'first' },
+      ])
+      expect(embeddedChunks(assistants[1]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'second' },
+      ])
+      expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('cuts the stream at a reasoning item interleaved between two agent messages', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-first'),
+        agentDelta('msg-first', 'first'),
+        itemCompleted(agentMessage('first')),
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'think'),
+        itemCompleted(reasoningItem('think')),
+        itemStarted('agentMessage', 'msg-second'),
+        agentDelta('msg-second', 'second'),
+        itemCompleted(agentMessage('second')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-between-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(2)
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+      expect(assistants[1]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'think' },
+        { type: 'text', text: 'second' },
+      ])
+      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The reasoning folds into the second message, so the first keeps only
+      // its own text chunks and the second carries the reasoning chunks too.
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'first' },
+      ])
+      expect(embeddedChunks(assistants[1]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'think' },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'second' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('flushes a reasoning item as its own message when a tool item closes it before the next agent message', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-first'),
+        agentDelta('msg-first', 'first'),
+        itemCompleted(agentMessage('first')),
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'think'),
+        itemCompleted(reasoningItem('think')),
+        itemCompleted(commandItem()),
+        itemStarted('agentMessage', 'msg-second'),
+        agentDelta('msg-second', 'second'),
+        itemCompleted(agentMessage('second')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-tool-between-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const assistants = events.filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(3)
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+      expect(assistants[1]?.data.message.content).toEqual([{ type: 'reasoning', text: 'think' }])
+      expect(assistants[1]?.data.usage).toBeUndefined()
+      expect(assistants[2]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
+      expect(assistants[2]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The tool item flushes the reasoning as its own message; the following
+      // agent message carries only the chunks its own text streamed.
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'first' },
+      ])
+      expect(embeddedChunks(assistants[1]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'think' },
+      ])
+      expect(embeddedChunks(assistants[2]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'second' },
+      ])
+      expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it("does not leak a plan item's streamed chunks into the following agent message", async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('agentMessage', 'msg-first'),
+        agentDelta('msg-first', 'first'),
+        itemCompleted(agentMessage('first')),
+        itemStarted('plan', 'plan-1'),
+        { kind: 'plan-delta', itemId: 'plan-1', delta: 'planned' },
+        itemCompleted({ type: 'plan', id: 'plan-1', text: 'planned' }),
+        itemStarted('agentMessage', 'msg-second'),
+        agentDelta('msg-second', 'second'),
+        itemCompleted(agentMessage('second')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('plan-between-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(2)
+      // A plan item contributes no durable content block, so neither message
+      // may carry it as content.
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      expect(assistants[0]?.data.usage).toBeUndefined()
+      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
+      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The plan's chunks streamed between the two messages belong to neither:
+      // the first keeps only its text and the second must not embed the plan's
+      // reasoning segment.
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'first' },
+      ])
+      expect(embeddedChunks(assistants[1]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'second' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignores a plan item that streamed no deltas', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('plan', 'plan-1'),
+        itemCompleted({ type: 'plan', id: 'plan-1', text: 'planned' }),
+        itemStarted('agentMessage', 'msg-a'),
+        agentDelta('msg-a', 'answer'),
+        itemCompleted(agentMessage('answer')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('plan-quiet-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'answer' },
       ])
     } finally {
       await ctx.fiber.dispose()

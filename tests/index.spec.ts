@@ -9,7 +9,9 @@ import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
+import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -871,6 +873,50 @@ describe('apply provider route', () => {
     await vi.waitFor(() => {
       expect(providerIds(ctx)).toEqual([])
     })
+
+    await fiber.dispose()
+  })
+
+  it('advertises the probed Pi catalog through the mounted pi route', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    await writeFile(path, applyManagedBlock('# seed\n', 'pi'))
+    const { ctx, fiber } = await boot({ [NS]: { engine: 'pi' } })
+    const llm = ctx.get('llm') as LlmRuntime
+    // The mount's `pi --list-models` probe runs through the subprocess seam;
+    // serving a canned child keeps the catalog independent of a real pi
+    // install while still exercising the holder → route wiring end to end.
+    vi.spyOn(ctx.subprocess, 'spawn').mockImplementation(() => {
+      const stdout = new Readable({ read: () => {} })
+      const stderr = new Readable({ read: () => {} })
+      queueMicrotask(() => {
+        stdout.push('provider   model\nanthropic  claude-opus-4-7\n')
+        stdout.push(null)
+        stderr.push(null)
+      })
+      return {
+        pid: 1,
+        stdin: new Writable({ write: (_chunk, _encoding, callback) => { callback() } }),
+        stdout,
+        stderr,
+        collected: {} as SubprocessHandle['collected'],
+        done: Promise.resolve({ exitCode: 0, signal: null }),
+        terminate: vi.fn(),
+        waitForExit: vi.fn(async () => true),
+      } as SubprocessHandle
+    })
+    apply(ctx, { patchPath: path })
+
+    expect(providerIds(ctx)).toEqual(['pi'])
+    // The pi branch of mountProviderRoute injects the shared catalog holder as
+    // the route's model source; the adapter reads it through a live closure, so
+    // the probe's async result reaches the picker without a re-registration.
+    await vi.waitFor(async () => {
+      const models = await llm.listModels('pi')
+      expect(models.map(model => model.id)).toEqual(['anthropic/claude-opus-4-7'])
+    })
+    const spawnSpec = vi.mocked(ctx.subprocess.spawn).mock.calls[0]?.[0]
+    expect(spawnSpec?.argv).toEqual(expect.arrayContaining(['--list-models', '--mode', 'rpc']))
 
     await fiber.dispose()
   })

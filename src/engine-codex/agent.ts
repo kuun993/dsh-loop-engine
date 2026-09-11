@@ -614,6 +614,14 @@ export class CodexAgent implements Agent {
                 // message that folds them in, not to the one before it.
                 pendingReasoningStream.push(...(live?.takeStream() ?? []))
                 reasoningBlockStarted = false
+              } else if (item.type === 'plan') {
+                // A plan item streams through the reasoning block but carries no
+                // durable content block of its own. Cut its chunks at the item
+                // boundary — the segment has no message to belong to — so no
+                // later message embeds chunks that are not its own, and close the
+                // block framing its deltas opened.
+                live?.takeStream()
+                reasoningBlockStarted = false
               } else if (item.type === 'agentMessage') {
                 // Agent message completed — fold reasoning + text into one message.
                 // Cut before flushing: a committed earlier message ends the
