@@ -11,6 +11,8 @@ import {
   mapAssistantMessage,
   mapStreamEvent,
   mapToolResults,
+  mapUsage,
+  meaningfulUsage,
   stringifyToolInput,
   type StreamToolCall,
 } from '../../src/engine-claude/mapping.ts'
@@ -484,5 +486,45 @@ describe('serializeHistory', () => {
       { role: 'user' as const, id: MessageId('m-go-2'), content: [{ type: 'text' as const, text: 'go' }], source: { kind: 'user' as const } },
     ])
     expect(prompt).toBe('<user>\ngo\n</user>')
+  })
+})
+
+describe('mapUsage', () => {
+  it('keeps absent cache counters absent and reads null counters as zero', () => {
+    expect(mapUsage({ input_tokens: null, output_tokens: null })).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+    })
+    expect(mapUsage({ input_tokens: 3, output_tokens: 4, cache_read_input_tokens: null })).toEqual({
+      inputTokens: 3,
+      outputTokens: 4,
+    })
+  })
+})
+
+describe('meaningfulUsage', () => {
+  it('drops the SDK placeholder and any sample that accounts for nothing', () => {
+    expect(meaningfulUsage(undefined)).toBeUndefined()
+    expect(meaningfulUsage({ inputTokens: 0, outputTokens: 0 })).toBeUndefined()
+    expect(meaningfulUsage({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }))
+      .toBeUndefined()
+  })
+
+  it('keeps a sample whose only counter is a cache bucket', () => {
+    expect(meaningfulUsage({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 9 })).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 9,
+    })
+    expect(meaningfulUsage({ inputTokens: 0, outputTokens: 0, cacheWriteTokens: 4 })).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 4,
+    })
+  })
+
+  it('keeps a sample that reports request-side or response-side tokens', () => {
+    expect(meaningfulUsage({ inputTokens: 5, outputTokens: 0 })).toEqual({ inputTokens: 5, outputTokens: 0 })
+    expect(meaningfulUsage({ inputTokens: 0, outputTokens: 6 })).toEqual({ inputTokens: 0, outputTokens: 6 })
   })
 })
