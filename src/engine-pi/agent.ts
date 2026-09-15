@@ -615,6 +615,8 @@ export class PiAgent implements Agent {
       const thinkingByIndex = new Map<number, string>()
       /** Tool call ids already written to the log (prevents duplicate tool/call). */
       const emittedToolCalls = new Set<string>()
+      /** Tool-call blocks not yet folded into a flushed assistant message. */
+      let pendingToolCalls: ContentBlock[] = []
       /** Last usage snapshot, folded onto the message that closes a turn. */
       let lastUsage: TokenUsage | undefined
       /** Whether an assistant message already flushed for this turn (message_end). */
@@ -666,6 +668,25 @@ export class PiAgent implements Agent {
         this.session.append('tool/call', {
           turn, step, callId: ToolCallId(callId), name, arguments: argumentsValue,
         })
+        // The assistant message that requested this call must carry its
+        // tool-call block, otherwise a later resume on the in-process engine
+        // derives a `tool` result with no preceding assistant `tool_calls`.
+        pendingToolCalls.push({ type: 'tool-call', id: ToolCallId(callId), name, arguments: argumentsValue })
+      }
+
+      /**
+       * Flush a synthesized assistant message carrying any tool-call blocks that
+       * have no flushed owner yet. Called before a `tool/result` lands so the
+       * durable surface always pairs a result with a preceding assistant
+       * tool-call block, even when the engine executed a call without streaming
+       * an assistant message first.
+       */
+      const ensureToolCallOwner = (): void => {
+        if (pendingToolCalls.length === 0) return
+        flushHeld()
+        held = { content: [...pendingToolCalls] }
+        pendingToolCalls = []
+        flushHeld()
       }
 
       /** Build an assistant message's content blocks from the authoritative message or buffers. */
@@ -693,6 +714,13 @@ export class PiAgent implements Agent {
             .sort((a, b) => a[0] - b[0])
             .map(([, text]) => ({ type: 'reasoning', text }))
           blocks = [...folded, ...blocks]
+        }
+        // Fold any not-yet-flushed tool-call blocks into this assistant message so
+        // the durable surface keeps every tool/result paired with the assistant
+        // tool-call that requested it.
+        if (pendingToolCalls.length > 0) {
+          blocks = [...blocks, ...pendingToolCalls]
+          pendingToolCalls = []
         }
         return blocks
       }
@@ -763,6 +791,7 @@ export class PiAgent implements Agent {
             break
           case 'tool_execution_end':
             emitToolCall(event.toolCallId, event.toolName, undefined)
+            ensureToolCallOwner()
             this.session.append('tool/result', {
               turn,
               step,
@@ -774,10 +803,14 @@ export class PiAgent implements Agent {
               if (event.message.usage !== undefined) lastUsage = mapUsage(event.message.usage)
               held = { content: contentOf(event.message) }
             }
+            // Flush the assistant message before its tool results so every
+            // tool/result follows the assistant tool-call block that requested it.
+            flushHeld(lastUsage)
+            assistantFlushed = true
             for (const toolResult of event.toolResults ?? []) {
+              ensureToolCallOwner()
               this.appendToolResult(turn, step, toolResult)
             }
-            flushHeld(lastUsage)
             finished = true
             break
           }

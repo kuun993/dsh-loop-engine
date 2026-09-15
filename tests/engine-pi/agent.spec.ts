@@ -315,6 +315,40 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
+  it('folds tool-call blocks into the assistant message so a model resume stays paired', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'message_start', message: assistantMessage('running') },
+        messageDelta({ type: 'toolcall_start', contentIndex: 1, id: 'call-1', toolName: 'bash' }),
+        messageDelta({ type: 'toolcall_delta', contentIndex: 1, delta: '{"command":"ls"}' }),
+        messageDelta({ type: 'toolcall_end', contentIndex: 1, toolCall: { id: 'call-1', name: 'bash', arguments: { command: 'ls' } } }),
+        { type: 'message_end', message: assistantMessage('running') },
+        { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'bash', args: { command: 'ls' } },
+        { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'file.txt' }] }, isError: false },
+        turnEnd(),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('tool-pair-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('list it'))
+      await agent.whenIdle()
+
+      const messages = agent.session.deriveMessages()
+      const assistant = messages.find(m => m.role === 'assistant' && m.content.some(block => block.type === 'tool-call'))
+      expect(assistant).toBeDefined()
+      expect(assistant!.content.some(block => block.type === 'tool-call'
+        && (block as { id?: string }).id === 'call-1')).toBe(true)
+      const assistantIndex = messages.indexOf(assistant!)
+      const resultIndex = messages.findIndex(m => m.role === 'user' && m.content.some(block => block.type === 'tool-result'))
+      expect(resultIndex).toBeGreaterThan(assistantIndex)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('maps a tool execution result as an error and emits the call lazily', async () => {
     const ctx = await harness()
     try {
