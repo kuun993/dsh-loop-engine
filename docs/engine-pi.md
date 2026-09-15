@@ -81,16 +81,18 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 5. 事件映射（RPC 事件 → dsh SessionEvent）
 
-`step()` 内的事件循环（`agent.ts:714-814`）是全驱动最密的部分，按事件类型分四类：
+`step()` 内的事件循环（`agent.ts:729-834`）是全驱动最密的部分，按事件类型分四类：
 
-- **忽略**：`agent_start`、`compaction_*`、`auto_retry_*`、`queue_update`、`bash_execution_update`、`extension_ui_request`、`tool_execution_update`、`text_start`/`thinking_start`、`toolcall_start`/`toolcall_delta`、`text_end`/`thinking_end`（`agent.ts:717-725、737-739、749-752、756-758、775-776`；`message_start` 是例外——它清空该条 assistant 消息的累积器，`agent.ts:726-732`）。
-- **流式增量 → live 帧 + 消息内嵌 stream**：`text_delta` / `thinking_delta` 首次出现某 contentIndex 时先补一个 `block-start`，再发 `text-delta` / `reasoning-delta`，都交给本次尝试的 `DriverAssistantStream`（`src/driver-core/assistant-stream.ts:32`、`agent.ts:660-672、740-747`）。它把 chunk 压进 compact stream 并发 `agent/assistant-stream` 的 `chunk` 帧，随后由 `flushHeld` 内嵌进 durable `assistant/message` 的 `data.stream`，使重放能精确重建 live partial（`agent.ts:636-658`）。
-- **工具 → `tool/call` / `tool/result`**：`toolcall_end` 与 `tool_execution_start` 都会发 `tool/call`，用 `emittedToolCalls` 按 callId 去重（`agent.ts:674-682、753-755、772-774`）；`tool_execution_end` 发 `tool/result`（经 `mapToolResult`），`turn_end.toolResults` 兜底再发一轮（`agent.ts:777-784、790-792`）。
-- **收尾 → `assistant/message` + usage**：`message_end`（assistant）用权威消息内容 flush 一条 durable assistant message；`turn_end` 兜底未 flush 的消息；`agent_end` / `agent_settled` 最终 flush（`agent.ts:762-808`）。usage 取最新快照（`message_update.usage` / `message.usage`），经 `mapUsage` 折叠到最后一条 message 上（`rpc/mapping.ts:19-26`：缺省补 0，cache 字段为 0 或缺省时不写）。
+- **忽略**：`agent_start`、`compaction_*`、`auto_retry_*`、`queue_update`、`bash_execution_update`、`extension_ui_request`、`tool_execution_update`、`text_start`/`thinking_start`、`toolcall_start`/`toolcall_delta`、`text_end`/`thinking_end`（`agent.ts:732-740、752-754、764-767、771-773`；`message_start` 是例外——它清空该条 assistant 消息的累积器，`agent.ts:741-747`）。
+- **流式增量 → live 帧 + 消息内嵌 stream**：`text_delta` / `thinking_delta` 首次出现某 contentIndex 时先补一个 `block-start`，再发 `text-delta` / `reasoning-delta`，都交给本次尝试的 `DriverAssistantStream`（`src/driver-core/assistant-stream.ts:32`、`agent.ts:650-672、755-763`）。它把 chunk 压进 compact stream 并发 `agent/assistant-stream` 的 `chunk` 帧，随后由 `flushHeld` 内嵌进 durable `assistant/message` 的 `data.stream`，使重放能精确重建 live partial（`agent.ts:626-645`）。
+- **工具 → `tool/call` / `tool/result`**：`toolcall_end` 与 `tool_execution_start` 都会发 `tool/call`，用 `emittedToolCalls` 按 callId 去重（`agent.ts:664-674、768-770、787-789`）；每次 emit 同时把对应的 tool-call block 累积进 `pendingToolCalls`。`tool_execution_end` 先 `ensureToolCallOwner()` 保证 durable surface 里该 result 之前已经有一条携带对应 tool-call block 的 assistant message，再发 `tool/result`（经 `mapToolResult`）；`turn_end.toolResults` 兜底再发一轮（`agent.ts:792-799、801-816`）。
+- **收尾 → `assistant/message` + usage**：`message_end`（assistant）用权威消息内容 flush 一条 durable assistant message；`turn_end` 兜底未 flush 的消息；`agent_end` / `agent_settled` 最终 flush（`agent.ts:777-785、801-816、817-828`）。usage 取最新快照（`message_update.usage` / `message.usage`），经 `mapUsage` 折叠到最后一条 message 上（`rpc/mapping.ts:19-26`：缺省补 0，cache 字段为 0 或缺省时不写）。
 
-**settle 语义（关键坑）**：`finished` 在任何"终态-ish"事件（含 mid-run 的 `turn_end`）置位，但 `settled` 只在 `agent_settled` 或 `willRetry` 为假的 `agent_end` 置位；只有 `settled` 才 break 事件循环（`agent.ts:610-620、810-813`）。因为子进程跨 step 存活、`events()` 永不自行结束，少了这个 break，`step()` 会在回复流完后挂死。循环结束若 `!finished`（子进程死了/流断了），抛 `LlmError('... ended without an agent settle', 'PI_NO_RESULT')`（`agent.ts:816-820`）。
+**tool-call 配对（切回 in-process 的关键）**：durable `assistant/message` 的 content 必须携带 `tool-call` block，`tool/result` 才能在主仓推导消息时配对到前一条 assistant `tool_calls`。Pi 的权威消息 content 只有 text/thinking，所以 `contentOf` 在返回前把 `pendingToolCalls` 折进该 assistant 消息并清空（`agent.ts:721-724`）；`ensureToolCallOwner` 覆盖引擎未流式给出 assistant 消息、直接执行工具的情况，先补一条只含 tool-call block 的 assistant message（`agent.ts:684-690`）。这保证会话之后切回 in-process 引擎时，不会出现 `role: 'tool'` 前面没有 `tool_calls` 的 400。
 
-**thinking 折叠**：权威消息的 content 里没有 reasoning 块、但流式阶段收到过 thinking delta 时（某些 provider 只发 delta），把累积的 thinking 按 contentIndex 排序后折到文本块之前，与默认 loop 的"先推理后回答"顺序一致（`agent.ts:700-709`）。
+**settle 语义（关键坑）**：`finished` 在任何"终态-ish"事件（含 mid-run 的 `turn_end`）置位，但 `settled` 只在 `agent_settled` 或 `willRetry` 为假的 `agent_end` 置位；只有 `settled` 才 break 事件循环（`agent.ts:607-620、820-827、833`）。因为子进程跨 step 存活、`events()` 永不自行结束，少了这个 break，`step()` 会在回复流完后挂死。循环结束若 `!finished`（子进程死了/流断了），抛 `LlmError('... ended without an agent settle', 'PI_NO_RESULT')`（`agent.ts:835-840`）。
+
+**thinking 折叠**：权威消息的 content 里没有 reasoning 块、但流式阶段收到过 thinking delta 时（某些 provider 只发 delta），把累积的 thinking 按 contentIndex 排序后折到文本块之前，与默认 loop 的"先推理后回答"顺序一致（`agent.ts:712-718`）。
 
 ## 6. 权限 / 沙箱模型
 
