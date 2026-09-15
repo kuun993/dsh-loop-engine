@@ -20,6 +20,7 @@ import type { LoopEngineBadgeInjected } from './LoopEngineBadge.tsx'
 import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
 import type { LoopEngineComposerSelectInjected } from './LoopEngineComposerSelect.tsx'
 import { LoopEngineStore, decodeLoopEngine } from './store.ts'
+import { installTurnStatusStyles } from './turn-status.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
 import type { LoopEngineSettings } from '../settings.ts'
@@ -60,6 +61,11 @@ export function apply(ctx: ClientContext): void {
     controller.load()
     return () => { controller.dispose() }
   }, 'loop-engine: store lifecycle')
+
+  // Paint the chat turn-status row in the selected engine's colors and glyph.
+  // The harness owns that row's text and offers no slot for it, so this is a
+  // stylesheet keyed on the engine, not a component.
+  installTurnStatusStyles(ctx, controller.store)
 
   const t = ctx.locale.bind(NS) as LoopEngineSectionInjected['t']
   const injected = (): LoopEngineSectionInjected => ({
