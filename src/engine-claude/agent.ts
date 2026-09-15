@@ -19,7 +19,13 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
-import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import {
+  AssistantStreamAccumulator,
+  LlmError,
+  createAssistantMessage,
+  createUserMessage,
+  errorChain,
+} from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -31,6 +37,8 @@ import {
   mapAssistantMessage,
   mapStreamEvent,
   mapToolResults,
+  mapUsage,
+  meaningfulUsage,
   type StreamToolCall,
 } from './mapping.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
@@ -528,11 +536,27 @@ export class ClaudeCodeAgent implements Agent {
       const reasoningByIndex = new Map<number, string>()
       /** Usage stashed from a suppressed reasoning-only message, used when the next message lacks its own. */
       let pendingUsage: TokenUsage | undefined
+      /**
+       * Usage the in-flight request reported on its `message_delta`. The SDK
+       * zero-fills `usage` on the assistant message itself for gateway-fronted
+       * models, so this is the only per-request accounting available before the
+       * query's `result` totals it — and it is what the message that ends the
+       * request is tagged with.
+       */
+      let requestUsage: TokenUsage | undefined
       signal.throwIfAborted()
       for await (const message of query) {
         signal.throwIfAborted()
         switch (message.type) {
           case 'stream_event': {
+            const event = message.event
+            // A request opens with `message_start` and reports its counters
+            // cumulatively on `message_delta`; the last one before the next
+            // start is that request's total.
+            if (event.type === 'message_start') requestUsage = undefined
+            else if (event.type === 'message_delta' && event.usage !== undefined) {
+              requestUsage = meaningfulUsage(mapUsage(event.usage))
+            }
             for (const chunk of mapStreamEvent(message.event, toolCalls)) {
               currentStream().push(chunk)
               if (chunk.type === 'reasoning-delta') {
@@ -554,7 +578,7 @@ export class ClaudeCodeAgent implements Agent {
               const reasoning = mapped.content as readonly { type: 'reasoning'; text: string }[]
               reasoningByIndex.clear()
               reasoning.forEach((block, index) => { reasoningByIndex.set(index, block.text) })
-              pendingUsage = mapped.usage
+              pendingUsage = meaningfulUsage(mapped.usage) ?? requestUsage
               break
             }
             // Thinking fallback: some providers stream thinking deltas but
@@ -573,7 +597,9 @@ export class ClaudeCodeAgent implements Agent {
               // drop the chunk accumulation so a later message cannot
               // synthesize a duplicate.
               reasoningByIndex.clear()
-              const usage = mapped.usage ?? pendingUsage
+              // The message's own usage wins when the SDK reported real
+              // counters; otherwise the request's streamed sample stands in.
+              const usage = meaningfulUsage(mapped.usage) ?? requestUsage ?? pendingUsage
               pendingUsage = undefined
               const attempt = live
               const data = {
@@ -634,6 +660,22 @@ export class ClaudeCodeAgent implements Agent {
                 live = undefined
               }
               pendingUsage = undefined
+            }
+            // One dsh step is a whole agentic query — the model may make many
+            // requests inside it — so the step's token total is the query's,
+            // not any single message's. Per-step projections replace a step's
+            // earlier samples with its latest, so the total is appended as a
+            // usage-only attempt record: it carries no content (and so renders
+            // nothing) and leaves every message's own usage untouched.
+            const stepUsage = meaningfulUsage(mapUsage(message.usage))
+            if (stepUsage !== undefined) {
+              const accumulator = new AssistantStreamAccumulator()
+              accumulator.push({ time: Date.now(), chunk: { type: 'usage', usage: stepUsage } })
+              this.session.append('assistant/attempt', {
+                turn,
+                step,
+                stream: [...accumulator.snapshot()],
+              })
             }
             if (message.subtype === 'success') {
               finished = true

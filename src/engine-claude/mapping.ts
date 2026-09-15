@@ -10,7 +10,6 @@
 import type {
   BetaMessage,
   BetaRawMessageStreamEvent,
-  BetaUsage,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import {
@@ -172,18 +171,53 @@ function toolResultContent(content: unknown): ContentBlock[] {
 }
 
 /**
+ * The counters {@link mapUsage} reads. The SDK reports these on an assistant
+ * message's `usage`, on a stream `message_delta`'s narrower usage, and on the
+ * query `result`'s totals, so the parameter is the common shape rather than any
+ * one of those types.
+ */
+export interface ReportedUsage {
+  readonly input_tokens: number | null
+  readonly output_tokens: number | null
+  readonly cache_read_input_tokens?: number | null
+  readonly cache_creation_input_tokens?: number | null
+}
+
+/**
  * Translate SDK token accounting into the dsh token-usage shape. Cache
  * breakpoints are optional; absent or null SDK counters stay absent.
- * @param usage - SDK-reported usage for one assistant message.
+ * @param usage - SDK-reported usage for one assistant message, stream delta, or query result.
  * @returns dsh token accounting, omitting absent optional counters.
  */
-export function mapUsage(usage: BetaUsage): TokenUsage {
+export function mapUsage(usage: ReportedUsage): TokenUsage {
   return {
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
     ...usage.cache_read_input_tokens == null ? {} : { cacheReadTokens: usage.cache_read_input_tokens },
     ...usage.cache_creation_input_tokens == null ? {} : { cacheWriteTokens: usage.cache_creation_input_tokens },
   }
+}
+
+/**
+ * Keep a usage sample only when it accounts for something.
+ *
+ * The SDK zero-fills `usage` on streamed assistant messages it cannot attribute
+ * (gateway-fronted models report the real counters on the stream's
+ * `message_delta` and the query's `result` instead). A sample with every bucket
+ * at zero is that placeholder, not a measurement: keeping it would both show an
+ * empty usage row and — because the token meter trusts a present sample over
+ * the stream — hide the real one.
+ * @param usage - a mapped usage sample, or undefined.
+ * @returns the sample when it is non-empty, otherwise undefined.
+ */
+export function meaningfulUsage(usage: TokenUsage | undefined): TokenUsage | undefined {
+  if (usage === undefined) return undefined
+  return usage.inputTokens !== 0
+    || usage.outputTokens !== 0
+    || (usage.cacheReadTokens ?? 0) !== 0
+    || (usage.cacheWriteTokens ?? 0) !== 0
+    ? usage
+    : undefined
 }
 
 /** Per-block-index tool-call identity captured at `content_block_start`, reused by `input_json_delta`. */

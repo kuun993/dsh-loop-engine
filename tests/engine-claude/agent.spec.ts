@@ -745,6 +745,150 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
   })
 })
 
+describe('ClaudeCodeAgent token usage reporting', () => {
+  /** The zero-filled placeholder the SDK puts on streamed assistant messages. */
+  const ZERO_USAGE = {
+    cache_creation: null,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    inference_geo: null,
+    input_tokens: 0,
+    iterations: null,
+    output_tokens: 0,
+    server_tool_use: null,
+  }
+
+  /** An assistant message carrying the SDK's all-zero usage placeholder. */
+  function zeroUsageAssistant(text: string): SDKMessage {
+    const message = assistantText(text) as { message: Record<string, unknown> }
+    message.message.usage = { ...ZERO_USAGE }
+    return message as unknown as SDKMessage
+  }
+
+  /** A successful result carrying the query's cumulative usage. */
+  function usageResult(usage: Record<string, unknown>): SDKMessage {
+    const message = successResult() as Record<string, unknown>
+    message.usage = { ...ZERO_USAGE, ...usage }
+    return message as unknown as SDKMessage
+  }
+
+  function usageDelta(usage: Record<string, unknown>): SDKMessage {
+    return streamEvent({ type: 'message_delta', usage })
+  }
+
+  function usageOfStream(stream: unknown): unknown {
+    const records = stream as readonly { type?: string; chunk?: { type?: string; usage?: unknown } }[]
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index]
+      if (record?.type === 'chunk' && record.chunk?.type === 'usage') return record.chunk.usage
+    }
+    return undefined
+  }
+
+  it('takes usage from the stream when the SDK zero-fills the assistant message', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'message_start', message: { usage: ZERO_USAGE } }),
+        usageDelta({ input_tokens: 120, output_tokens: 30, cache_read_input_tokens: 900 }),
+        zeroUsageAssistant('hello'),
+        usageResult({ input_tokens: 120, output_tokens: 30, cache_read_input_tokens: 900 }),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('usage-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const assistant = events.find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({
+        data: { usage: { inputTokens: 120, outputTokens: 30, cacheReadTokens: 900 } },
+      })
+
+      // The step's total rides a usage-only attempt record so per-step
+      // projections see the whole query rather than its final request.
+      const stepUsage = events
+        .filter(event => event.type === 'assistant/attempt')
+        .map(event => usageOfStream(event.data.stream))
+        .find(usage => usage !== undefined)
+      expect(stepUsage).toMatchObject({ inputTokens: 120, outputTokens: 30, cacheReadTokens: 900 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('leaves usage absent when neither the message nor the stream reports any', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        zeroUsageAssistant('hello'),
+        usageResult({ input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 }),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('usage-none-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      expect(assistant?.data.usage).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('stashes the stream sample for a zero-filled reasoning-only message', async () => {
+    const ctx = await harness()
+    try {
+      const thinking = thinkingOnlyMessage('pondering', 0) as { message: Record<string, unknown> }
+      thinking.message.usage = { ...ZERO_USAGE }
+      queryMock.mockImplementation(() => stream([
+        streamEvent({ type: 'message_start', message: { usage: ZERO_USAGE } }),
+        usageDelta({ input_tokens: 40, output_tokens: 4, cache_read_input_tokens: 0 }),
+        thinking as unknown as SDKMessage,
+        zeroUsageAssistant('answer'),
+        usageResult({ input_tokens: 40, output_tokens: 4 }),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('usage-reasoning-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      // The suppressed thinking message carried no usable sample, so the
+      // stream's own accounting is what survives onto the settled message.
+      expect(assistants[0]?.data.usage).toMatchObject({ inputTokens: 40, outputTokens: 4 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps real assistant-message usage when the SDK reports it directly', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('hello'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('usage-native-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({
+        data: { usage: { inputTokens: 12, outputTokens: 7, cacheReadTokens: 5 } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
 describe('configuration validation', () => {
   async function bareContext(): Promise<Context> {
     const fresh = new Context()
