@@ -20,11 +20,94 @@ Restart `dsh web`, then open **Settings → Loop engine**.
 > span changes.
 
 > **pnpm users:** pnpm 10+ blocks dependency build scripts by default, so the
-> install may report `@google/genai`, `node-pty`, and `protobufjs` as blocked.
-> This is expected — click **"Allow build scripts and retry"** (or run
-> `pnpm approve-builds`, or list them under `pnpm.onlyBuiltDependencies` in
-> your project root) and retry. Only the installing project can grant this;
-> the plugin cannot pre-approve its own dependencies.
+> install may fail with `ERR_PNPM_IGNORED_BUILDS` naming `esbuild`,
+> `@google/genai`, and `protobufjs` (all reached through the engine SDKs). This
+> is expected — allow them and retry, either interactively with
+> `pnpm approve-builds`, or by declaring them in the installing project's
+> `pnpm-workspace.yaml`:
+>
+> ```yaml
+> allowBuilds:
+>   esbuild: true
+>   '@google/genai': true
+>   protobufjs: true
+> ```
+>
+> Only the installing project can grant this; the plugin cannot pre-approve its
+> own dependencies. Note that `allowBuilds` is the pnpm 11 spelling — pnpm 11
+> **deletes** the legacy `onlyBuiltDependencies` (and `neverBuiltDependencies`,
+> `ignoredBuiltDependencies`) keys from `package.json` and no longer honors
+> them, so putting them there silently does nothing.
+
+### Running against a harness source checkout
+
+The install above assumes a **published** dsh (`npx @deepseek-ai/dsh`) and needs
+no extra setup. Booting the harness from its **source checkout**
+(`cd deepseek-harness && pnpm dsh web`) takes one more step, because the two
+halves then resolve harness packages to different files:
+
+| Side | `@deepseek-ai/dsh-scope` resolves to |
+|---|---|
+| Source-launched harness | `packages/core/scope/src/index.ts` (via tsconfig `paths`) |
+| Installed plugin (its tarball ships only `lib/`) | `packages/core/scope/lib/index.js` |
+
+That is one package loaded as two module instances. `dsh-scope` tags a context
+with a module-local `Symbol('dsh.scope')`, so a scope minted through one instance
+is invisible to the other, and resuming a session fails with:
+
+```
+agent-presets: refusing to compose an unscoped context;
+the scope key is what joins an agent to its preset
+```
+
+Bridge the profile's peers to the harness source so both halves share one
+instance. Set `HARNESS` to the harness checkout **as a `file://` URL**, then run
+this from the profile directory:
+
+```sh
+HARNESS=file:///path/to/deepseek-harness   # e.g. file:///D:/repos/deepseek-harness
+cd "$DSH_HOME/profiles/web" && mkdir -p shims
+while IFS='|' read -r name rel; do
+  mkdir -p "shims/$name"
+  printf '{"name":"@deepseek-ai/%s","version":"0.0.0","private":true,"type":"module","main":"index.mjs"}\n' \
+    "$name" > "shims/$name/package.json"
+  printf "export * from '%s/%s'\nimport * as mod from '%s/%s'\nexport default mod.default\n" \
+    "$HARNESS" "$rel" "$HARNESS" "$rel" > "shims/$name/index.mjs"
+done <<EOF
+cordis|vendor/cordis/src/index.ts
+schemastery|vendor/schemastery/src/index.ts
+dsh-agent|packages/core/agent/src/index.ts
+dsh-scope|packages/core/scope/src/index.ts
+dsh-session|packages/core/session/src/index.ts
+dsh-session-persistence|packages/session/session-persistence/src/index.ts
+dsh-settings|packages/settings/settings/src/index.ts
+dsh-subprocess|packages/subprocess/subprocess/src/index.ts
+dsh-timeout|packages/util/timeout/src/index.ts
+dsh-llm|packages/llm/llm/src/index.ts
+dsh-invariants|packages/runtime-diagnostics/invariants/src/index.ts
+dsh-home-paths|packages/util/home-paths/src/index.ts
+EOF
+```
+
+Then point the profile's `package.json` at them and reinstall:
+
+```sh
+node -e 'const f="package.json",j=require("./"+f),d=j.dependencies??={}
+for(const n of ["cordis","schemastery","dsh-agent","dsh-scope","dsh-session","dsh-session-persistence","dsh-settings","dsh-subprocess","dsh-timeout","dsh-llm","dsh-invariants","dsh-home-paths"])
+  d["@deepseek-ai/"+n]="file:./shims/"+n
+require("fs").writeFileSync(f,JSON.stringify(j,null,2)+"\n")'
+pnpm install
+```
+
+Restart `dsh web`. If something loads the `@deepseek-ai/dsh-scope/invariant`
+subpath, also give that shim an `invariant.mjs` (`export * from
+'$HARNESS/packages/core/scope/src/invariant.ts'`) and add
+`"./invariant": "./invariant.mjs"` to its `exports`.
+
+> Installing the plugin as a local **`link:`** checkout sidesteps this entirely:
+> when the checkout sits beside the harness repo it inherits the harness's own
+> `tsconfig.json` and with it the same `paths` mapping. The split only appears
+> when a *packed* plugin (npm or tarball) meets a *source* harness.
 
 ## Version compatibility
 

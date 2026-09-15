@@ -14,6 +14,80 @@ dsh plugin --profile web add dsh-loop-engine
 
 > 切换引擎会重写 `cordis.patch.yml` 中一小段受管理的内容,文件里你写的其它部分都会保留,只改动插件自己的区间。
 
+> **pnpm 用户:** pnpm 10+ 默认拦截依赖的 build script,安装可能以
+> `ERR_PNPM_IGNORED_BUILDS` 失败,并列出 `esbuild`、`@google/genai`、
+> `protobufjs`(都经引擎 SDK 传递而来)。这是预期行为——放行后重试即可:可用
+> `pnpm approve-builds` 交互放行,或在安装项目的 `pnpm-workspace.yaml` 里声明:
+>
+> ```yaml
+> allowBuilds:
+>   esbuild: true
+>   '@google/genai': true
+>   protobufjs: true
+> ```
+>
+> 只有安装方能授予该权限,插件无法预先放行自己的依赖。注意 `allowBuilds` 是
+> pnpm 11 的写法——pnpm 11 会**删除** `package.json` 里遗留的
+> `onlyBuiltDependencies`(以及 `neverBuiltDependencies`、`ignoredBuiltDependencies`)
+> 且不再识别它们,写在那里会静默失效。
+
+### 源码启动 harness 时的额外步骤
+
+上面的安装针对 **发布版** dsh(`npx @deepseek-ai/dsh`),不需要额外操作。若改用**源码**启动 harness(`cd deepseek-harness && pnpm dsh web`),则要多做一步——因为两边会把 harness 的包解析到不同文件:
+
+| 一侧 | `@deepseek-ai/dsh-scope` 解析到 |
+|---|---|
+| 源码启动的 harness | `packages/core/scope/src/index.ts`(经 tsconfig `paths`) |
+| 安装的插件(包内只有 `lib/`) | `packages/core/scope/lib/index.js` |
+
+也就是同一个包被加载成了两个模块实例。`dsh-scope` 用模块私有的 `Symbol('dsh.scope')` 给 context 打标记,一个实例打的标记另一个实例读不到,于是恢复会话时报错:
+
+```
+agent-presets: refusing to compose an unscoped context;
+the scope key is what joins an agent to its preset
+```
+
+把 profile 的 peer 桥接到 harness 源码,让两边共用同一个实例。把 `HARNESS` 设为 harness checkout 的 **`file://` URL**,在 profile 目录下执行:
+
+```sh
+HARNESS=file:///path/to/deepseek-harness   # 例如 file:///D:/repos/deepseek-harness
+cd "$DSH_HOME/profiles/web" && mkdir -p shims
+while IFS='|' read -r name rel; do
+  mkdir -p "shims/$name"
+  printf '{"name":"@deepseek-ai/%s","version":"0.0.0","private":true,"type":"module","main":"index.mjs"}\n' \
+    "$name" > "shims/$name/package.json"
+  printf "export * from '%s/%s'\nimport * as mod from '%s/%s'\nexport default mod.default\n" \
+    "$HARNESS" "$rel" "$HARNESS" "$rel" > "shims/$name/index.mjs"
+done <<EOF
+cordis|vendor/cordis/src/index.ts
+schemastery|vendor/schemastery/src/index.ts
+dsh-agent|packages/core/agent/src/index.ts
+dsh-scope|packages/core/scope/src/index.ts
+dsh-session|packages/core/session/src/index.ts
+dsh-session-persistence|packages/session/session-persistence/src/index.ts
+dsh-settings|packages/settings/settings/src/index.ts
+dsh-subprocess|packages/subprocess/subprocess/src/index.ts
+dsh-timeout|packages/util/timeout/src/index.ts
+dsh-llm|packages/llm/llm/src/index.ts
+dsh-invariants|packages/runtime-diagnostics/invariants/src/index.ts
+dsh-home-paths|packages/util/home-paths/src/index.ts
+EOF
+```
+
+再把这些写进 profile 的 `package.json` 并重新安装:
+
+```sh
+node -e 'const f="package.json",j=require("./"+f),d=j.dependencies??={}
+for(const n of ["cordis","schemastery","dsh-agent","dsh-scope","dsh-session","dsh-session-persistence","dsh-settings","dsh-subprocess","dsh-timeout","dsh-llm","dsh-invariants","dsh-home-paths"])
+  d["@deepseek-ai/"+n]="file:./shims/"+n
+require("fs").writeFileSync(f,JSON.stringify(j,null,2)+"\n")'
+pnpm install
+```
+
+重启 `dsh web`。若有代码加载 `@deepseek-ai/dsh-scope/invariant` 子路径,再给该 shim 补一个 `invariant.mjs`(`export * from '$HARNESS/packages/core/scope/src/invariant.ts'`),并在它的 `exports` 里加上 `"./invariant": "./invariant.mjs"`。
+
+> 用本地 **`link:`** 方式安装插件可以完全绕开这一步:checkout 与 harness 仓库相邻时,它会继承 harness 自己的 `tsconfig.json`,从而共用同一份 `paths` 映射。这个分裂只在**打包版**插件(npm 或 tarball)遇到**源码版** harness 时出现。
+
 ### 环境要求
 
 - 使用 Claude Code 引擎时需要本机已安装并登录 Claude Code CLI。
