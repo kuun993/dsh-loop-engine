@@ -9,9 +9,12 @@ import {
   approvalReason,
   approvalToolName,
   DEFAULT_CODEX_PERMISSION,
+  elicitationResponse,
   permissionsGrant,
   resolveApprovalRequest,
   resolveSessionPermission,
+  userInputQuestions,
+  userInputResponse,
 } from '../../src/engine-codex/permission.ts'
 
 /** One structural log event. */
@@ -119,7 +122,69 @@ describe('resolveApprovalRequest', () => {
   })
 
   it('fails unknown methods with method-not-found', () => {
-    expect(resolveApprovalRequest('item/tool/requestUserInput', {}, 'allowed-once'))
+    expect(resolveApprovalRequest('item/tool/call', {}, 'allowed-once'))
       .toEqual({ error: { code: -32601, message: 'Method not found' } })
+  })
+})
+
+describe('userInputQuestions', () => {
+  it('projects the wire questions with headers and options', () => {
+    expect(userInputQuestions({
+      questions: [{
+        id: 'q1',
+        header: 'Deploy',
+        question: 'Which environment?',
+        options: [{ label: 'dev', description: 'the dev cluster' }, { label: 'prod' }],
+      }],
+    })).toEqual([{
+      id: 'q1',
+      header: 'Deploy',
+      question: 'Which environment?',
+      options: [{ label: 'dev', description: 'the dev cluster' }, { label: 'prod' }],
+    }])
+  })
+
+  it('drops entries with no usable id, wording, or option label', () => {
+    expect(userInputQuestions({
+      questions: [
+        { question: 'no id' },
+        { id: 'q2' },
+        { id: '', question: '' },
+        { id: 'q3', question: 'keep me', options: ['nope', { description: 'no label' }, null] },
+        'not-an-object',
+      ],
+    })).toEqual([{ id: 'q3', question: 'keep me' }])
+  })
+
+  it('returns nothing for params with no questions array', () => {
+    expect(userInputQuestions({})).toEqual([])
+    expect(userInputQuestions({ questions: 'nope' })).toEqual([])
+    expect(userInputQuestions(null)).toEqual([])
+  })
+})
+
+describe('userInputResponse', () => {
+  it('maps an answer onto answer lists keyed by question id', () => {
+    expect(userInputResponse({
+      answers: [
+        { id: 'q1', selected: ['dev'] },
+        { id: 'q2', selected: [], custom: 'staging' },
+      ],
+    })).toEqual({ answers: { q1: { answers: ['dev'] }, q2: { answers: ['staging'] } } })
+  })
+
+  it('maps an empty custom answer to just the selected labels', () => {
+    expect(userInputResponse({ answers: [{ id: 'q1', selected: ['a'], custom: '' }] }))
+      .toEqual({ answers: { q1: { answers: ['a'] } } })
+  })
+
+  it('answers with an empty map when nobody answered', () => {
+    expect(userInputResponse(undefined)).toEqual({ answers: {} })
+  })
+})
+
+describe('elicitationResponse', () => {
+  it('declines an unattended MCP elicitation', () => {
+    expect(elicitationResponse()).toEqual({ action: 'decline' })
   })
 })
