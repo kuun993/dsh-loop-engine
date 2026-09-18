@@ -19,6 +19,12 @@
  *   - the glyph rides a `::before` pseudo-element, so the row's real text node
  *     — and the status it announces — is untouched.
  *
+ * This sheet deliberately keeps the row animating even when the OS reports
+ * `prefers-reduced-motion: reduce` (see the re-asserted sweep below): the
+ * deployment's Windows images ship with client-area animation off, which
+ * otherwise freezes every indicator here — the sweep and the glyph alike.
+ * In-process sessions keep the stock reduced-motion behaviour.
+ *
  * @module dsh-loop-engine/client/turn-status
  */
 
@@ -53,6 +59,28 @@ const STYLESHEET = `
   background-clip: border-box;
 }
 
+/*
+ * The row's own sweep, re-asserted for hosted engines.
+ *
+ * ui-chat disables that animation under \`prefers-reduced-motion: reduce\`
+ * (ChatView.module.css), and a media query carries no specificity — so this
+ * attribute-gated rule outranks it. That is deliberate here: deployment images
+ * ship with Windows' client-area animation off (SPI_GETCLIENTAREAANIMATION
+ * false), and with the guard in force EVERY indicator on this row is frozen —
+ * the sweep and the glyph alike. Scoped to hosted engines, so in-process
+ * sessions keep the stock reduced-motion behaviour; delete this rule and
+ * restore the guard at the foot of the sheet to hand the decision back to the OS.
+ */
+html[${ENGINE_ATTR}] [class$="_turnStatus"] {
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  animation: le-shimmer 1.8s linear infinite;
+}
+
+@keyframes le-shimmer {
+  to { background-position: 0 0; }
+}
+
 html[${ENGINE_ATTR}="claude-code"] [class$="_turnStatus"] {
   --dsw-static-deepseek-500: #d97757;
   --dsw-static-deepseek-200: #f5bda6;
@@ -61,7 +89,7 @@ html[${ENGINE_ATTR}="claude-code"] [class$="_turnStatus"]::before {
   content: "✻";
   color: #d97757;
   -webkit-text-fill-color: #d97757;
-  animation: le-twinkle 1.4s ease-in-out infinite;
+  animation: le-bloom 1.6s ease-in-out infinite;
 }
 
 html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"] {
@@ -69,11 +97,11 @@ html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"] {
   --dsw-static-deepseek-200: #e6eaf2;
 }
 html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"]::before {
-  content: "▌";
+  content: "⠋";
   color: #a9b1c0;
   -webkit-text-fill-color: #a9b1c0;
-  font-size: 0.85em;
-  animation: le-blink 1s step-end infinite;
+  font-size: 1.1em;
+  animation: le-braille 1s linear infinite;
 }
 
 html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"] {
@@ -84,7 +112,7 @@ html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"]::before {
   content: "π";
   color: #8e4ec6;
   -webkit-text-fill-color: #8e4ec6;
-  animation: le-bob 1.6s ease-in-out infinite;
+  animation: le-sway 1.8s ease-in-out infinite;
 }
 
 html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"] {
@@ -92,31 +120,61 @@ html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"] {
   --dsw-static-deepseek-200: #f5b2b4;
 }
 html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"]::before {
-  content: "♂";
+  content: "🌗";
   color: #e5484d;
   -webkit-text-fill-color: #e5484d;
-  animation: le-spin 2.4s linear infinite;
+  animation: le-moon 2.5s linear infinite;
 }
 
-@keyframes le-twinkle {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.35; transform: scale(0.86); }
+/* Grows from small to large each cycle — the opposite of a twinkle. The range
+   is deliberately wide (3x) because a bare size change on a thin glyph reads
+   weakly otherwise, and the large state is held briefly (50%-62%) so it blooms
+   rather than throbs. 1.35x extends ~2.5px per side at the 14px glyph, inside
+   the 6px ::before margin. */
+@keyframes le-bloom {
+  0%, 100% { transform: scale(0.45); opacity: 0.45; }
+  50%, 62% { transform: scale(1.35); opacity: 1; }
 }
-@keyframes le-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+/* A terminal braille spinner. The glyph is an ordinary text character, not an
+   emoji, so the engine color actually paints — a colored emoji silently ignores
+   color/-webkit-text-fill-color. Stepping content walks the ten dot frames. */
+@keyframes le-braille {
+  0% { content: "⠋"; }
+  10% { content: "⠙"; }
+  20% { content: "⠹"; }
+  30% { content: "⠸"; }
+  40% { content: "⠼"; }
+  50% { content: "⠴"; }
+  60% { content: "⠦"; }
+  70% { content: "⠧"; }
+  80% { content: "⠇"; }
+  90% { content: "⠏"; }
+  100% { content: "⠋"; }
 }
-@keyframes le-bob {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-2px); }
+/* A pendulum swing: π tilts left and right. Rotation reads clearly on a shape
+   with a distinct vertical stem, and needs no layout room the way a
+   translation would. */
+@keyframes le-sway {
+  0%, 100% { transform: rotate(-12deg); }
+  50% { transform: rotate(12deg); }
 }
-@keyframes le-spin {
-  to { transform: rotate(360deg); }
+/* Moon phases rather than a rigid rotation: a spinning moon bitmap can only
+   squash and mirror itself, never show a full or a new moon. Stepping the
+   glyph through the phase set sweeps the lit edge across the disc AND actually
+   reaches 🌕 and 🌑. The order runs waning (full → new), so the lit edge
+   retreats right-to-left — the direction the user picked. */
+@keyframes le-moon {
+  0% { content: "🌕"; }
+  12.5% { content: "🌔"; }
+  25% { content: "🌓"; }
+  37.5% { content: "🌒"; }
+  50% { content: "🌑"; }
+  62.5% { content: "🌘"; }
+  75% { content: "🌗"; }
+  87.5% { content: "🌖"; }
+  100% { content: "🌕"; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  [class$="_turnStatus"]::before { animation: none; }
-}
 `
 
 /**
