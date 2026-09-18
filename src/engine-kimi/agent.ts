@@ -499,7 +499,7 @@ export class KimiAgent implements Agent {
     // step starts with a clean assistant-blocks/tool accumulator.
     this.blocks = []
     this.emittedToolCalls = new Set()
-    this.toolText = new Map()
+    this.toolContent = new Map()
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -574,7 +574,8 @@ export class KimiAgent implements Agent {
   /** Per-step accumulation state for streamed assistant blocks and tool calls. */
   private blocks: OpenBlock[] = []
   private emittedToolCalls = new Set<string>()
-  private toolText = new Map<string, string>()
+  /** Latest content snapshot per open tool call (see {@link applyUpdate}). */
+  private toolContent = new Map<string, string>()
 
   private blockRef(type: 'text' | 'reasoning'): OpenBlock | undefined {
     return this.blocks.find(block => block.type === type)
@@ -624,22 +625,25 @@ export class KimiAgent implements Agent {
       this.emittedToolCalls.add(callId)
       const name = toolCallName(update)
       this.session.append('tool/call', { turn, step, callId: ToolCallId(callId), name, arguments: '{}' })
-      this.toolText.set(callId, '')
+      this.toolContent.set(callId, '')
       return
     }
     if (isToolCallUpdate(update)) {
       const callId = toolCallIdOf(update)
-      if (callId === '' || !this.toolText.has(callId)) return
-      const delta = toolContentText(update)
-      // The has() guard above guarantees the entry exists, so a bare get() is
-      // defined and needs no `?? ''` fallback.
-      const accumulated = `${this.toolText.get(callId)!}${delta}`
-      this.toolText.set(callId, accumulated)
+      if (callId === '' || !this.toolContent.has(callId)) return
+      // Kimi re-sends the whole content on every update, so this replaces the
+      // stored snapshot rather than extending it (see acp/mapping.ts). An update
+      // with no content field leaves the last snapshot standing, so a settling
+      // frame that only carries the status still reports the real output.
+      const snapshot = toolContentText(update)
+      if (snapshot !== undefined) this.toolContent.set(callId, snapshot)
       const status = (update as { status?: unknown }).status as string
       if (isToolSettledStatus(status)) {
-        const message = toolResult(callId, accumulated, isToolErrorStatus(status))
+        // The has() guard above guarantees the entry exists, so a bare get() is
+        // defined and needs no `?? ''` fallback.
+        const message = toolResult(callId, this.toolContent.get(callId)!, isToolErrorStatus(status))
         this.session.append('tool/result', { turn, step, message }, { surfaceOp: 'append' })
-        this.toolText.delete(callId)
+        this.toolContent.delete(callId)
       }
       return
     }

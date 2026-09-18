@@ -76,14 +76,14 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 ### 4.2 JSON-RPC 客户端（acp/client.ts）
 
-- **帧切分**：裸 `\n` 分行，`StringDecoder('utf8')` 跨 chunk 拼字节，容忍行尾单个 `\r`；空行与非 JSON 行直接忽略（client.ts:183-205）。
-- **请求-响应关联**：自增数字 id，`pending` map 结算；响应帧带 `error` 时 reject（无 message 时回退 `'kimi acp request failed'`），无匹配 id 的响应丢弃（client.ts:114-121,230-240）。
-- **通知分发**：`session/update` 通知同时走 `onUpdate` 回调、内部 buffer 和 `updates()` 异步生成器三路（client.ts:217-223,160-170）。agent 实际只用 `onUpdate` 回调路径（agent.ts:549），生成器是保留接口。
-- **反向 RPC**：`session/request_permission` 交给注册的 handler 应答；**未注册 handler 时 fail-closed 答 `approved: false`**（client.ts:242-245）。未知反向 RPC 回 `-32601 Method not found`，防止对端悬挂（client.ts:225-227）。
-- **协议握手**：`initialize` 发 `protocolVersion: 1.0`、`clientInfo: { name: 'dsh-loop-engine', version: '1.0.0' }`（client.ts:130-132；版本号是硬编码字符串，与包版本无关）。
-- **会话操作**：`newSession` 校验返回里的 `sessionId` 非空字符串（client.ts:135-142）；`prompt` 体为 `{ sessionId, prompt: [{ type: 'text', text }] }`（145-147）；`cancel` 是 fire-and-forget，吞掉 rejection（150-152）。
-- **生命周期**：`dispose()` 封口、请求进程树终止、以 `'kimi acp client is sealed'` 拒掉所有 pending（173-181）；子进程 `done` 正常落定（exit）时以 `'kimi acp process exited unexpectedly'` 拒掉 pending 并封口（79-84）。**注意 done 以 rejection 落定的分支只封口、不拒 pending**（85-88）——此时在飞的 prompt 永不结算（测试 `client.spec.ts:346-360` 显式覆盖了该行为，改这里要先想清楚语义）。
-- `AcpClient.create(spec, spawn?)`：给了 spawn capability 就用它（生产路径，subprocess 接缝）；没给就退回 `node:child_process` 裸 spawn（client.ts:28-35,98-101）——后者只在无接缝环境（测试）出现。
+- **帧切分**：裸 `\n` 分行，`StringDecoder('utf8')` 跨 chunk 拼字节，容忍行尾单个 `\r`；空行与非 JSON 行直接忽略（client.ts:228-250）。
+- **请求-响应关联**：自增数字 id，`pending` map 结算；响应帧带 `error` 时 reject（无 message 时回退 `'kimi acp request failed'`），无匹配 id 的响应丢弃（client.ts:159-166,275-285）。
+- **通知分发**：`session/update` 通知同时走 `onUpdate` 回调、内部 buffer 和 `updates()` 异步生成器三路（client.ts:262-268,205-215）。agent 实际只用 `onUpdate` 回调路径（agent.ts:549），生成器是保留接口。
+- **反向 RPC**：`session/request_permission` 交给注册的 handler 取布尔裁决，再由 `permissionResponse(approved, options)` 编码成 **ACP `RequestPermissionResponse`**——批准选中 `kind === 'allow_once'` 的那条 option 回填 `optionId`，拒绝选中 `reject_once`（client.ts:31-63,287-294）。**候选不唯一（0 条或多条）时答 `{ outcome: { outcome: 'cancelled' } }`**，因为无头运行时没有人类能在多选里挑一个：Kimi 把 question 桥（`q0_opt_*`）和 plan_review 桥都塞进这同一个 RPC，默认批准会替用户答题，默认拒绝才是 fail-closed（client.ts:40-55 注释）。**未注册 handler 时同样 fail-closed 走拒绝**（client.ts:292）。未知反向 RPC 回 `-32601 Method not found`，防止对端悬挂（client.ts:270-272）。
+- **协议握手**：`initialize` 发 `protocolVersion: 1.0`、`clientInfo: { name: 'dsh-loop-engine', version: '1.0.0' }`（client.ts:175-177；版本号是硬编码字符串，与包版本无关）。
+- **会话操作**：`newSession` 校验返回里的 `sessionId` 非空字符串（client.ts:180-187）；`prompt` 体为 `{ sessionId, prompt: [{ type: 'text', text }] }`（190-192）；`cancel` 是 fire-and-forget，吞掉 rejection（195-197）。
+- **生命周期**：`dispose()` 封口、请求进程树终止、以 `'kimi acp client is sealed'` 拒掉所有 pending（218-226）；子进程 `done` 正常落定（exit）时以 `'kimi acp process exited unexpectedly'` 拒掉 pending 并封口（124-129）。**注意 done 以 rejection 落定的分支只封口、不拒 pending**（130-133）——此时在飞的 prompt 永不结算（测试 `client.spec.ts:413-427` 显式覆盖了该行为，改这里要先想清楚语义）。
+- `AcpClient.create(spec, spawn?)`：给了 spawn capability 就用它（生产路径，subprocess 接缝）；没给就退回 `node:child_process` 裸 spawn（client.ts:73-80,143-146）——后者只在无接缝环境（测试）出现。
 
 ## 5. 事件映射（ACP update ↔ dsh SessionEvent）
 
@@ -93,8 +93,8 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 |---|---|---|
 | `agent_thought_chunk` | live `agent/assistant-stream` 帧（block-start/reasoning-delta）+ `assistant/message` 的 reasoning 块 | 空 delta 忽略，不开块（agent.ts:601-609） |
 | `agent_message_chunk` | 同上，text 块 | agent.ts:611-619 |
-| `tool_call` | `tool/call` | `callId` 取 `toolCallId`，`name` 取 `title`；**arguments 恒为 `'{}'`**——ACP 公告不携带真实参数（agent.ts:621-628）。空 id 或重复 id 忽略 |
-| `tool_call_update` | `tool/result`（settled 时） | 文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套累积（mapping.ts:67-71）；status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:58-60），`failed/error/denied` 记 `isError`（mapping.ts:63-65）；空结果文本回退 `'(no content)'`（mapping.ts:77）。未announce过的 callId 的 update 被忽略（agent.ts:632） |
+| `tool_call` | `tool/call` | `callId` 取 `toolCallId`，`name` 取 `title`；**arguments 恒为 `'{}'`**——ACP 公告不携带真实参数（agent.ts:621-631）。空 id 或重复 id 忽略 |
+| `tool_call_update` | `tool/result`（settled 时） | 文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套提取，**但语义是快照不是增量**（mapping.ts:69-86）：每条 update 重发该调用的完整内容，所以只取**最后一条**（`toolContentText` 返回 `string \| undefined`，`undefined` = 这条 update 未带 content 字段，保留上一条，见 agent.ts:636-641）。status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:59-61），`failed/error/denied` 记 `isError`（mapping.ts:64-66）；空结果文本回退 `'(no content)'`（mapping.ts:88-95）。未announce过的 callId 的 update 被忽略（agent.ts:634） |
 | 其他（`available_commands_update`、`config_option_update`、`plan`…） | 无 | 不属于忠实模型上下文投影，直接跳过（agent.ts:646-647） |
 
 落日志的几个不变量：
@@ -113,7 +113,8 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 - **沙箱姿态不参与该折叠**（permission.ts:24-27 JSDoc）：Kimi 自己的工具策略约束工具能做什么，ACP 审批是 host 的闸门，信号只取 `approval/policy` 旋钮。沙箱姿态另由 subprocess 接缝在进程层生效。
 - `sessionApprovalPolicy` 从后往前取最后一条合法 `approval/policy` 事件（`src/driver-core/permission-knobs.ts:40-47`）。
 - 权限回调在每个 step 重新挂载：`client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))`（agent.ts:521），读的是**应答时刻**的会话日志，所以运行中切换策略即刻生效。
-- 双保险：即使 agent 没挂 handler，client 未注册 handler 时默认拒绝（client.ts:243）。
+- 双保险：即使 agent 没挂 handler，client 未注册 handler 时默认拒绝（client.ts:292）。
+- **裁决 ≠ 应答**：布尔裁决只是驱动侧的决定，线上必须编码成 ACP 的 `RequestPermissionResponse`（选中 agent 广告的某条 option 回填 `optionId`，见 §4.2）。Kimi 侧只读 `response.outcome.optionId`（其 `permissionResponseToApprovalResponse` 对 `cancelled` 之外的任何未知/缺失 optionId 一律返回 `decision: 'rejected'`，而请求本身失败时 catch 分支同样回落 `'rejected'`）——所以**答成非 ACP 形状（例如自造的 `{ approved: true }`）会被 Kimi 一律当作用户拒绝**，表现为 `Tool "…" was not run because the user rejected the approval request`，且与 dsh 侧选了什么权限预设无关。这意味着改这里的线格式必须对着 Kimi CLI 内嵌的 `@agentclientprotocol/sdk` 的 zod schema 核，不能只看本地 mock。
 
 ## 7. 斜杠命令桥接与技能注入
 
@@ -183,9 +184,11 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 - **arguments 恒为 `'{}'`**：`tool/call` 没有真实参数可记（ACP `tool_call` 公告不含参数，agent.ts:626）。下游若依赖工具参数回放会拿不到。
 - **每步全新 ACP 会话**：`session/new` 每步一次（agent.ts:522），Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量的代价，与 claude/codex 驱动一致。
-- **done-rejection 分支不拒 pending**：`done` 以 rejection 落定时在飞请求永不结算（client.ts:85-88），见 4.2。
+- **done-rejection 分支不拒 pending**：`done` 以 rejection 落定时在飞请求永不结算（client.ts:130-133），见 4.2。
 - **`config.model` 不进子进程**：想真正钉模型只能靠 Kimi 自己的配置；插件的 `model` 只是日志标签。
 - **撞名命令被跳过**：见 7.1。
+- **~~审批被拒的 `tool/result` 文本会被 Kimi 的输入回显撑爆~~**：已修（2026-09-18）。`tool_call_update.content` 是**累计快照**而非增量，旧实现逐条追加（`toolText` accumulator），一次被拒的 Bash 调用会留下 6.6KB 的 `{{"command{"command"...` 嵌套垃圾并被喂回模型上下文。现在改为一律**替换**最新快照（见 §5 表与 `mapping.ts:69-86`）。教训：Kimi 的 chunk 类字段（`agent_message_chunk`/`agent_thought_chunk`）是增量，工具卡字段是快照——两类字段不能按同一套假设折叠。
+- **Kimi 的 question / plan_review 桥未被利用**：Kimi 把 `AskUserQuestion` 和 plan_review 也塞进 `session/request_permission`（选项 id 形如 `q0_opt_*`、`plan_*`）。当前实现只按 `kind` 找唯一的 `allow_once`/`reject_once`，多候选一律 `cancelled`（fail-closed、诚实但不作答）。dsh 有 `ctx.userQuestions`（codex 驱动已接，见 `docs/engine-codex.md` §6.4），理论上可把这类请求转过去真答；需要先把 ACP 选项 id 空间映射回问题/选项，属于**新功能**而非修 bug。
 
 ### 代码与注释不一致之处（改动前先核对）
 
@@ -198,14 +201,14 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 ## 10. 测试覆盖要点
 
-Kimi 相关 spec 共 9 个文件（约 2730 行），仓库覆盖门槛为 `src/**` 逐文件 100%（`src/client` 除外），所以源码里大量 `v8 ignore` 注释标记的是防御性 backstop，不是可删代码。
+Kimi 相关 spec 共 9 个文件（约 2800 行），仓库覆盖门槛为 `src/**` 逐文件 100%（`src/client` 除外），所以源码里大量 `v8 ignore` 注释标记的是防御性 backstop，不是可删代码。
 
-- `tests/engine-kimi/agent.spec.ts`（868 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含工具专属步的空父消息）；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
+- `tests/engine-kimi/agent.spec.ts`（895 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含工具专属步的空父消息；**连续增长的快照只留最后一条**；settle 帧不带 content 时沿用上一条快照）；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
 - `tests/engine-kimi/index.spec.ts`（692 行）：工厂注册与 HMR 安全拆除（fiber dispose 后槽位清空）；create 的 seed/meta 透传、预中止信号（Error 与非 Error reason）、setup commit/失败回滚/挂起中止、owner fiber 中途卸载回滚（含 scope minting 竞态）；resume 全路径（无 persistence 报错、JSONL 后端恢复、预中止、取消加载时释放遗弃 preparation、加载后工厂失活、prepare 失败传播、取消后迟到失败吞掉）。
 - `tests/engine-kimi/loop.spec.ts`（231 行）：spawn 管线——bin 解析优先级、spawn spec → 接缝投影（argv/stdio/graceMs/env/signal）、handle → 传输层 round-trip、stderr 排空；systemPrompt 变量在无 agent 时为 undefined。
 - `tests/engine-kimi/process.spec.ts`（125 行）：`kimiHomeDir`/`kimiBinResolver`（mock `existsSync` 与 homedir）、`kimiAcpArgv`、`kimiSubprocessSpec`（argv 复制、signal 透传）、`fromSubprocess`（缺 pipe 抛错）。
-- `tests/engine-kimi/acp/client.spec.ts`（372 行）：假 `KimiProcess` 上的全协议行为——请求关联（result/error/无 message 回退/孤儿响应）、session 生命周期（newSession 无 id 抛错、prompt 体形、cancel 吞 rejection）、update 缓冲与生成器、反向 RPC（批准/拒绝/未知 method → -32601/无 handler fail-closed）、`create` 的注入 spawn 与裸 spawn 回退、notify、帧健壮性（`\r\n`、空行、非 JSON、string chunk、method 非字符串）、封口后行为、子进程退出拒 pending、done rejection 只封口。
-- `tests/engine-kimi/acp/mapping.spec.ts`（110 行）：分类谓词、chunkDelta 边界（image/缺 content）、status 分类（settled/error）、嵌套 content 拼接、`toolResult` 投影与 `(no content)` 回退。
+- `tests/engine-kimi/acp/client.spec.ts`（439 行）：假 `KimiProcess` 上的全协议行为——请求关联（result/error/无 message 回退/孤儿响应）、session 生命周期（newSession 无 id 抛错、prompt 体形、cancel 吞 rejection）、update 缓冲与生成器、反向 RPC（按 `CANONICAL_OPTIONS` 批准→`approve_once` / 拒绝→`reject`、多候选与无 option 词汇→`cancelled`、畸形 option 条目被丢弃、未知 method → -32601、无 handler fail-closed）、`create` 的注入 spawn 与裸 spawn 回退、notify、帧健壮性（`\r\n`、空行、非 JSON、string chunk、method 非字符串）、封口后行为、子进程退出拒 pending、done rejection 只封口。
+- `tests/engine-kimi/acp/mapping.spec.ts`（116 行）：分类谓词、chunkDelta 边界（image/缺 content）、status 分类（settled/error）、嵌套 content 拼接、**无 content 字段 → `undefined`（区别于空 content → `''`）**、`toolResult` 投影与 `(no content)` 回退。
 - `tests/engine-kimi/permission.spec.ts`（30 行）：`resolveToolApproval` 折叠——never/沙箱/无旋钮批准，ask 拒绝且压过 full-access。
 - `tests/engine-kimi/skills.spec.ts`（254 行）：`kimiAgentDir` 覆盖；AGENTS.md 发现/空文件忽略/cwd→git root 合并；项目与用户 SKILL.md 发现（含 `KIMI_CODE_HOME` 覆盖、扁平 .md、垃圾条目跳过、目录缺 SKILL.md、abort 返回空）；get 的内容加载与文件消失 → undefined。
 - `tests/engine-kimi/commands.spec.ts`（50 行）：转发 handler 的原文行拼装（带/不带参数）与 `KIMI_COMMANDS` 每条都有转发 handler。
