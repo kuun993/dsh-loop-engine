@@ -16,10 +16,55 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import type { KimiProcess, KimiSpawnCapability, KimiSpawnSpec } from '../process.ts'
-import { isPermissionRequestFrame, isUpdateFrame, type AcpFrame, type AcpUpdate } from './types.ts'
+import {
+  isPermissionRequestFrame,
+  isUpdateFrame,
+  type AcpFrame,
+  type AcpPermissionOption,
+  type AcpPermissionResponse,
+  type AcpUpdate,
+} from './types.ts'
 
 /** How the client answers one `session/request_permission`. */
 export type AcpPermissionHandler = (request: AcpFrame) => boolean | Promise<boolean>
+
+/**
+ * The answerable options of one `session/request_permission` frame. The wire is
+ * untrusted, so entries without a usable `optionId` are dropped rather than
+ * echoed back.
+ * @param frame - the reverse-RPC request frame.
+ * @returns the options the client may answer with.
+ */
+export function permissionOptionsOf(frame: AcpFrame): readonly AcpPermissionOption[] {
+  const params = frame.params as { options?: unknown } | undefined
+  if (params === undefined || !Array.isArray(params.options)) return []
+  return params.options.filter((option): option is AcpPermissionOption =>
+    typeof option === 'object' && option !== null && typeof (option as { optionId?: unknown }).optionId === 'string')
+}
+
+/**
+ * Encode one approval decision as the ACP `RequestPermissionResponse` the agent
+ * correlates against the options it advertised. The agent reads a terminal
+ * *option*, never a boolean: an outcome it cannot resolve (or a response that
+ * fails to parse at all) is reported to the model as a user rejection, so a
+ * decision that no single option expresses becomes `cancelled` — the honest
+ * "this client has no answer". Kimi re-uses this RPC for its question and
+ * plan-review bridges, which offer one `allow_once` option per choice; picking
+ * one of those would answer a question no human was asked, so any ambiguous
+ * set (zero or several `allow_once`/`reject_once` candidates) cancels instead.
+ * `allow_once` is preferred over `allow_always` because the decision is re-read
+ * from the session knobs on every request: letting the agent cache a session
+ * grant would outlive a mid-session switch back to `ask`.
+ * @param approved - whether the driver approves the request.
+ * @param options - the options the agent advertised for this request.
+ * @returns the result payload to send back.
+ */
+export function permissionResponse(approved: boolean, options: readonly AcpPermissionOption[]): AcpPermissionResponse {
+  const candidates = options.filter(option => option.kind === (approved ? 'allow_once' : 'reject_once'))
+  const match = candidates.length === 1 ? candidates[0] : undefined
+  if (match === undefined) return { outcome: { outcome: 'cancelled' } }
+  return { outcome: { outcome: 'selected', optionId: match.optionId } }
+}
 
 /** Callback receiving every non-response event line. */
 export type AcpUpdateHandler = (update: AcpUpdate) => void
@@ -151,9 +196,13 @@ export class AcpClient {
     this.request('session/cancel', { sessionId }).catch(() => undefined)
   }
 
-  /** Answer a pending `session/request_permission`. */
-  respondPermission(id: number, approved: boolean): void {
-    this.process.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result: { approved } })}\n`)
+  /**
+   * Answer a pending `session/request_permission`.
+   * @param id - the reverse-RPC request id.
+   * @param response - the ACP outcome to answer with.
+   */
+  respondPermission(id: number, response: AcpPermissionResponse): void {
+    this.process.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result: response })}\n`)
   }
 
   /** Consume every buffered update as an async generator. */
@@ -241,6 +290,6 @@ export class AcpClient {
 
   private async handlePermission(id: number, frame: AcpFrame): Promise<void> {
     const approved = this.permissionHandler === undefined ? false : await this.permissionHandler(frame)
-    this.respondPermission(id, approved)
+    this.respondPermission(id, permissionResponse(approved, permissionOptionsOf(frame)))
   }
 }

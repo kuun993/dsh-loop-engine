@@ -53,10 +53,36 @@ export interface AcpToolCallStreamExt extends AcpUpdate {
   readonly content?: readonly AcpToolContentBlock[]
 }
 
+/** One option the agent offers for a `session/request_permission`. */
+export interface AcpPermissionOption {
+  /** Opaque id the client sends back in `outcome.optionId` (the only field the agent reads). */
+  readonly optionId: string
+  /** Human-readable label for the option. */
+  readonly name?: string
+  /** Option class: `allow_once` / `allow_always` / `reject_once` / `reject_always`. */
+  readonly kind?: string
+}
+
 /** The `session/request_permission` reverse-RPC params. */
 export interface AcpPermissionRequest {
   readonly sessionId?: string
-  readonly request?: unknown
+  /** Every option the agent will accept an answer for; empty means no answerable choice. */
+  readonly options?: readonly AcpPermissionOption[]
+  /** The tool call the prompt belongs to (presentation/correlation only). */
+  readonly toolCall?: unknown
+}
+
+/**
+ * Terminal outcome of a permission request: the option the client picked, or
+ * `cancelled` when it had no answer to give.
+ */
+export type AcpPermissionOutcome =
+  | { readonly outcome: 'selected'; readonly optionId: string }
+  | { readonly outcome: 'cancelled' }
+
+/** The `session/request_permission` result the agent expects (ACP `RequestPermissionResponse`). */
+export interface AcpPermissionResponse {
+  readonly outcome: AcpPermissionOutcome
 }
 
 /** Result of a completed `session/prompt` request (opaque; the turn ended). */
