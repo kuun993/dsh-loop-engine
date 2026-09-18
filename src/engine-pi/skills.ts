@@ -19,25 +19,18 @@
  * at composition time — the filesystem subset above is authoritative for the
  * web menu.
  *
+ * The discovery algorithm itself lives in {@link AgentsMdSkillProvider}; this
+ * module supplies only Pi's locations and ranks.
+ *
  * @module dsh-loop-engine/engine-pi/skills
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import {
-  anySourceNonEmpty,
-  collectProjectContextFiles,
-  fileNonEmpty,
-  projectAncestors,
-  readSources,
-  type ContextFilePolicy,
-} from '../driver-core/context-files.ts'
-import { parseSkillFile, type ParsedSkill } from '../skills.ts'
-import type { SkillCandidate, SkillDefinition, SkillLookupOptions, SkillProvider, SkillProviderControl } from '../skills.ts'
+import { join, resolve } from 'node:path'
+import type { ContextFilePolicy } from '../driver-core/context-files.ts'
+import { AgentsMdSkillProvider, type AgentsMdProviderSpec } from '../driver-core/agents-md-skill-provider.ts'
+import type { SkillProviderControl } from '../skills.ts'
 
-/** Provider identity registered against the host skills service. */
-const PROVIDER_NAME = 'pi'
 /** Project `agents-md` rank — between project-dsh (100) and custom (300). */
 const PI_AGENTS_PROJECT_RANK = 140
 /** Project `.pi/skills/` rank — project AGENTS.md beats project skills. */
@@ -52,19 +45,6 @@ const PI_CONTEXT_POLICY = {
   primary: ['AGENTS.md', 'CLAUDE.md'],
 } satisfies ContextFilePolicy
 
-/** Locator for the merged `agents-md` candidate. */
-interface AgentsMdLocator {
-  readonly kind: 'agents-md'
-  /** Existing context files, nearest directory first. */
-  readonly paths: readonly string[]
-}
-
-/** Locator for one parsed `SKILL.md` entry. */
-interface SkillFileLocator {
-  readonly kind: 'skill-file'
-  readonly path: string
-}
-
 /**
  * Resolve the pi config directory, honoring the `PI_CODING_AGENT_DIR`
  * environment override and falling back to `~/.pi/agent`.
@@ -76,6 +56,22 @@ export function piAgentDir(): string {
   return join(homedir(), '.pi', 'agent')
 }
 
+/** Pi's discovery surface: `AGENTS.md`/`CLAUDE.md` context files and `.pi/skills/`. */
+const PI_SPEC: AgentsMdProviderSpec = {
+  name: 'pi',
+  agentsMdDescription: 'Pi project/user instructions (AGENTS.md / CLAUDE.md)',
+  contextPolicy: PI_CONTEXT_POLICY,
+  userDir: piAgentDir,
+  projectRank: PI_AGENTS_PROJECT_RANK,
+  userContext: { file: 'AGENTS.md', rank: PI_AGENTS_USER_RANK },
+  skills: {
+    project: ['.pi', 'skills'],
+    projectRank: PI_SKILL_PROJECT_RANK,
+    userDir: 'skills',
+    userRank: PI_SKILL_USER_RANK,
+  },
+}
+
 /**
  * Skill provider that discovers context files and skills from pi's standard
  * locations:
@@ -84,136 +80,9 @@ export function piAgentDir(): string {
  *   - project `.pi/skills/` and user `~/.pi/agent/skills/` — each `SKILL.md`
  *     entry surfaced under its own name.
  */
-export class PiSkillProvider implements SkillProvider {
-  readonly name = PROVIDER_NAME
-
-  constructor(private readonly control: SkillProviderControl) {}
-
-  async list(options: SkillLookupOptions): Promise<readonly SkillCandidate[]> {
-    const candidates: SkillCandidate[] = []
-    const cwd = options.cwd
-    if (cwd !== undefined) {
-      const projectDirs = await projectAncestors(cwd)
-      const contextPaths = await collectProjectContextFiles(cwd, PI_CONTEXT_POLICY)
-      if (await anySourceNonEmpty(contextPaths)) candidates.push(this.agentsCandidate(contextPaths, PI_AGENTS_PROJECT_RANK))
-      for (const dir of projectDirs) {
-        await this.collectSkillsDir(join(dir, '.pi', 'skills'), PI_SKILL_PROJECT_RANK, candidates)
-      }
-    }
-    const userAgentDir = piAgentDir()
-    const userContext = join(userAgentDir, 'AGENTS.md')
-    if (await fileNonEmpty(userContext)) candidates.push(this.agentsCandidate([userContext], PI_AGENTS_USER_RANK))
-    await this.collectSkillsDir(join(userAgentDir, 'skills'), PI_SKILL_USER_RANK, candidates)
-    if (this.control.signal.aborted) return []
-    return candidates
-  }
-
-  async get(candidate: SkillCandidate, _options: SkillLookupOptions): Promise<SkillDefinition | undefined> {
-    const locator = candidate.locator as AgentsMdLocator | SkillFileLocator
-    if (locator.kind === 'skill-file') {
-      const parsed = await this.tryParse(locator.path)
-      if (parsed === undefined) return undefined
-      return {
-        name: parsed.name,
-        description: parsed.description,
-        ...parsed.whenToUse === undefined ? {} : { whenToUse: parsed.whenToUse },
-        invocation: parsed.invocation,
-        source: candidate.source,
-        provider: this.name,
-        content: parsed.content,
-        path: locator.path,
-        resourceBase: { kind: 'directory', path: dirname(locator.path) },
-      }
-    }
-    const content = await readSources(locator.paths)
-    if (content === undefined) return undefined
-    // Every candidate is constructed from a non-empty file set.
-    const first = locator.paths[0]!
-    return {
-      name: candidate.name,
-      description: candidate.description,
-      invocation: candidate.invocation,
-      source: candidate.source,
-      provider: this.name,
-      content,
-      path: first,
-      resourceBase: { kind: 'file', path: first },
-    }
-  }
-
-  /** One merged `agents-md` candidate for a ranked file set. */
-  private agentsCandidate(paths: readonly string[], rank: number): SkillCandidate {
-    // Every caller only constructs candidates from a non-empty file set.
-    const first = paths[0]!
-    return {
-      name: 'agents-md',
-      description: 'Pi project/user instructions (AGENTS.md / CLAUDE.md)',
-      invocation: { modelInvocable: true, userInvocable: true },
-      source: 'custom',
-      provider: this.name,
-      rank,
-      locator: { kind: 'agents-md', paths } satisfies AgentsMdLocator,
-      path: first,
-      resourceBase: { kind: 'file', path: first },
-    }
-  }
-
-  /** Collect every skill in one skills directory, both pi layouts. */
-  private async collectSkillsDir(skillsDir: string, rank: number, candidates: SkillCandidate[]): Promise<void> {
-    let entries
-    try {
-      entries = await readdir(skillsDir, { withFileTypes: true, encoding: 'utf8' })
-    } catch {
-      return // missing or unreadable — no skills from this root
-    }
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      const entryPath = join(skillsDir, entry.name)
-      // stat follows links: Windows skill installers use junctions, whose
-      // Dirent reports neither isFile() nor isDirectory().
-      /* v8 ignore start -- stat only loses a mid-listing delete race */
-      /* v8 ignore next -- see above */
-      const info = await stat(entryPath).catch(() => undefined)
-      if (info === undefined) continue
-      /* v8 ignore stop */
-      if (info.isDirectory()) {
-        const path = join(entryPath, 'SKILL.md')
-        const parsed = await this.tryParse(path)
-        if (parsed === undefined) continue
-        candidates.push(this.skillCandidate(parsed, path, rank, entryPath))
-        continue
-      }
-      // Flat root `<name>.md` files are discovered as individual skills.
-      if (!entry.name.endsWith('.md')) continue
-      const parsed = await this.tryParse(entryPath)
-      if (parsed === undefined) continue
-      candidates.push(this.skillCandidate(parsed, entryPath, rank, skillsDir))
-    }
-  }
-
-  /** One parsed skill as a ranked candidate. */
-  private skillCandidate(skill: ParsedSkill, path: string, rank: number, resourceDir: string): SkillCandidate {
-    return {
-      name: skill.name,
-      description: skill.description,
-      ...skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse },
-      invocation: skill.invocation,
-      source: 'custom',
-      provider: this.name,
-      rank,
-      locator: { kind: 'skill-file', path } satisfies SkillFileLocator,
-      path,
-      resourceBase: { kind: 'directory', path: resourceDir },
-    }
-  }
-
-  /** Parse one SKILL.md file, or `undefined` when it is unreadable or invalid. */
-  private async tryParse(path: string): Promise<ParsedSkill | undefined> {
-    try {
-      const raw = await readFile(path, { encoding: 'utf8' })
-      return parseSkillFile(raw)
-    } catch {
-      return undefined
-    }
+export class PiSkillProvider extends AgentsMdSkillProvider {
+  constructor(control: SkillProviderControl) {
+    super(PI_SPEC, control)
   }
 }
 

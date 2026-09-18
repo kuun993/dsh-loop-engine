@@ -18,13 +18,9 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
-/** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
-  },
-}
+import { loopPluginFor, mountHarness } from '../helpers/agent-harness.ts'
+
+const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
 
@@ -148,13 +144,7 @@ function streamEvent(event: unknown): SDKMessage {
 }
 
 async function harness(): Promise<Context> {
-  const ctx = new Context()
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(loopPlugin, {})
-  return ctx
+  return await mountHarness(loopPlugin)
 }
 
 describe('ClaudeCodeLoop factory registration', () => {

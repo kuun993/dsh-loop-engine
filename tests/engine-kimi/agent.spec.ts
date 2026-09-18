@@ -8,17 +8,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent, type Session } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
+import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 
-/** Local plugin wrapper: mount constructs the Kimi loop factory. */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new KimiLoop(ctx, config as Parameters<typeof KimiLoop>[1])
-  },
-}
+const loopPlugin = loopPluginFor(KimiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 /** Hoisted mock client plus the per-step update stream and capture of create specs. */
 const mock = vi.hoisted(() => {
@@ -67,17 +61,7 @@ const toolStream = (id: string, status: string, text: string): Record<string, un
 
 /** Bind a fresh harness context with the loop plugin mounted. */
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  const ctx = new Context()
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-  await ctx.plugin(AgentRegistry)
-  ctx.provide('subprocess', { spawn: vi.fn() })
-  await ctx.plugin(loopPlugin, config)
-  return ctx
-}
-
-function message(text: string) {
-  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+  return await mountHarness(loopPlugin, config, 'stub')
 }
 
 /** Text of a single-block user message, for content assertions. */

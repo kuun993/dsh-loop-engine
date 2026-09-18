@@ -1,6 +1,6 @@
 /**
  * Reading the dsh session's durable permission knobs from the session log.
- * Both the Claude Code and Codex drivers fold the same `sandbox/mode` and
+ * Every hosted driver folds the same `sandbox/mode` and
  * `approval/policy` events (pinned at creation, re-recorded on every switch)
  * into per-query permission decisions; the knob readers are engine-free.
  *

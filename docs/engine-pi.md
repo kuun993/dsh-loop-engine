@@ -8,7 +8,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 
 两个核心设计动机：
 
-- **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:204`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
+- **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:166`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
 - **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:558-559`、`src/driver-core/prompt.ts:93-127`）。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:829-834`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
@@ -111,7 +111,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ### 6.2 "沙箱"的实际边界（重要）
 
-源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:187`、`agent.ts:8`、`rpc/client.ts:5`）。**经核实主仓 `packages/subprocess/` 全部源码不含任何 sandbox 机制**（全目录 grep `sandbox` 无匹配），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-104`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:130-139`）。
+源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5`）。**经核实主仓 `packages/subprocess/` 全部源码不含任何 sandbox 机制**（全目录 grep `sandbox` 无匹配），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-104`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:100-109`）。
 
 实际生效的边界是三层，**没有 OS 级文件系统/网络隔离**：
 
@@ -125,9 +125,9 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 两条互补路径：
 
-**Provider 侧**——`PiSkillProvider`（`skills.ts:87-218`）由 `mountPi` 注册到宿主 `skills` 服务（`src/index.ts:576-582`），发现两类候选：
+**Provider 侧**——`PiSkillProvider extends AgentsMdSkillProvider`（`skills.ts:83-87`，算法在 `src/driver-core/agents-md-skill-provider.ts`，见 `docs/driver-core.md` §7.2.1）由 `mountPi` 注册到宿主 `skills` 服务（`src/index.ts:576-582`），发现两类候选：
 
-- `agents-md`（合并技能）：会话 cwd 到 git root 的每目录上下文文件，策略是 `AGENTS.override.md` 优先、否则 `AGENTS.md` → `CLAUDE.md`（`PI_CONTEXT_POLICY`，`skills.ts:50-53`；收集逻辑在 `src/driver-core/context-files.ts:52-72`），外加用户级 `<piAgentDir>/AGENTS.md`。`piAgentDir()` 读 `PI_CODING_AGENT_DIR`，缺省 `~/.pi/agent`（`skills.ts:73-77`）。项目集 rank 140，用户集 rank 160——项目文件赢同名冲突（`skills.ts:42-48`）。
+- `agents-md`（合并技能）：会话 cwd 到 git root 的每目录上下文文件，策略是 `AGENTS.override.md` 优先、否则 `AGENTS.md` → `CLAUDE.md`（`PI_CONTEXT_POLICY`，`skills.ts:43-46`；收集逻辑在 `src/driver-core/context-files.ts:52-72`），外加用户级 `<piAgentDir>/AGENTS.md`（spec 的 `userContext`，`skills.ts:66`）。`piAgentDir()` 读 `PI_CODING_AGENT_DIR`，缺省 `~/.pi/agent`（`skills.ts:53-58`）。项目集 rank 140，用户集 rank 160——项目文件赢同名冲突（`skills.ts:35-41`）。
 - `SKILL.md` 目录项：项目各级 `.pi/skills/`（rank 150）与用户 `~/.pi/agent/skills/`（rank 170），支持 `<name>/SKILL.md` 目录型与 `<name>.md` 扁平型两种布局；用 `stat` 而非 Dirent 判定类型，因为 Windows 的 junction 两者都不是（`skills.ts:162-191`）。解析复用 `src/skills.ts` 的 `parseSkillFile`。
 
 不扫 `.agents/skills`（dsh 自己的 `skill-filesystem` provider 已覆盖）；pi 设置/CLI/包级技能需要跑 `pi --mode rpc` 探针才能发现，组合期不做，文件系统子集即权威（`skills.ts:15-20` 注释）。
@@ -143,7 +143,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 | `piProvider` | `provider` | `--provider <值>`（`agent.ts:516`） |
 | `model`（与 claude/codex 共用） | `model` | `--model`，见下 |
 | `piThinking` | `thinkingLevel` | 拼进 `--model`，见下 |
-| `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:68、137`） |
+| `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:56、106`） |
 | `sandboxMode`（与 codex 共用同一键） | `sandboxMode` | 钉死姿态，见第 6 节 |
 
 > 注：`config.model` 在 `spawnSpec` 里是**回退值**——它优先读会话日志最新 `model/selection` 事件的 `model`（用户经 `/model` 选择），仅在无该事件时回退到部署配置（见下）。Pi 模型目录（`pi --list-models` 探针结果）经内部 `piCatalogHolder` 注入，而非本表所列的用户配置项，详见 §8.1。
@@ -196,7 +196,7 @@ PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用�
 
 ## 附：代码与注释不一致之处
 
-1. **"subprocess sandbox" 措辞**：`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:187`、`agent.ts:8`、`rpc/client.ts:5` 均称子进程被 subprocess seam "沙箱化/包裹"，但主仓 seam 无任何 OS 级沙箱机制（见第 6.2 节）。实际边界 = 进程树隔离 + 环境清洗 + `--tools` 裁剪。
-2. **`agents-md` 可调用性**：`skills.ts:10-13` 头注释称 agents-md 是 "user-invocable" 技能，而 `agentsCandidate` 实际设 `{ modelInvocable: true, userInvocable: true }`（`skills.ts:151`）。
+1. **"subprocess sandbox" 措辞**：`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5` 均称子进程被 subprocess seam "沙箱化/包裹"，但主仓 seam 无任何 OS 级沙箱机制（见第 6.2 节）。实际边界 = 进程树隔离 + 环境清洗 + `--tools` 裁剪。
+2. **`agents-md` 可调用性**：`skills.ts:10-11` 头注释称 agents-md 是 "user-invocable" 技能，而 `agentsCandidate` 实际设 `{ modelInvocable: true, userInvocable: true }`（`agents-md-skill-provider.ts:159`）。措辞含糊（"user-invocable" 不排斥 model-invocable），但与 §7 的"斜杠菜单可见性"叙述并列时容易误读。
 3. **`mapToolCall` 死导出**：`rpc/mapping.ts:1-9` 的模块注释说本模块投影 tool call，但驱动并不调用它（`agent.ts` 只 import `mapToolResult`/`mapUsage`，`agent.ts:43`），仅测试使用。
 4. **容器级 AGENTS.md 与代码一致**："每 step 一个无状态 new_session + prompt"、"严格 LF JSONL"、"无权限系统→整体沙箱"三条背景陈述均在代码中核实成立（第 3、4 条中的"沙箱"按第 1 条修正理解）。

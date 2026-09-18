@@ -1,6 +1,6 @@
 /**
- * Skill-injection helpers shared by the hosted engine drivers. Both the Claude
- * Code and Codex agents replicate the dsh `/name` skill gesture scan and the
+ * Skill-injection helpers shared by the hosted engine drivers. Each hosted
+ * engine's agent replicates the dsh `/name` skill gesture scan and the
  * XML `<skill_content>` rendering that the in-process engine's dsh-tool-skill
  * handler would otherwise provide — their agent contexts do not descend from
  * the agent-preset chain. These helpers are pure: they take user messages or a

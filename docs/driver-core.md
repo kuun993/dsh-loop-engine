@@ -174,11 +174,11 @@ codex / pi / kimi 都读"从会话 cwd 向上走到 git root，每目录一个�
 
 ### 各引擎的策略
 
-| 引擎 | 策略声明 | 用户级补充 |
+| 引擎 | 策略声明（spec 的 `contextPolicy`） | 用户级补充（spec 的 `userContext`） |
 |---|---|---|
-| codex | `{ primary: ['AGENTS.md'] }`，无 override（`src/engine-codex/skills.ts:33`） | `~/.codex/AGENTS.md` 单独成候选（`src/engine-codex/skills.ts:58-59`） |
-| pi | `{ override: 'AGENTS.override.md', primary: ['AGENTS.md', 'CLAUDE.md'] }`（`src/engine-pi/skills.ts:50-53`） | `PI_CODING_AGENT_DIR` 或 `~/.pi/agent` 下的 `AGENTS.md`（`src/engine-pi/skills.ts:73-77`、`:103-105`） |
-| kimi | `{ primary: ['AGENTS.md'] }`（`src/engine-kimi/skills.ts:49-51`） | **没有用户级上下文文件**——kimi 的 `list()` 只用项目链（`src/engine-kimi/skills.ts:90-104`） |
+| codex | `{ primary: ['AGENTS.md'] }`，无 override（`src/engine-codex/skills.ts:30`） | `{ file: 'AGENTS.md', rank: 160 }`，在 `userDir: () => ~/.codex` 下（`src/engine-codex/skills.ts:33-40`） |
+| pi | `{ override: 'AGENTS.override.md', primary: ['AGENTS.md', 'CLAUDE.md'] }`（`src/engine-pi/skills.ts:43-46`） | `{ file: 'AGENTS.md', rank: 160 }`，在 `piAgentDir()`（`PI_CODING_AGENT_DIR` 或 `~/.pi/agent`）下（`src/engine-pi/skills.ts:53-58`、`:66`） |
+| kimi | `{ primary: ['AGENTS.md'] }`（`src/engine-kimi/skills.ts:46-48`） | **没有**：kimi 的 spec 不带 `userContext`，`list()` 只用项目链（`src/engine-kimi/skills.ts:62-73`） |
 
 claude **不用**这个模块：CLAUDE.md 由 `ClaudeCodeSkillProvider` 按"带 frontmatter 才算技能"的另一套逻辑处理（见下节）。
 
@@ -206,22 +206,32 @@ claude **不用**这个模块：CLAUDE.md 由 `ClaudeCodeSkillProvider` 按"带 
 
 `src/skills.ts` 有三重身份：
 
-1. **类型镜像源头**：`SkillCandidate` / `SkillDefinition` / `SkillProvider` / `SkillProviderControl` 等接口（`src/skills.ts:16-62`），刻意不引 `@deepseek-ai/dsh-skill` peer；codex/pi/kimi 的 provider 全部从这里 import 类型（如 `src/engine-codex/skills.ts:24`）；
-2. **frontmatter 解析器**：`parseSkillFile`（`:163-182`）+ `parseFrontmatter`（`:84-124`）——一个 YAML 子集解析器，支持平量、`>`/`|` 块标量（`:108-120`）、成对引号剥离（`unquote`，`:127-136`）、`true/yes/false/no` 布尔（`booleanField`，`:194-200`）；pi 和 kimi 的 provider 直接复用它解析各自 `SKILL.md`（`src/engine-pi/skills.ts:36`、`:213`；`src/engine-kimi/skills.ts:37`、`:208`）；
-3. **Claude Code 技能 provider**：`ClaudeCodeSkillProvider`（`:219-265`）。
+1. **类型镜像源头**：`SkillCandidate` / `SkillProvider` / `SkillProviderControl` 等接口（`src/skills.ts:16-62`），刻意不引 `@deepseek-ai/dsh-skill` peer；codex/pi/kimi 的 provider 与本共享模块全部从这里 import 类型（如 `src/driver-core/agents-md-skill-provider.ts:31`）。注意 `SkillDefinition` 不在这里定义，而是**从 `driver-core/skill-inject.ts` 转出**（`src/skills.ts`），使 provider 与消费它的引擎 agent 用同一个定义，不会各自漂移；
+2. **frontmatter 解析器**：`parseSkillFile`（`:159`）+ `parseFrontmatter`（`:84-124`）——一个 YAML 子集解析器，支持平量、`>`/`|` 块标量（`:108-120`）、成对引号剥离（`unquote`，`:127-136`）、`true/yes/false/no` 布尔（`booleanField`，`:194-200`）；三个引擎的 `SKILL.md` 由共享 provider 统一复用它解析（`src/driver-core/agents-md-skill-provider.ts:30`、`:221`）；
+3. **Claude Code 技能 provider**：`ClaudeCodeSkillProvider`（`:215`）。
 
 ClaudeCodeSkillProvider 的发现规则：项目侧锚定 git root（`findProjectRoot`，`:340-353`）扫 `<root>/.claude/skills/` 与项目根 `CLAUDE.md`（仅当带技能 frontmatter，`collectClaudeMd`，`:302-314`），用户侧扫 `~/.claude/skills/`；同一目录兼容两种布局——`<name>/SKILL.md`（目录本身成为 resourceBase）与扁平 `<name>.md`（resourceBase 是整个 skills 目录），见 `collectSkillsDir`（`:268-299`）。rank 刻意插在 project-dsh (100) 与 custom (300) 之间：项目 150、用户 160（`:69-71`）。`list()` 结束时检查 abort，已中止则返回空目录（`:239`）。
 
-各引擎 provider 的共性与差异：
+### 7.2.1 codex / pi / kimi 共用同一个 provider 类
+
+这三个引擎的发现**算法**逐字相同（项目链上的指令文件合并成一个候选、技能目录逐个收集、`get()` 按 locator 分派），不同的只有位置、名字和 rank——所以算法只写一次，放在 `driver-core/agents-md-skill-provider.ts` 的 `AgentsMdSkillProvider`，各引擎模块只提供一份 `AgentsMdProviderSpec` 数据（spec 类型在 `:50-77`，类在 `:83`）：
+
+- `list()`（`:93`）：项目侧收集上下文文件与技能目录，用户侧读 `userDir()` 下的 `userContext` 与技能目录，末尾检查 abort；
+- `get()`（`:119`）：locator 为 `skill-file` 时重新解析该 `SKILL.md`（文件已被删除则返回 `undefined`），为 `agents-md` 时用 `readSources` 拼接正文；
+- `agentsCandidate`（`:153`）/ `collectSkillsDir`（`:170`）/ `skillCandidate`（`:202`）/ `tryParse`（`:218`）：候选构造与目录扫描，六层嵌套的那套原样保留，含 `stat` 的 v8-ignore 兜底。
+
+三个引擎文件因此各自只剩「docstring + 常量 + 一份 spec + 一个三行子类」：
 
 | provider | 文件 | 上下文文件 | 技能目录 | rank 布局 |
 |---|---|---|---|---|
-| claude-code | `src/skills.ts:219` | 项目根 `CLAUDE.md`（需 frontmatter） | 项目/用户 `.claude/skills/` | 150 / 160 |
-| codex | `src/engine-codex/skills.ts:46` | `AGENTS.md` 链 + `~/.codex/AGENTS.md`，合并为一个 `agents-md` 技能 | 无 | 140 / 160 |
-| pi | `src/engine-pi/skills.ts:87` | `AGENTS.md`/`CLAUDE.md` 链（override 优先）+ pi 配置目录 `AGENTS.md` | 项目 `.pi/skills/`（沿目录链每级都查）+ 用户 `skills/` | 140 / 150 / 160 / 170 |
-| kimi | `src/engine-kimi/skills.ts:85` | `AGENTS.md` 链 | 项目 `.kimi-code/skills/` + `$KIMI_CODE_HOME/skills/` | 140 / 150 / 160 |
+| claude-code | `src/skills.ts:215`（**不**用共享类，见下） | 项目根 `CLAUDE.md`（需 frontmatter） | 项目/用户 `.claude/skills/` | 150 / 160 |
+| codex | `src/engine-codex/skills.ts:46`（spec 在 `:33`） | `AGENTS.md` 链 + `~/.codex/AGENTS.md`，合并为一个 `agents-md` 技能 | 无 | 140 / 160 |
+| pi | `src/engine-pi/skills.ts:83`（spec 在 `:60`） | `AGENTS.md`/`CLAUDE.md` 链（override 优先）+ pi 配置目录 `AGENTS.md` | 项目 `.pi/skills/`（沿目录链每级都查）+ 用户 `skills/` | 140 / 150 / 160 / 170 |
+| kimi | `src/engine-kimi/skills.ts:84`（spec 在 `:62`） | `AGENTS.md` 链 | 项目 `.kimi-code/skills/` + `$KIMI_CODE_HOME/skills/` | 140 / 150 / 160 |
 
-共性：合并型上下文候选统一叫 `agents-md`、`modelInvocable + userInvocable` 双开、locator 记录路径集留待 `get()` 时用 `readSources` 拼正文（codex `src/engine-codex/skills.ts:64-80`；pi/kimi 同构）。pi 与 kimi 都**刻意不扫** `.agents/skills/`——dsh 自己的 skill-filesystem provider 已在 web profile 里覆盖了它（`src/engine-pi/skills.ts:16-21`、`src/engine-kimi/skills.ts:15-18` 头注）。
+各 spec 只声明**它真有**的东西，所以差异本身即文档：codex 没有 `skills` 段（它没有技能目录），kimi 没有 `userContext`（它没有用户级指令文件）。合并型上下文候选统一叫 `agents-md`、`modelInvocable + userInvocable` 双开、locator 记录路径集留待 `get()` 时用 `readSources` 拼正文。pi 与 kimi 都**刻意不扫** `.agents/skills/`——dsh 自己的 skill-filesystem provider 已在 web profile 里覆盖了它（`src/engine-pi/skills.ts`、`src/engine-kimi/skills.ts` 头注）。
+
+`ClaudeCodeSkillProvider` 仍是独立实现：它的发现规则不同（锚定 git root 而非走整条目录链、`CLAUDE.md` 必须带 frontmatter 才算技能），把它塞进同一个 spec 只会让 spec 长出互斥的可选块，因此**有意不合并**。
 
 ### 7.3 commands.ts：斜杠命令转发桥
 
@@ -245,8 +255,9 @@ kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `Comm
 | `inbox.ts` 折叠与落盘 | 四个引擎的收件箱语义与 `agent/inbox/spliced` 持久流 | `tests/driver-core/inbox.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `assistant-stream.ts` 帧与分段压缩 | 四条流式路径的 live 帧与内嵌 stream | `tests/driver-core/assistant-stream.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
+| `agents-md-skill-provider.ts` 算法/候选构造 | codex、pi、kimi 三个 provider 的全部发现行为 | 三个 `tests/engine-*/skills.spec.ts`（**缺一不可**：分支散布在三份 spec 里，见 §9） |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
-| `skills.ts` `parseSkillFile` | claude + pi + kimi 三个 provider 的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
+| `skills.ts` `parseSkillFile` | claude provider + 共享 provider（codex/pi/kimi）的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |
 | `commands.ts` 类型/转发 | claude 命令面 + kimi 命令桥（类型复用） | `tests/commands.spec.ts`、`tests/engine-kimi/commands.spec.ts`、`tests/index.spec.ts` |
 
@@ -259,15 +270,20 @@ kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `Comm
 - `skill-inject.ts` 由四个 agent spec 的 `/name` 步进场景覆盖。
 - `tests/commands.spec.ts` 用 hoisted 的 homedir mock + 临时目录覆盖转发、frontmatter 描述回退、120 字符截断、内建冲突、悬空 frontmatter 等边界；`tests/skills.spec.ts` 覆盖两种布局、rank、CLAUDE.md 三态（有 frontmatter / 无 / 是目录）、frontmatter 解析全部边界。
 - 三个 `tests/engine-*/skills.spec.ts`（codex/pi/kimi；claude 的技能 provider 由 `tests/skills.spec.ts` 覆盖）覆盖各 provider 的目录策略与环境变量覆盖（`PI_CODING_AGENT_DIR`、`KIMI_CODE_HOME`）。
+- **`agents-md-skill-provider.ts` 没有自己的 spec**，它的 per-file 100% 覆盖率由三份引擎 spec 的**并集**达成——每份只走自己 spec 打开的分支：
+  - `spec.skills !== undefined` 的两臂来自 pi/kimi（有技能目录）与 codex（无）；
+  - `spec.userContext !== undefined` 的两臂来自 codex/pi（有用户级指令文件）与 kimi（无）；
+  - `skill-file` locator 的两臂只在 pi/kimi 的 `SKILL.md` 用例里（codex 从不产生该 locator）；
+  - `readSources` 返回 `undefined` 的臂来自各 spec 的"文件已被删除"用例。
+  因此**给某个引擎补 spec 或删用例时，必须确认这三份并集仍覆盖全部分支**——删掉 pi 的技能目录用例就会让共享文件掉出 100%。新增引擎若只复用现有 spec 形状，也要补上它自己 spec 打开的那套分支。
 - 全仓覆盖率门槛是 per-file 100%（`pnpm run test:coverage`，`src/client` 除外），共享层任何新分支都必须有用例或显式 `v8 ignore` 理由。
 
 ## 附：代码与注释不一致之处（本文撰写时核实）
 
-以下模块头注仍是 kimi/pi 引擎加入前的旧表述，与真实使用方不符，修改这些文件时建议顺手订正：
+原先有六处模块头注仍是 kimi/pi 引擎加入前的旧表述（"Both the Claude Code and Codex …"）。其中四处已订正为"四个引擎"或"每个托管驱动"，另两处仍待订正：
 
-1. `src/driver-core/ownership.ts:2-4`："Both the Claude Code and Codex loop drivers run the same lifecycle"——实际四个 loop（claude/codex/pi/kimi）逐字共用。
-2. `src/driver-core/prompt.ts:2-4`："Both the Claude Code and Codex drivers build their per-step input"——实际四个 agent 都用 `serializeHistory`。
-3. `src/driver-core/permission-knobs.ts:2-5`："Both the Claude Code and Codex drivers fold the same events"——pi 两个读者都用，kimi 用 `sessionApprovalPolicy`。
-4. `src/driver-core/skill-inject.ts:2-5`："Both the Claude Code and Codex agents replicate the dsh `/name` skill gesture scan"——实际四个 agent 都复刻。
-5. `src/driver-core/context-files.ts:4-6`："Codex and Pi read per-directory instruction files"——kimi 也通过本模块读 `AGENTS.md` 链；同段 "feed both providers' list/get paths"（`:9-10`）同样漏了 kimi。
-6. `tests/driver-core/context-files.spec.ts:2-3`："used by the codex and pi skill providers"——kimi provider 同样是消费方。
+1. ~~`src/driver-core/ownership.ts`、`prompt.ts`、`permission-knobs.ts`、`skill-inject.ts`~~ ——已订正。
+2. `src/driver-core/context-files.ts:4-6`："Codex and Pi read per-directory instruction files"——kimi 也通过本模块读 `AGENTS.md` 链；同段 "feed both providers' list/get paths"（`:9-10`）同样漏了 kimi。
+3. `tests/driver-core/context-files.spec.ts:2-3`："used by the codex and pi skill providers"——kimi provider 同样是消费方。
+
+第 2 条顺带说明一件事：`context-files.ts` 的三个消费方现在都是**共享 provider** 而非各自的引擎模块——它被 `driver-core/agents-md-skill-provider.ts:29` 导入，而不是被 codex/pi/kimi 的 skills 模块直接调用。改它的行走语义时，要看的是共享 provider 的候选构造（`:153`、`:170`），再看三份引擎 spec。

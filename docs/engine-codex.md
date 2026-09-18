@@ -191,11 +191,11 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 ### 7.2 CodexSkillProvider：AGENTS.md 即技能
 
-`CodexSkillProvider`（`src/engine-codex/skills.ts:46-98`）把 codex CLI 的指令文件体系暴露为 dsh 技能：
+`CodexSkillProvider extends AgentsMdSkillProvider`（`src/engine-codex/skills.ts:46-50`）把 codex CLI 的指令文件体系暴露为 dsh 技能。**发现算法在共享基类里**（`src/driver-core/agents-md-skill-provider.ts`，见 `docs/driver-core.md` §7.2.1），本模块只给一份 spec（`src/engine-codex/skills.ts:33-40`——没有 `skills` 段，因为 codex 没有技能目录）：
 
-- **发现**（`list`，`src/engine-codex/skills.ts:51-62`）：项目侧从会话 cwd 逐级向上走到 git 根（`collectProjectContextFiles` + `CODEX_CONTEXT_POLICY = { primary: ['AGENTS.md'] }`，无 override 文件，`src/engine-codex/skills.ts:33`、`src/driver-core/context-files.ts:34-59`），任一文件非空则产出一个**合并的** `agents-md` 候选（rank 140，介于 project-dsh 100 与 custom 300 之间）；用户侧 `~/.codex/AGENTS.md` 非空则产出第二个候选（rank 160）。同名时项目候选 rank 更低（优先）。无 cwd 时只列用户级。
-- **加载**（`get`，`src/engine-codex/skills.ts:64-80`）：`readSources` 把 locator 里的全部路径**按"最近目录优先"顺序拼接**（`\n\n` 连接），`resourceBase` 取最近的文件（`{ kind: 'file', path: first }`）。
-- 候选固定 `invocation: { modelInvocable: true, userInvocable: true }`、`source: 'custom'`、`name: 'agents-md'`（`src/engine-codex/skills.ts:83-97`）。
+- **发现**（`list`，`src/driver-core/agents-md-skill-provider.ts:93-117`）：项目侧从会话 cwd 逐级向上走到 git 根（`collectProjectContextFiles` + `CODEX_CONTEXT_POLICY = { primary: ['AGENTS.md'] }`，无 override 文件，`src/engine-codex/skills.ts:30`、`src/driver-core/context-files.ts:34-59`），任一文件非空则产出一个**合并的** `agents-md` 候选（`projectRank` 140，介于 project-dsh 100 与 custom 300 之间）；用户侧 `~/.codex/AGENTS.md` 非空则产出第二个候选（`userContext.rank` 160）。同名时项目候选 rank 更低（优先）。无 cwd 时只列用户级。
+- **加载**（`get`，`src/driver-core/agents-md-skill-provider.ts:119-151`）：`readSources` 把 locator 里的全部路径**按"最近目录优先"顺序拼接**（`\n\n` 连接），`resourceBase` 取最近的文件（`{ kind: 'file', path: first }`）。
+- 候选固定 `invocation: { modelInvocable: true, userInvocable: true }`、`source: 'custom'`、`name: 'agents-md'`（`src/driver-core/agents-md-skill-provider.ts:153-168`，描述串来自 spec 的 `agentsMdDescription`）。
 
 ### 7.3 注册点
 
@@ -205,14 +205,14 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 组合条目（`src/index.ts` 的 `Config`）是所有引擎旋钮的超集；codex 只消费以下字段，经 `codexConfig` 转发（`src/index.ts:221-229`）：
 
-| 组合字段 | codex Config 字段 | 校验（`src/engine-codex/loop.ts:71-76`） | 默认 | 语义 |
+| 组合字段 | codex Config 字段 | 校验（`src/engine-codex/loop.ts:59-64`） | 默认 | 语义 |
 |---|---|---|---|---|
-| `sandboxMode` | `sandboxMode` | `'read-only' \| 'workspace-write' \| 'danger-full-access'`（`loop.ts:34-38`） | 无（跟随会话旋钮） | 钉死每个线程的沙箱模式 |
-| `approvalPolicy` | `approvalPolicy` | `'never' \| 'on-request' \| 'on-failure' \| 'untrusted'`（`loop.ts:41-46`） | 无（跟随会话旋钮） | 钉死每个线程的审批策略 |
+| `sandboxMode` | `sandboxMode` | `'read-only' \| 'workspace-write' \| 'danger-full-access'`（`loop.ts:22-26`） | 无（跟随会话旋钮） | 钉死每个线程的沙箱模式 |
+| `approvalPolicy` | `approvalPolicy` | `'never' \| 'on-request' \| 'on-failure' \| 'untrusted'`（`loop.ts:29-34`） | 无（跟随会话旋钮） | 钉死每个线程的审批策略 |
 | `env` | `env` | `z.dict(z.string()).default({})` | `{}` | **当前未被消费**（见 §9.3 第 2 条） |
 | `model` | `model` | `z.string()` | 无 | 透传给 `thread/start` 与 `turn/start` 的 `model`，并作为 header/消息 source 的模型标签；缺省时标签为 `codex-native`，模型由 codex 原生设置决定 |
 
-`resolveConfig`（`src/engine-codex/loop.ts:97-104`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:575-589` 验证）。
+`resolveConfig`（`src/engine-codex/loop.ts:67-82`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:575-589` 验证）。
 
 无关字段不报错：`disposeGraceMs`/`maxTurns`（claude 用）、`piProvider` 等与 codex 并存但不被读取；`tests/index.spec.ts:641` 专门验证 codex 的配置边界不再校验 `disposeGraceMs`。
 
@@ -236,7 +236,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 ### 9.3 注释与实现不一致（撰写时发现）
 
 1. **`loop.ts:1-11` 模块注释过时**：称驱动"through the OpenAI Codex SDK"、"The Codex SDK spawns its own CLI binary (no spawn injection seam)"。实际代码没有任何 Codex SDK 依赖——驱动自己用 `node:child_process.spawn` 拉起 `codex app-server`（`appserver/client.ts:9, 89`），走的是手写 JSON-RPC。注释大概沿袭自早期 SDK 方案，"不经 subprocess 接缝"的结论仍然成立，但措辞误导。
-2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:64-65`），`codexConfig` 也转发它（`src/index.ts:226`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:89-91`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
+2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:52-53`），`codexConfig` 也转发它（`src/index.ts:226`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:89-91`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
 3. **`clientInfo.version` 是硬编码字面量**：initialize 报 `'1.0.0-rc13'`（`appserver/client.ts:118`）——它没有随 `package.json`（0.1.5-rc1）一起更新，只是历史遗留字符串，改协议握手时要留意别把它当成真实包版本（kimi 的 `src/engine-kimi/acp/client.ts:131` 同样硬编码 `'1.0.0'`）。
 4. **`threadResume` 无调用方**（`appserver/client.ts:131-133`）：保留的协议面，dsh resume 不走 codex thread/resume。改 resume 语义时注意别误以为它在用。
 5. `turn()` 的 `token-usage` 事件与 `ErrorNotification.willRetry` 被产生/携带但无人消费；若将来要中途展示 token 用量或区分可重试错误，这两个钩子已经现成。

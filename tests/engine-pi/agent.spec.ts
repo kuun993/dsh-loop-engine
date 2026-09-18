@@ -12,18 +12,12 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
-import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
 import type { PiModelEntry } from '../../src/engine-pi/probe.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
+import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 
-/** Local plugin wrapper: mount constructs the Pi loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new PiLoop(ctx, config as Parameters<typeof PiLoop>[1])
-  },
-}
+const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 /** Hoisted mock client plus the per-step event stream and capture of spawn specs. */
 const mock = vi.hoisted(() => {
@@ -91,17 +85,7 @@ function turnEnd(message?: PiMessage, toolResults?: readonly PiToolResult[]): Re
 }
 
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  const ctx = new Context()
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(loopPlugin, config)
-  return ctx
-}
-
-function message(text: string) {
-  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+  return await mountHarness(loopPlugin, config)
 }
 
 /** Run a happy-path step (text assistant message + settled). */
