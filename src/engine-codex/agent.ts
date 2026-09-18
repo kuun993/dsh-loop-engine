@@ -37,7 +37,19 @@ import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
-import { approvalReason, approvalToolName, resolveApprovalRequest, resolveSessionPermission, type ApprovalOutcome, type CodexPermission } from './permission.ts'
+import {
+  approvalReason,
+  approvalToolName,
+  elicitationResponse,
+  resolveApprovalRequest,
+  resolveSessionPermission,
+  userInputQuestions,
+  userInputResponse,
+  type ApprovalOutcome,
+  type CodexPermission,
+  type UserQuestionAnswer,
+  type UserQuestionItem,
+} from './permission.ts'
 import { AppServerClient, type RequestOutcome } from './appserver/client.ts'
 import { AppServerThread } from './appserver/thread.ts'
 import { mapCommandExecution, mapFileChange, mapMcpToolCall, mapUsage } from './appserver/mapping.ts'
@@ -62,6 +74,11 @@ const NATIVE_MODEL_LABEL = 'codex-native'
 /** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
 interface ApprovalService {
   request(req: { agent: Agent; toolName: string; reason?: string; signal?: AbortSignal }): Promise<ApprovalOutcome>
+}
+
+/** Minimal shape of the user-questions seam (inline to avoid a peer dep on @deepseek-ai/dsh-user-questions). */
+interface UserQuestionsService {
+  ask(req: { questions: UserQuestionItem[]; agent: Agent; signal?: AbortSignal }): Promise<UserQuestionAnswer>
 }
 
 /* jscpd:ignore-start -- mirrors the Claude Code driver; the two engines share the default agent-loop driver's phase machine. */
@@ -143,16 +160,66 @@ export class CodexAgent implements Agent {
   private async appServerClient(): Promise<AppServerClient> {
     if (this.appServer !== undefined && !this.appServer.closed) return this.appServer
     this.appServer = await AppServerClient.create()
-    // Answer server-initiated requests (Codex approvals under an `ask` policy)
-    // through the dsh approval seam; a request with no answer stalls the turn.
-    this.appServer.onRequest((method, params) => this.answerApproval(method, params))
+    // Answer server-initiated requests (Codex approvals under an `ask` policy,
+    // user-input questions, MCP elicitations) through their dsh seams; a request
+    // with no answer stalls the turn.
+    this.appServer.onRequest((method, params) => this.answerRequest(method, params))
     return this.appServer
+  }
+
+  /**
+   * Answer one server-initiated interaction. Approvals go through the dsh
+   * approval seam; a `request_user_input` question goes to the user-questions
+   * seam (both fail closed when their seam is absent), and an MCP elicitation is
+   * declined outright. Anything else is a protocol error.
+   * @param method - the server request method.
+   * @param params - the server request params.
+   * @returns the JSON-RPC outcome to send back.
+   */
+  private async answerRequest(method: string, params: unknown): Promise<RequestOutcome> {
+    if (method === 'item/tool/requestUserInput') return this.answerUserInput(params)
+    if (method === 'mcpServer/elicitation/request') return { result: elicitationResponse() }
+    return this.answerApproval(method, params)
   }
 
   /** Resolve one native Codex approval request through the dsh approval seam. */
   private async answerApproval(method: string, params: unknown): Promise<RequestOutcome> {
     const outcome = await this.requestApproval(method, params)
     return resolveApprovalRequest(method, params, outcome)
+  }
+
+  /**
+   * Put one `request_user_input` question to the human through the dsh
+   * user-questions seam. The seam itself fails closed (`NO_PROVIDER`) when no
+   * answerer is composed, so a refusal degrades to "no answers given" and the
+   * turn continues; asking is never silently skipped, and the degradation is
+   * logged rather than swallowed.
+   * @param params - the request params carrying the questions.
+   * @returns the response payload (or the empty answer when nobody answered).
+   */
+  private async answerUserInput(params: unknown): Promise<RequestOutcome> {
+    const questions = userInputQuestions(params)
+    const service = this.loopCtx.get('userQuestions') as UserQuestionsService | undefined
+    if (questions.length === 0) {
+      return { result: userInputResponse(undefined) }
+    }
+    if (service === undefined) {
+      this.loopCtx.logger.warn('loop-engine: codex asked for user input, but the user-questions service is not composed; answering with no answers')
+      return { result: userInputResponse(undefined) }
+    }
+    const phase = this.phase
+    const signal = phase.kind === 'running' ? phase.abort.signal : undefined
+    try {
+      const answer = await service.ask({
+        questions,
+        agent: this,
+        ...(signal === undefined ? {} : { signal }),
+      })
+      return { result: userInputResponse(answer) }
+    } catch (error: unknown) {
+      this.loopCtx.logger.warn(`loop-engine: codex user-input request went unanswered: ${String(error)}`)
+      return { result: userInputResponse(undefined) }
+    }
   }
 
   /** Ask the dsh approval seam; fail closed to a denial when it is absent. */

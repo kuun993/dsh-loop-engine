@@ -174,12 +174,18 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 | `item/commandExecution/requestApproval` | `{ decision: 'accept' \| 'acceptForSession' \| 'decline' \| 'cancel' \| … }` |
 | `item/fileChange/requestApproval` | `{ decision: 'accept' \| 'acceptForSession' \| 'decline' \| 'cancel' }` |
 | `item/permissions/requestApproval` | `{ permissions: GrantedPermissionProfile, scope: 'turn' \| 'session' }` |
+| `item/tool/requestUserInput` | `{ answers: Record<questionId, { answers: string[] }> }`（seam 缺席/拒绝 → `{ answers: {} }`） |
+| `mcpServer/elicitation/request` | `{ action: 'accept' \| 'decline' \| 'cancel' }`（我们恒回 `decline`） |
 
-- 客户端 `AppServerClient.handleLine`（`src/engine-codex/appserver/client.ts`）区分三种线：`id`+`method` → 入站请求（`answerRequest` 写回 `{id,result}` / `{id,error}`）；只有 `id` → 我们请求的响应；只有 `method` → 通知。`onRequest` 注册应答 handler，未注册或未识别的 method 回 `-32601`（对齐 kimi ACP 的 fail-closed 回退）。
-- `CodexAgent.appServerClient()` 建客户端时注册 handler（`src/engine-codex/agent.ts:143-150`）；`answerApproval` → `requestApproval`（读 `ctx.approval`，`loopCtx.get('approval')`）→ `resolveApprovalRequest`（`src/engine-codex/permission.ts`）：
-  - command / file-change：`allowed-once → accept`，`rejected` / `cancelled` / `unavailable` / 无服务 → `decline`；
-  - permissions：`allowed-once → { permissions: 请求里要求的 permissions, scope: 'turn' }`，其余 → `{ permissions: {}, scope: 'turn' }`；
-  - 其它 method → `{ error: { code: -32601, message: 'Method not found' } }`。
+- 客户端 `AppServerClient.handleLine`（`src/engine-codex/appserver/client.ts`）区分三种线：`id`+`method` → 入站请求（写回 `{id,result}` / `{id,error}`）；只有 `id` → 我们请求的响应；只有 `method` → 通知。`onRequest` 注册应答 handler，未注册或未识别的 method 回 `-32601`（对齐 kimi ACP 的 fail-closed 回退）。
+- `CodexAgent.appServerClient()` 建客户端时注册 handler（`src/engine-codex/agent.ts:146-153`）；`answerRequest` 按 method 分派：
+  - **审批**（`answerApproval` → `requestApproval`，读 `ctx.approval`）→ `resolveApprovalRequest`（`src/engine-codex/permission.ts`）：
+    - command / file-change：`allowed-once → accept`，`rejected` / `cancelled` / `unavailable` / 无服务 → `decline`；
+    - permissions：`allowed-once → { permissions: 请求里要求的 permissions, scope: 'turn' }`，其余 → `{ permissions: {}, scope: 'turn' }`；
+  - **问用户**（`item/tool/requestUserInput` → `answerUserInput`）：把 `questions` 投影成 dsh 的 item（id/question 缺失的条目丢弃——应答按 question id 回键，编造 id 等于替 Codex 答题），转给 `ctx.userQuestions.ask({ questions, agent: this, signal })`（运行时信号随行，`agent.ts` 与审批 seam 同款）；返回的答案按 question id 映射成 codex 的 `{ answers: { <id>: { answers: [...] } } }`，`selected` 与自由文本 `custom` 合并进同一列表。**seam 缺席或拒绝（`NO_PROVIDER` 等）→ `{ answers: {} }`**（"问了，没人答"），既不编答案也不回协议错误，并且**记 warn 日志**而不是静默降级；`questions` 为空同理。
+  - **MCP elicitation**（`mcpServer/elicitation/request`）→ `{ action: 'decline' }`：无人值守驱动渲染不了 elicitation 表单，与 claude 驱动的 `onElicitation` 同款姿态，也从不会伪造用户没给的输入。
+  - 其它 method（`item/tool/call`、旧的 v1 `applyPatchApproval`/`execCommandApproval` 等）→ `{ error: { code: -32601, message: 'Method not found' } }`。
+- 三种应答都对着 **pinned codex CLI 自产的协议 schema** 校验过（`codex app-server generate-json-schema`，@openai/codex 0.149.1）。注意 v1 的 `applyPatchApproval`/`execCommandApproval` 在 schema 里标 DEPRECATED（只服务 legacy `SendUserTurn` 路径），本驱动走 v2，不需要应答它们。
 
 ## 7. AGENTS.md 技能注入
 

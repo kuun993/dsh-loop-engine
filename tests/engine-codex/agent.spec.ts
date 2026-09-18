@@ -1660,13 +1660,102 @@ describe('CodexAgent interactive approvals', () => {
     }
   })
 
-  it('fails unknown approval methods with method-not-found', async () => {
+  it('fails unknown server-request methods with method-not-found', async () => {
     const ctx = await harness()
     try {
       ctx.provide('approval', { request: () => Promise.resolve('allowed-once') })
       await settle(ctx)
-      expect(await mock.requestHandler!('item/tool/requestUserInput', {}))
+      expect(await mock.requestHandler!('item/tool/call', {}))
         .toEqual({ error: { code: -32601, message: 'Method not found' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('answers a user-input request from the user-questions seam', async () => {
+    const ctx = await harness()
+    try {
+      const asked: unknown[] = []
+      ctx.provide('userQuestions', {
+        ask: (req: unknown) => {
+          asked.push(req)
+          return Promise.resolve({ answers: [{ id: 'q1', selected: ['dev'], custom: 'note' }] })
+        },
+      })
+      await settle(ctx)
+
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {
+        questions: [{ id: 'q1', header: 'Deploy', question: 'Which env?', options: [{ label: 'dev', description: 'd' }] }],
+      })).toEqual({ result: { answers: { q1: { answers: ['dev', 'note'] } } } })
+      expect(asked[0]).toMatchObject({
+        questions: [{ id: 'q1', header: 'Deploy', question: 'Which env?', options: [{ label: 'dev', description: 'd' }] }],
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('answers with no answers when the user-questions seam is absent or refuses', async () => {
+    const ctx = await harness()
+    try {
+      await settle(ctx)
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {
+        questions: [{ id: 'q1', question: 'Which env?' }],
+      })).toEqual({ result: { answers: {} } })
+
+      ctx.provide('userQuestions', { ask: () => Promise.reject(new Error('NO_PROVIDER')) })
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {
+        questions: [{ id: 'q1', question: 'Which env?' }],
+      })).toEqual({ result: { answers: {} } })
+
+      // No usable question on the wire: nothing to ask, still in-vocabulary.
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {}))
+        .toEqual({ result: { answers: {} } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('declines an MCP elicitation request', async () => {
+    const ctx = await harness()
+    try {
+      await settle(ctx)
+      expect(await mock.requestHandler!('mcpServer/elicitation/request', { serverName: 's' }))
+        .toEqual({ result: { action: 'decline' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('forwards the running turn signal to the user-questions seam', async () => {
+    const ctx = await harness()
+    try {
+      let receivedSignal: AbortSignal | undefined
+      ctx.provide('userQuestions', {
+        ask: (req: { signal?: AbortSignal }) => {
+          receivedSignal = req.signal
+          return Promise.resolve({ answers: [{ id: 'q1', selected: [] }] })
+        },
+      })
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      mock.runStreamed.mockImplementation(async function* () {
+        await gate
+        yield turnCompleted()
+      })
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('running-question-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await vi.waitFor(() => { expect(mock.requestHandler).toBeDefined() })
+
+      expect(await mock.requestHandler!('item/tool/requestUserInput', {
+        questions: [{ id: 'q1', question: 'Which env?' }],
+      })).toEqual({ result: { answers: { q1: { answers: [] } } } })
+      expect(receivedSignal).toBeInstanceOf(AbortSignal)
+      release()
+      await agent.whenIdle()
     } finally {
       await ctx.fiber.dispose()
     }
