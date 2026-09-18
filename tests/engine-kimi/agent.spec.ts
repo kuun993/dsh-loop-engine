@@ -205,9 +205,52 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const toolCall_ = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(toolCall_).toMatchObject({ data: { callId: '0:call_1', name: 'Bash' } })
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'ab' }] }] } } })
+      // Each update carries the call's whole content, so the settled one wins.
+      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'b' }] }] } } })
       // A tool-only step still publishes an (empty) assistant/message parent.
       expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('records the last content snapshot, not a concatenation of every update', async () => {
+    // The live wire re-sends the tool card with a growing content string on each
+    // update (observed against kimi 0.28.1: `{"command": "echo …` → … → the
+    // output at completion). Appending them nested the text into garbage.
+    mock.updates.mockReturnValue([
+      toolCall('0:call_snap', 'Bash'),
+      toolStream('0:call_snap', 'in_progress', '{"command": "echo hi'),
+      toolStream('0:call_snap', 'in_progress', '{"command": "echo hi"'),
+      toolStream('0:call_snap', 'in_progress', '{"command":"echo hi"}'),
+      toolStream('0:call_snap', 'completed', 'hi\n'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-snapshot'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
+      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'hi\n' }] }] } } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the last content when the settling update carries no content field', async () => {
+    const settleWithoutContent = { sessionUpdate: 'tool_call_update', toolCallId: '0:call_nc', status: 'completed' }
+    mock.updates.mockReturnValue([
+      toolCall('0:call_nc', 'Bash'),
+      toolStream('0:call_nc', 'in_progress', 'partial output'),
+      settleWithoutContent,
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-nocontent'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
+      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'partial output' }] }] } } })
     } finally {
       await ctx.fiber.dispose()
     }

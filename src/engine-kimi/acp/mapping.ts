@@ -3,11 +3,13 @@
  *
  * Kimi streams incremental assistant text (`agent_message_chunk`), incremental
  * thinking (`agent_thought_chunk`), a tool-call announcement (`tool_call`) and its
- * progress/result stream (`tool_call_update`). This module is pure: it classifies
- * an update, extracts chunk deltas, and projects the tool-call identity/result so
- * the agent can fold them into the durable log. Content blocks use the observed
- * kimi `{ type: 'content', content: { type: 'text', text } }` nesting; unknown
- * block types are ignored.
+ * progress/result updates (`tool_call_update`). Assistant text and thinking are
+ * Deltas; a tool update's content is a whole Snapshot that replaces the previous
+ * one. This module is pure: it classifies an update, extracts chunk deltas, and
+ * projects the tool-call identity/content/result so the agent can fold them into
+ * the durable log. Content blocks use the observed kimi
+ * `{ type: 'content', content: { type: 'text', text } }` nesting; unknown block
+ * types are ignored.
  *
  * @module dsh-loop-engine/engine-kimi/acp/mapping
  */
@@ -64,9 +66,22 @@ export function isToolErrorStatus(status: string): boolean {
   return status === 'failed' || status === 'error' || status === 'denied'
 }
 
-/** Join the observed `{ type: 'content', content: { type: 'text', text } }` blocks. */
-export function toolContentText(update: AcpToolCallExt | AcpToolCallStreamExt): string {
-  const blocks = update.content ?? []
+/**
+ * The tool call's content as ONE update carries it: the joined text of its
+ * observed `{ type: 'content', content: { type: 'text', text } }` blocks.
+ *
+ * Kimi re-sends the call's whole content on every `tool_call_update` rather than
+ * streaming deltas (measured against 0.28.1: the string grows from the tool
+ * input's rendering to the final output), so this is a *snapshot* — callers
+ * replace with it, never append. `undefined` means the update carried no
+ * content field at all (nothing to replace), which is distinct from a present
+ * but empty one.
+ * @param update - one tool-call announcement or update.
+ * @returns the content snapshot, or `undefined` when the field is absent.
+ */
+export function toolContentText(update: AcpToolCallExt | AcpToolCallStreamExt): string | undefined {
+  const blocks = update.content
+  if (!Array.isArray(blocks)) return undefined
   return blocks.map((block) => (block.type === 'content' && block.content.type === 'text' ? block.content.text : '')).join('')
 }
 

@@ -81,9 +81,15 @@ describe('toolContentText', () => {
     expect(toolContentText(update)).toBe('ab')
   })
 
-  it('returns empty for absent content and for non-matching blocks', () => {
+  it('returns undefined for an update with no content field (nothing to replace)', () => {
     const absent = { sessionUpdate: 'tool_call_update', toolCallId: 'c1', status: 'in_progress' } as unknown as AcpToolCallStreamExt
-    expect(toolContentText(absent)).toBe('')
+    expect(toolContentText(absent)).toBeUndefined()
+  })
+
+  it('returns empty for empty content and for non-matching blocks', () => {
+    const empty = toolStream('c1', 'in_progress', '') as unknown as AcpToolCallStreamExt
+    empty.content = []
+    expect(toolContentText(empty)).toBe('')
     const update = toolStream('c1', 'in_progress', '') as unknown as AcpToolCallStreamExt
     update.content = [
       { type: 'content', content: { type: 'image' as never } } as never,
