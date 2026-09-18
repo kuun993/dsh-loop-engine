@@ -2,13 +2,12 @@
  * Mapping from the dsh session's durable permission knobs to one Pi RPC
  * process's runtime stance. Pi carries no native permission system — "runs
  * with the permissions of the user" — so the driver cannot ask it to sandbox or
- * approve. The only available boundary is the process environment: the driver
- * either wraps the whole `pi --mode rpc` child in the dsh subprocess sandbox
- * and prunes its `--tools`, or (full access) lets it run under the dsh user.
- * The fold mirrors the codex bridge, mapping the session's `sandbox/mode` and
- * `approval/policy` events directly:
- *   - full access → `danger-full-access`, no tool pruning (native tools);
- *   - `workspace-write` → sandbox wrap with a write-capable tool set;
+ * approve. What is left is the `--tools` allowlist: the child runs under the
+ * dsh user either way (the subprocess seam carries no confinement of its own),
+ * so withholding a tool IS the stance. The fold mirrors the codex bridge,
+ * mapping the session's `sandbox/mode` and `approval/policy` events directly:
+ *   - full access → `danger-full-access`, no pruning (Pi's native tools);
+ *   - `workspace-write` → a write-capable set, still without a shell;
  *   - an `ask` policy → degraded to a read-only denial (Pi has no request
  *     callback, so interactive approval can only become a rejection);
  *   - anything else fails closed → `read-only`.
@@ -22,28 +21,33 @@ import type { PiSandboxMode } from './types.ts'
 
 /** The runtime stance one Pi RPC process should run under. */
 export interface PiPermission {
-  /** Sandbox mode driving whether the child is wrapped in the dsh sandbox. */
+  /** The resolved sandbox stance; selects the tool set, not a process sandbox. */
   readonly sandboxMode: PiSandboxMode
-  /** The `--tools` allowlist; empty means "use Pi's native tools" (no pruning). */
+  /** The `--tools` allowlist — the stance's only enforcement; empty means no pruning. */
   readonly tools: readonly string[]
 }
 
-/** Conservative unattended default: read-only sandbox, no write/exec tools. */
+/**
+ * Conservative unattended default: read-only sandbox, no write/exec tools. The
+ * allowlist names pi's built-ins (`read`, `bash`, `edit`, `write`) and nothing
+ * else — a name pi does not know matches no tool at all, silently, so a list
+ * carrying invented entries would enforce less than it claims to.
+ */
 export const DEFAULT_PI_PERMISSION: PiPermission = {
   sandboxMode: 'read-only',
-  tools: ['read', 'grep', 'find', 'ls'],
+  tools: ['read'],
 }
 
-/** A read-only-but-reachable tool set, used when the session asks for write access. */
-const WORKSPACE_WRITE_TOOLS: readonly string[] = ['read', 'grep', 'find', 'ls', 'write', 'edit']
+/** A write-capable tool set with no shell, used when the session asks for write access. */
+const WORKSPACE_WRITE_TOOLS: readonly string[] = ['read', 'write', 'edit']
 
 /** Full access carries no tool pruning: Pi runs with the dsh user's own tools. */
 const FULL_ACCESS_TOOLS: readonly string[] = []
 
 /**
  * Derive the `--tools` allowlist for a given sandbox stance. Full access prunes
- * nothing; `workspace-write` allows a write-capable set; `read-only` allows read
- * and search only.
+ * nothing; `workspace-write` allows a write-capable set; `read-only` allows
+ * reading and nothing else. Only pi's own built-in tool names appear here.
  * @param mode - the resolved sandbox stance.
  * @returns the tool set to pass as `--tools`.
  */

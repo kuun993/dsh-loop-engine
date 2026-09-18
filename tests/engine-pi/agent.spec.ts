@@ -620,7 +620,7 @@ describe('PiAgent session permission mapping', () => {
       agent.followup(message('one'))
       await agent.whenIdle()
       expect(String(mock.created[0]?.spec.argv)).toContain('--tools')
-      expect(String(mock.created[0]?.spec.argv)).toContain('read,grep,find,ls')
+      expect(String(mock.created[0]?.spec.argv)).toContain('read')
 
       appendKnob(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
       agent.followup(message('two'))
@@ -634,7 +634,7 @@ describe('PiAgent session permission mapping', () => {
       const argv3 = String(mock.created[2]?.spec.argv)
       expect(argv3).toContain('--tools')
       // An ask policy degrades to a read-only denial.
-      expect(argv3).toContain('read,grep,find,ls')
+      expect(argv3).toContain('--tools,read')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1258,7 +1258,7 @@ describe('PiAgent edge mapping', () => {
       })
       agent.followup(message('go'))
       await agent.whenIdle()
-      expect(String(mock.created[0]?.spec.argv)).toContain('read,grep,find,ls,write,edit')
+      expect(String(mock.created[0]?.spec.argv)).toContain('--tools,read,write,edit')
     } finally {
       await ctx.fiber.dispose()
     }

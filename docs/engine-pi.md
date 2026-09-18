@@ -106,20 +106,22 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 |---|---|
 | `sandbox/mode = danger-full-access` | 不裁剪工具（`--tools` 不下发，Pi 用原生工具集） |
 | `approval/policy = ask` | **降级为 read-only 拒绝**——Pi 没有审批回调，交互式批准只能变成拒绝，即使会话同时要 workspace-write（`permission.ts:68-71`） |
-| `sandbox/mode = workspace-write` | 写能力工具集 `['read','grep','find','ls','write','edit']`（`permission.ts:38`） |
-| 其他/缺省 | fail-closed：`read-only` + `['read','grep','find','ls']`（`DEFAULT_PI_PERMISSION`，`permission.ts:32-35`） |
+| `sandbox/mode = workspace-write` | 写能力（但无 shell）工具集 `['read','write','edit']`（`permission.ts:43-44`） |
+| 其他/缺省 | fail-closed：`read-only` + `['read']`（`DEFAULT_PI_PERMISSION`，`permission.ts:32-40`） |
 
 部署钉死优先：`queryPermission` 里 `config.sandboxMode` 存在时直接用 `toolsForSandbox(config.sandboxMode)`，不再读会话旋钮；未钉死则每个 query 重新折叠，使会话中途切换 preset 在下一 step 生效（`agent.ts:366-373`）。`--tools` 仅在非空时下发（`agent.ts:524-525`）。
 
 ### 6.2 "沙箱"的实际边界（重要）
 
-源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5`）。**经核实主仓 `packages/subprocess/` 全部源码不含任何 sandbox 机制**（全目录 grep `sandbox` 无匹配），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-104`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:100-109`）。
+源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5`；`permission.ts` 的模块头与 `PiPermission.sandboxMode` 已在修复幽灵工具名时一并改正）。**经核实主仓 `packages/subprocess/` 全部源码不含任何 sandbox 机制**（全目录 grep `sandbox` 无匹配），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-106`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:100-109`）。
 
 实际生效的边界是三层，**没有 OS 级文件系统/网络隔离**：
 
 1. **进程树隔离与终止**：detached 进程组（POSIX）/ `taskkill /T /F`（Windows），SIGTERM → graceMs → SIGKILL 升级（`subprocess/src/types.ts:160-195`、`subprocess-local/src/spawn.ts:550-562`）；
 2. **环境清洗**：子进程基础环境是 `scrubbedParentEnv()` 的结果，配置里的 `env` 显式叠加在其上（`subprocess-local/src/spawn.ts:47`、`subprocess/src/types.ts:97-103`、`types.ts:27`）；
 3. **`--tools` 工具白名单**：这是 `sandboxMode` 唯一真正的执行点——`read-only`/`workspace-write` 只是不给子进程写/执行类工具，而不是强制它不能写。
+
+⚠️ **白名单里的名字必须是 pi 真实存在的工具**。pi 的内建工具只有 `read`/`bash`/`edit`/`write`（Pi RPC 进程的 argv 只带这三个：`--tools read,write,edit`），且 `--tools` 里的未知名字**静默无效**——pi 既不报错也不提示（`--tools` 同时作用于内建、扩展与自定义工具，见 `pi --help`）。2026-09 之前 `DEFAULT_PI_PERMISSION` 里的 `grep`/`find`/`ls` 就是这种幽灵条目：`read-only` 实际只剩 `read`，`workspace-write` 的 `grep/find/ls` 也从未生效。**给这个列表加名字前，先确认 pi 或其已装扩展真的提供该工具。**
 
 改这里时不要把 `sandboxMode` 当成安全边界来推理；它实质是"工具面收缩"。
 

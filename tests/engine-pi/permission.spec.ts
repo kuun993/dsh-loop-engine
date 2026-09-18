@@ -28,7 +28,7 @@ describe('resolveSessionPermission', () => {
       event('sandbox/mode', { mode: 'workspace-write' }),
     ])).toEqual({
       sandboxMode: 'workspace-write',
-      tools: ['read', 'grep', 'find', 'ls', 'write', 'edit'],
+      tools: ['read', 'write', 'edit'],
     })
   })
 
@@ -36,21 +36,21 @@ describe('resolveSessionPermission', () => {
     expect(resolveSessionPermission([
       event('sandbox/mode', { mode: 'workspace-write' }),
       event('approval/policy', { policy: 'ask' }),
-    ])).toEqual({ sandboxMode: 'read-only', tools: ['read', 'grep', 'find', 'ls'] })
+    ])).toEqual({ sandboxMode: 'read-only', tools: ['read'] })
   })
 
   it('fails closed for never, read-only, and knob-less sessions', () => {
     expect(resolveSessionPermission([event('approval/policy', { policy: 'never' })])).toEqual(DEFAULT_PI_PERMISSION)
     expect(resolveSessionPermission([event('sandbox/mode', { mode: 'read-only' })])).toEqual(DEFAULT_PI_PERMISSION)
     expect(resolveSessionPermission([])).toEqual(DEFAULT_PI_PERMISSION)
-    expect(DEFAULT_PI_PERMISSION).toEqual({ sandboxMode: 'read-only', tools: ['read', 'grep', 'find', 'ls'] })
+    expect(DEFAULT_PI_PERMISSION).toEqual({ sandboxMode: 'read-only', tools: ['read'] })
   })
 })
 
 describe('toolsForSandbox', () => {
   it('maps each sandbox mode to its tool allowlist', () => {
-    expect(toolsForSandbox('read-only')).toEqual(['read', 'grep', 'find', 'ls'])
-    expect(toolsForSandbox('workspace-write')).toEqual(['read', 'grep', 'find', 'ls', 'write', 'edit'])
+    expect(toolsForSandbox('read-only')).toEqual(['read'])
+    expect(toolsForSandbox('workspace-write')).toEqual(['read', 'write', 'edit'])
     expect(toolsForSandbox('danger-full-access')).toEqual([])
   })
 })
