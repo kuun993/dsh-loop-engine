@@ -164,24 +164,87 @@ describe('session/update notifications', () => {
   })
 })
 
+/**
+ * The three canonical options the kimi adapter advertises for a tool approval
+ * (`packages/acp-adapter/src/approval.ts`, `CANONICAL_OPTIONS`).
+ */
+const CANONICAL_OPTIONS = [
+  { optionId: 'approve_once', name: 'Approve once', kind: 'allow_once' },
+  { optionId: 'approve_always', name: 'Approve for this session', kind: 'allow_always' },
+  { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+]
+
+/** The `session/request_permission` params carrying `options` (untyped entries allowed: the wire is untrusted). */
+function permissionParams(options: readonly unknown[]): string {
+  return JSON.stringify({ sessionId: 's_1', options, toolCall: { toolCallId: '0:call_1', title: 'Bash', content: [] } })
+}
+
 describe('reverse-RPC permission', () => {
-  it('answers session/request_permission from the handler', async () => {
+  it('answers session/request_permission with the canonical allow-once outcome', async () => {
     const fake = fakeProcess()
     const client = new AcpClient(fake.process)
     client.onPermission(() => true)
-    fake.push('{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"s_1"}}')
+    fake.push(`{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":${permissionParams(CANONICAL_OPTIONS)}}`)
     await queue()
-    expect(JSON.parse(fake.writes[0]!)).toEqual({ jsonrpc: '2.0', id: 42, result: { approved: true } })
+    expect(JSON.parse(fake.writes[0]!)).toEqual({
+      jsonrpc: '2.0',
+      id: 42,
+      result: { outcome: { outcome: 'selected', optionId: 'approve_once' } },
+    })
     client.dispose()
   })
 
-  it('answers a denial when the handler returns false', async () => {
+  it('answers a denial with the reject outcome when the handler returns false', async () => {
     const fake = fakeProcess()
     const client = new AcpClient(fake.process)
     client.onPermission(() => false)
-    fake.push('{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{}}')
+    fake.push(`{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":${permissionParams(CANONICAL_OPTIONS)}}`)
     await queue()
-    expect(JSON.parse(fake.writes[0]!)).toEqual({ jsonrpc: '2.0', id: 7, result: { approved: false } })
+    expect(JSON.parse(fake.writes[0]!)).toEqual({
+      jsonrpc: '2.0',
+      id: 7,
+      result: { outcome: { outcome: 'selected', optionId: 'reject' } },
+    })
+    client.dispose()
+  })
+
+  it('cancels instead of guessing when the request offers several allow options (question/plan bridges)', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    client.onPermission(() => true)
+    const question = [
+      { optionId: 'q0_opt_0', name: 'Yes', kind: 'allow_once' },
+      { optionId: 'q0_opt_1', name: 'No', kind: 'allow_once' },
+      { optionId: 'q0_skip', name: 'Skip', kind: 'reject_once' },
+    ]
+    fake.push(`{"jsonrpc":"2.0","id":43,"method":"session/request_permission","params":${permissionParams(question)}}`)
+    await queue()
+    expect(JSON.parse(fake.writes[0]!)).toEqual({ jsonrpc: '2.0', id: 43, result: { outcome: { outcome: 'cancelled' } } })
+    client.dispose()
+  })
+
+  it('cancels when the request carries no usable option vocabulary', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    client.onPermission(() => true)
+    fake.push('{"jsonrpc":"2.0","id":44,"method":"session/request_permission","params":{"sessionId":"s_1"}}')
+    await queue()
+    expect(JSON.parse(fake.writes[0]!)).toEqual({ jsonrpc: '2.0', id: 44, result: { outcome: { outcome: 'cancelled' } } })
+    client.dispose()
+  })
+
+  it('ignores malformed option entries when resolving the outcome', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    client.onPermission(() => true)
+    const mixed = ['not-an-option', { optionId: 'approve_once', kind: 'allow_once' }, { kind: 'allow_once' }]
+    fake.push(`{"jsonrpc":"2.0","id":45,"method":"session/request_permission","params":${permissionParams(mixed)}}`)
+    await queue()
+    expect(JSON.parse(fake.writes[0]!)).toEqual({
+      jsonrpc: '2.0',
+      id: 45,
+      result: { outcome: { outcome: 'selected', optionId: 'approve_once' } },
+    })
     client.dispose()
   })
 
@@ -197,9 +260,13 @@ describe('reverse-RPC permission', () => {
   it('denies a permission request when no handler is registered (fail closed)', async () => {
     const fake = fakeProcess()
     const client = new AcpClient(fake.process)
-    fake.push('{"jsonrpc":"2.0","id":12,"method":"session/request_permission","params":{}}')
+    fake.push(`{"jsonrpc":"2.0","id":12,"method":"session/request_permission","params":${permissionParams(CANONICAL_OPTIONS)}}`)
     await queue()
-    expect(JSON.parse(fake.writes[0]!)).toEqual({ jsonrpc: '2.0', id: 12, result: { approved: false } })
+    expect(JSON.parse(fake.writes[0]!)).toEqual({
+      jsonrpc: '2.0',
+      id: 12,
+      result: { outcome: { outcome: 'selected', optionId: 'reject' } },
+    })
     client.dispose()
   })
 })
