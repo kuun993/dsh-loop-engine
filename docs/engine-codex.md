@@ -17,7 +17,7 @@ Codex 引擎让 dsh 会话由 OpenAI Codex CLI 驱动：每个 dsh step 通过 J
 
 ```
 src/engine-codex/
-├── loop.ts              # CodexLoop：AgentFactory + cordis 服务（createAgent/resume、发布事务）
+├── loop.ts              # CodexLoop：AgentFactory + cordis 服务（HostedLoopFactory 子类，只给 label/inject/buildAgent）
 ├── agent.ts             # CodexAgent：turn/step 状态机、流式折叠、技能注入、权限折叠
 ├── permission.ts        # dsh 权限旋钮 → codex 声明式权限对的纯函数折叠
 ├── skills.ts            # CodexSkillProvider：AGENTS.md 发现与合并为一个 agents-md 技能
@@ -31,27 +31,32 @@ src/engine-codex/
 
 - `loop.ts` 是**库而不是 cordis 插件入口**（`src/engine-codex/loop.ts:1-11`）；插件入口 `src/index.ts` 的 `mountCodex` 用 `ctx.plugin(CodexLoop, codexConfig(config))` 把它挂为子 fiber（`src/index.ts:572`）。
 - `appserver/types.ts` 明确是 `codex app-server generate-ts` 生成类型的**最小手写子集**（`src/engine-codex/appserver/types.ts:1-7`），只覆盖驱动用到的 initialize / thread / turn / 通知形状，多数字段用 `[key: string]: unknown` 放行。
-- 驱动复用的共享设施在 `src/driver-core/`：`prompt.ts`（历史序列化）、`permission-knobs.ts`（旋钮读取）、`skill-inject.ts`（`/name` 手势与 `<skill_content>` 渲染）、`ownership.ts`（工厂所有权与 abort race）、`context-files.ts`（AGENTS.md 收集与读取）、`inbox.ts`（`DriverInbox`：driver 自有的 durable inbox 投影）、`assistant-stream.ts`（`DriverAssistantStream`：live 帧发布与 compact stream 切分）。
+- 驱动复用的共享设施在 `src/driver-core/`：`prompt.ts`（历史序列化）、`permission-knobs.ts`（旋钮读取）、`skill-inject.ts`（`/name` 手势与 `<skill_content>` 渲染）、`ownership.ts`（工厂所有权与 abort race 的**原语**）、`hosted-loop-factory.ts`（把原语编排成 create/resume 事务，§3.1/3.2）、`inbox.ts`（`DriverInbox`：driver 自有的 durable inbox 投影）、`assistant-stream.ts`（`DriverAssistantStream`：live 帧发布与 compact stream 切分）。
+- `CodexSkillProvider` 也不是自己实现的算法：它继承 `driver-core/agents-md-skill-provider.ts` 的 `AgentsMdSkillProvider`，本模块只给一份 spec（见 §7 与 `docs/driver-core.md` §7.2.1）。
 
 ## 3. Loop 工厂与 Agent 生命周期
 
 ### 3.1 CodexLoop（工厂）
 
-`CodexLoop extends Service implements AgentFactory`（`src/engine-codex/loop.ts:119`），服务键 `agentLoopCodex`（`src/engine-codex/loop.ts:107-111`），`static inject = ['agents', 'sessions', 'systemPrompt']`（`src/engine-codex/loop.ts:121`）。构造函数（`src/engine-codex/loop.ts:122-138`）做三件事：
+`CodexLoop` 现在是 `HostedLoopFactory<ResolvedConfig, CodexAgent>` 的**三行子类**（`src/engine-codex/loop.ts:89-103`），服务键 `agentLoopCodex`（`loop.ts:97`），`static inject = ['agents', 'sessions', 'systemPrompt']`（`loop.ts:91`——**唯一不带 `subprocess` 的引擎**，因为它自己用 `node:child_process.spawn` 拉起 `codex app-server`）。构造函数只有一句 `super(ctx, 'agentLoopCodex', resolveConfig(config))`；唯一重写是 `buildAgent`（`loop.ts:101-103`）。
 
-1. `ctx.effect(() => () => this.ownership.dispose())`——fiber 卸载时停掉工厂所有权（含所有存活 agent 的反向拆解）；
-2. `ctx.effect(() => ctx.agents.setFactory(this))`——注册到 harness **唯一的** AgentFactory 槽位；槽位被占时 `setFactory` 抛 `an agent factory is already registered`，由 `src/index.ts:517-524` 的有界重试（40 次 × 50ms）等基础 `agent-loop` 行被 patch 层禁用后腾出；
-3. 注册 `provider`/`model`/`cwd` 三个 systemPrompt 变量（`src/engine-codex/loop.ts:142-144`）。注意：codex 拥有自己的 prompt，这些变量只喂给（本引擎用不到的）dsh 系统提示词的下游消费者，刻意与默认 loop 的注册保持一致。
+基类（`src/driver-core/hosted-loop-factory.ts`）在构造时做三件事：
+
+1. `ctx.effect(() => () => this.ownership.dispose())`——fiber 卸载时停掉工厂所有权（含所有存活 agent 的反向拆解）（`hosted-loop-factory.ts:109`）；
+2. `ctx.effect(() => ctx.agents.setFactory(this))`——注册到 harness **唯一的** AgentFactory 槽位（`hosted-loop-factory.ts:110`）；槽位被占时 `setFactory` 抛 `an agent factory is already registered`，由 `src/index.ts` 的有界重试（40 次 × 50ms）等基础 `agent-loop` 行被 patch 层禁用后腾出；
+3. 注册 `provider`/`model`/`cwd` 三个 systemPrompt 变量（`hosted-loop-factory.ts:114-116`）。注意：codex 拥有自己的 prompt，这些变量只喂给（本引擎用不到的）dsh 系统提示词的下游消费者，刻意与默认 loop 的注册保持一致。
 
 ### 3.2 创建/恢复事务（prepare → setup → publish）
 
-`createAgent`（`src/engine-codex/loop.ts:314-351`）与 `resume`/`resumeWith`（`src/engine-codex/loop.ts:397-478`）共享同一个发布事务 `setupAndPublish`（`src/engine-codex/loop.ts:271-304`）：
+> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面条目中的行号都指该共享文件，codex 只是选它当基类的四个引擎之一。
 
-1. **prepare**（`src/engine-codex/loop.ts:147-252`）：构造 `CodexAgent`，并把一个 memoized 的反向 `dispose()` **在发布前**注册到 `FactoryOwnership` 与 owner fiber——中途卸载会整体回滚。`signal` 融合三方取消源：调用方 signal、owner fiber 卸载、工厂 teardown（`src/engine-codex/loop.ts:170-178`）。
-2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方 setup 并取 commit（`src/engine-codex/loop.ts:294-295`）；失败则 `dispose()` 后重抛。
-3. **publish**（`src/engine-codex/loop.ts:247-258`）：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → `emitAgentEvent(..., 'agent/session-start', { source })`，每步之间 `assertLive()` 检查融合信号。
+`createAgent`（`hosted-loop-factory.ts:283-329`）与 `resume`/`resumeWith`（`hosted-loop-factory.ts:368-456`）共享同一个发布事务 `setupAndPublish`（`hosted-loop-factory.ts:250-281`）：
 
-反向拆解顺序（`src/engine-codex/loop.ts:176-199`）：`machine.cancel({ kind: 'disposed' })` → `whenIdle()` → `scope.dispose()` → 注销 enter/announce → 从 ownership 摘除。resume 路径额外处理：无 `sessionPersistence` 服务时直接报错（`src/engine-codex/loop.ts:398-402`）；加载与 setup 全程用 `raceAbortCall` 竞争融合信号，被取消后晚到的 preparation 会被 `releaseAbandoned` 释放（`src/engine-codex/loop.ts:416-455`）。
+1. **prepare**（`hosted-loop-factory.ts:133-248`）：通过 `this.buildAgent(...)`（`:219`）构造 `CodexAgent`，并把一个 memoized 的反向 `dispose()` **在发布前**注册到 `FactoryOwnership` 与 owner fiber——中途卸载会整体回滚。`signal` 融合三方取消源：调用方 signal、owner fiber 卸载、工厂 teardown（`hosted-loop-factory.ts:149-155`）。
+2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方 setup 并取 commit（`hosted-loop-factory.ts:273`）；失败则 `dispose()` 后重抛。
+3. **publish**（`hosted-loop-factory.ts:223-238`）：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → `emitAgentEvent(..., 'agent/session-start', { source })`，每步之间 `assertLive()` 检查融合信号。
+
+反向拆解顺序（`hosted-loop-factory.ts:164-194`）：`machine.cancel({ kind: 'disposed' })` → `whenIdle()` → `scope.dispose()` → 注销 enter/announce → 从 ownership 摘除。resume 路径额外处理：无 `sessionPersistence` 服务时直接报错（`hosted-loop-factory.ts:377-380`）；加载与 setup 全程用 `raceAbortCall` 竞争融合信号，被取消后晚到的 preparation 会被 `releaseAbandoned` 释放（`hosted-loop-factory.ts:409-415`）。
 
 ### 3.3 CodexAgent（会话驱动）
 

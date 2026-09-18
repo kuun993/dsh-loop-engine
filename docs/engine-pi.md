@@ -31,14 +31,16 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 
 ### 3.1 PiLoop（工厂）
 
-`PiLoop extends Service implements AgentFactory`（`src/engine-pi/loop.ts:178`），`inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（`loop.ts:180`）。构造函数做四件事（`loop.ts:194-222`）：
+`PiLoop extends HostedLoopFactory<ResolvedConfig, PiAgent>`（`src/engine-pi/loop.ts:148`），`inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（`loop.ts:150`）。构造函数做四件事（`loop.ts:158-177`）：
 
-1. `resolveConfig` 在插件配置边界定稿配置（`loop.ts:101-110`）；
-2. `piCliEntrypoint()` 解析 Pi CLI 的 bin 路径——包是 ESM-only，所以用 `import.meta.resolve` 拿到入口、回退两级到包根、读 `package.json` 的 `bin` 字段（`loop.ts:112-127`）；
-3. `spawn` 投影：`piSubprocessSpec` 把 `PiSpawnSpec` 包成 `SubprocessSpawnSpec`，在 argv 前加 `process.execPath`（即用当前 node 跑 pi 的 JS 入口），stdio 全 pipe，`graceMs = 3000`（`PI_DISPOSE_GRACE_MS`，`loop.ts:50、130-139`）；`fromSubprocess` 再把 dsh 的 `SubprocessHandle` 投影回协议传输所需的 `PiProcess`（`loop.ts:142-163`）；
-4. 注册副作用：所有权跟踪、`ctx.agents.setFactory(this)`（占用 harness 唯一 AgentFactory 槽位）、三个 systemPrompt 变量（`loop.ts:219-221`）。注意 Pi 原生拥有自己的 prompt，这些变量只喂给 dsh 系统提示词装配的下游消费者（`loop.ts:216-218` 注释）。
+1. `resolveConfig` 在插件配置边界定稿配置（`loop.ts:72-81`）；
+2. `piCliEntrypoint()` 解析 Pi CLI 的 bin 路径——包是 ESM-only，所以用 `import.meta.resolve` 拿到入口、回退两级到包根、读 `package.json` 的 `bin` 字段（`loop.ts:83-98`）；
+3. `spawn` 投影：`piSubprocessSpec` 把 `PiSpawnSpec` 包成 `SubprocessSpawnSpec`，在 argv 前加 `process.execPath`（即用当前 node 跑 pi 的 JS 入口），stdio 全 pipe，`graceMs = 3000`（`PI_DISPOSE_GRACE_MS`，`loop.ts:37、100-109`）；`fromSubprocess` 再把 dsh 的 `SubprocessHandle` 投影回协议传输所需的 `PiProcess`（`loop.ts:112-133`）；
+4. 唯一的重写 `buildAgent`（`loop.ts:179-184`）：`new PiAgent(..., this.config, this.spawn, this.bin, this.catalog)`——引擎特有的 spawn/bin/模型目录都在这三行里交给驱动。所有权跟踪、`ctx.agents.setFactory(this)`（占用 harness 唯一 AgentFactory 槽位）、三个 systemPrompt 变量由**基类**在构造时完成（`src/driver-core/hosted-loop-factory.ts:109-116`）。
 
-create/resume 走同一套"准备 → setup → 发布"事务（`loop.ts:231-348`）：`prepare` 在发布**之前**把一次性 memoized 反向拆除注册进 `FactoryOwnership` 和 owner fiber，setup 中途卸载会整体回滚；中止信号融合三方（调用方 signal、owner fiber 卸载、工厂拆除）（`loop.ts:247-255`）。`publish` 依次进入两个注册表、announce、发 `agent/session-start`（`loop.ts:327-338`）。`resume` 要求 `sessionPersistence` 服务存在，否则直接抛错（`loop.ts:477-483`）。
+> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。
+
+create/resume 走同一套"准备 → setup → 发布"事务（`hosted-loop-factory.ts:133-248`、`:250-281`、`:368-456`）：`prepare` 在发布**之前**把一次性 memoized 反向拆除注册进 `FactoryOwnership` 和 owner fiber，setup 中途卸载会整体回滚；中止信号融合三方（调用方 signal、owner fiber 卸载、工厂拆除）（`hosted-loop-factory.ts:149-155`）。`publish` 依次进入两个注册表、announce、发 `agent/session-start`（`hosted-loop-factory.ts:223-238`）。`resume` 要求 `sessionPersistence` 服务存在，否则直接抛错（`hosted-loop-factory.ts:377-380`）。
 
 ### 3.2 PiAgent（驱动）
 
@@ -162,16 +164,16 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 8.1 模型探针（pi --list-models）
 
-PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:210`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层：条目的 `id` 是 `provider/model` 全名（即选择后提交、并回灌子进程 `--model` 的值），`name` 是**裸模型名**，所以选择器里顶层显示的就是模型本身；`provider` 字段为 `'pi'`。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
+PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:172`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层：条目的 `id` 是 `provider/model` 全名（即选择后提交、并回灌子进程 `--model` 的值），`name` 是**裸模型名**，所以选择器里顶层显示的就是模型本身；`provider` 字段为 `'pi'`。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
 
 ## 9. 错误处理与已知边界
 
 - **子进程意外退出**：所有 pending 命令 reject `'pi RPC process exited unexpectedly'`，事件流唤醒后结束（`client.ts:107-113`）；step 侧表现为 `PI_NO_RESULT` 或命令错误。
 - **取消**：phase signal 触发时向子进程发 `abort` 命令——fire-and-forget，rejection 被吞掉（子进程可能已在拆除，`PiRpcClient.dispose()` 会 reject 在途的 `abort`；不吞会以 "pi RPC client is disposed" 未处理拒绝打崩进程）（`agent.ts:568-582`）。
-- **配置校验失败大声报错**：`Config` schema（`loop.ts:75-82`）在组合边界验证；`sandboxMode` 非法值直接组合失败。
+- **配置校验失败大声报错**：`Config` schema（`loop.ts:62-69`）在组合边界验证；`sandboxMode` 非法值直接组合失败。
 - **cwd 缺失**：会话无 cwd 元数据时 step 抛错，要求带 cwd 启动会话（`agent.ts:554-557`）。
-- **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`loop.ts:477-483`）。
-- **静默降级**：非 JSON 行忽略（`client.ts:234-236`）；技能加载失败静默跳过（`agent.ts:346-348`）；skills 目录不可读当空处理（`skills.ts:166-168`）。
+- **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`hosted-loop-factory.ts:377-380`）。
+- **静默降级**：非 JSON 行忽略（`client.ts:234-236`）；技能加载失败静默跳过（`agent.ts:346-348`）；skills 目录不可读当空处理（`agents-md-skill-provider.ts:174-176`）。
 - **已知功能边界**：
   - 图片不转写，统一替换为占位文本（`prompt.ts:20-21`）；
   - `extension_ui_request`（select/confirm/input 等交互请求）被忽略，没有应答路径——依赖交互扩展的 pi 配置在 dsh 下会卡住或无响应（`agent.ts:724`、`rpc/types.ts:153-162`）；

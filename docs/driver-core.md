@@ -17,15 +17,17 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 |---|---|
 | `prompt.ts` | 把持久会话日志序列化成一次托管查询的 prompt 文本 |
 | `permission-knobs.ts` | 从会话日志折叠出 dsh 的沙箱/审批旋钮 |
-| `ownership.ts` | 工厂所有权、活体 agent 跟踪、setup 与中止信号的竞速 |
+| `ownership.ts` | 工厂所有权、活体 agent 跟踪、setup 与中止信号的竞速（**原语**） |
+| `hosted-loop-factory.ts` | 把上面的原语编排成 create/resume 的 prepare→setup→publish **事务**（四个引擎共用一份；引擎差异只剩 `buildAgent` 一个抽象方法） |
 | `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
 | `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
+| `agents-md-skill-provider.ts` | "逐目录指令文件 + 技能目录"这套发现的**算法**，由各引擎用一份数据 spec 参数化 |
 
 另外两个非 driver-core 文件也属于共享层：`src/skills.ts`（Claude Code 技能 provider + 被各引擎 provider 复用的 `parseSkillFile` 与类型镜像）和 `src/commands.ts`（斜杠命令转发桥 + 被 kimi 复用的命令类型）。
 
-> **注意**：driver-core 各文件的头部注释大多仍写着 "Both the Claude Code and Codex drivers"——那是 kimi/pi 引擎加入前的旧表述，实际四个引擎都在用（详见文末"代码与注释不一致"一节）。
+> **注意**：driver-core 各文件的头部注释原先大多写着 "Both the Claude Code and Codex drivers"，那是 kimi/pi 引擎加入前的旧表述，实际四个引擎都在用。这批头注已订正为"四个引擎"或"每个托管驱动"；`context-files.ts` 的同类表述仍待订正（见文末附录）。
 
 ## 2. prompt.ts：每步 prompt 的组装契约
 
@@ -102,33 +104,49 @@ dsh 里**恰好只有一个工厂**能占住 `AgentFactory` 槽位，而引擎�
 
 - `INACTIVE_STATES`（`src/driver-core/ownership.ts:33-37`）：`UNLOADING | DISPOSED | FAILED` 三种 fiber 状态不能拥有或服务新生命周期；cordis 的 `FiberState` 是 `const enum`（`vendor/cordis/src/fiber.ts:147`），打包发布时会内联抹掉、不再有运行时导出，因此这里用本地数字常量镜像这三个状态（`FAILED 3`、`DISPOSED 4`、`UNLOADING 5`），**不能**从 `@deepseek-ai/cordis` 值导入 `FiberState`——否则插件树加载会报 `does not provide an export named 'FiberState'`（见 `src/driver-core/ownership.ts:16-30`）；
 - `isActive()`（`:54-56`）：`accepting` 标志与 fiber 状态双判；
-- `signal`（`:50-52`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:76-84`）；各 loop 用它做融合中止的一路输入（如 `src/engine-claude/loop.ts:182-184`）；
+- `signal`（`:50-52`）：工厂级中止信号，`dispose()` 一开始就以 `agent loop is not active` 错误 abort（`:76-84`）；共享工厂用它做融合中止的一路输入（`src/driver-core/hosted-loop-factory.ts:152`）；
 - `track(dispose)`（`:59-62`）：登记一个活体 agent 的 teardown，返回反注册函数；
 - `trackStartup(job)`（`:65-69`）/ `trackWrapper(job)`（`:72-74`）：把 agent 尚未存在前的配置启动工作、以及 create/resume 的发布延续挂进工厂，dispose 会等它们全部 settle；
 - `dispose()`（`:76-84`）：先关门（`accepting = false` + abort），再并发等待所有活体 agent teardown 与启动任务；
 - `raceAbort(operation, signal, id)`（`:88-104`）：operation 与 signal 竞速，abort 时抛出 signal 的 reason（非 Error 时包装成 `agent "<id>" creation aborted`）；
 - `raceAbortCall(..., releaseAbandoned)`（`:106-127`）：额外处理"operation 在取消后才产出值"的孤儿资源——取消后仍 then 一次 `releaseAbandoned` 释放它（典型场景：子进程/连接在取消后恰好建好了）。
-- 四个 loop 直接调用 harness 的 `SessionPersistence` **单签名** seam：新建走 `persistence.create(session.header, { inheritedEventCount, signal })`（`src/engine-claude/loop.ts:370-378`），恢复走 `persistence.open(id, 'write', { signal })` 拿 `SessionHandle`，`handle.read(0, undefined, { signal })` 返回 `{ eventState, events }`，再交给 `sessions.prepare(id, { seed, meta, inheritedEventCount, eventState })`（`src/engine-claude/loop.ts:436-456`；四个 loop 的对应实现逐字镜像）。
+- 共享工厂直接调用 harness 的 `SessionPersistence` **单签名** seam：新建走 `persistence.create(session.header, { inheritedEventCount, signal })`（`src/driver-core/hosted-loop-factory.ts:335-343`），恢复走 `persistence.open(id, 'write', { signal })` 拿 `SessionHandle`，`handle.read(0, undefined, { signal })` 返回 `{ eventState, events }`，再交给 `sessions.prepare(id, { seed, meta, inheritedEventCount, eventState })`（`src/driver-core/hosted-loop-factory.ts:400-425`）。
+
+### 事务机制只有一个实现：hosted-loop-factory.ts
+
+`ownership.ts` 提供**原语**；把原语编排成"prepare → setup → publish"、以及 create/resume 两条入口的**事务**，原先在四个 `src/engine-*/loop.ts` 里各写了一遍（每份约 325 行、claude↔pi 归一化相似度 97.6%）。现在只有一份：`src/driver-core/hosted-loop-factory.ts` 的 `HostedLoopFactory<TConfig, TAgent>`（`:85`）。
+
+它把引擎差异压缩到三个点，都由子类提供：
+
+| 引擎差异 | 提供方式 |
+|---|---|
+| cordis 服务名 + 全部 effect label 前缀 | 构造参数 `label`（`agentLoopClaudeCode` / `agentLoopCodex` / `agentLoopPi` / `agentLoopKimi`）；label 拼出 `<label>.transactions()`、`<label>.setFactory()`、`<label>.lifecycle(id)`、`<label>.resume-load(id)` |
+| 自己的 `static inject` | 子类声明（**codex 不含 `subprocess`**，其余三个含） |
+| 驱动构造 | 抽象方法 `buildAgent(loopCtx, id, options, session)`（`:124`），四个子类各三行 |
+
+`buildAgent` 是**唯一**的协议接缝——引擎特有的 spawn/argv/模型目录等全部由子类在闭包里捕获（pi 的 `spawn`/`bin`/`catalog`、kimi 的 `spawn` 即如此），共享体一行都不碰引擎协议。
 
 ### 哪些引擎怎么用
 
-四个 loop 的使用方式逐字镜像（jscpd 注释里明说这套机制镜像默认 agent-loop 工厂，且禁止依赖 agent-loop 包——`src/engine-claude/loop.ts:159`）：
+四个子类现在各自只剩「docstring + 配置 + 一个三行子类」：claude `src/engine-claude/loop.ts:95`、codex `src/engine-codex/loop.ts:89`、pi `src/engine-pi/loop.ts:152`、kimi `src/engine-kimi/loop.ts:80`。下表是共享体里的调用点（唯一一份，四个引擎共用）：
 
-| 调用点 | claude | codex | pi | kimi |
-|---|---|---|---|---|
-| 构造 `FactoryOwnership` | loop.ts:141 | loop.ts:135 | loop.ts:200 | loop.ts:118 |
-| fiber effect 里 dispose | loop.ts:143 | loop.ts:137 | loop.ts:214 | loop.ts:121 |
-| prepare 入口 `isActive()` 守门 | loop.ts:164 | loop.ts:158 | loop.ts:235 | loop.ts:142 |
-| `track(dispose)` | loop.ts:222 | loop.ts:216 | loop.ts:293 | loop.ts:200 |
-| `trackWrapper(published)` | loop.ts:355 | loop.ts:349 | loop.ts:429 | loop.ts:333 |
-| setup `raceAbort` | loop.ts:300 | loop.ts:294 | loop.ts:374 | loop.ts:278 |
-| resume 加载 `raceAbortCall` | loop.ts:436 | loop.ts:430 | loop.ts:510 | loop.ts:414 |
+| 调用点 | 位置（`src/driver-core/hosted-loop-factory.ts`） |
+|---|---|
+| 构造 `FactoryOwnership` | `:102` |
+| fiber effect 里 dispose | `:109` |
+| prepare 入口 `isActive()` 守门 | `:137`（resume 侧同款在 `:436`） |
+| `track(dispose)` | `:195` |
+| `trackWrapper(published)` | `:328`（create）/ `:455`（resume） |
+| setup `raceAbort` | `:273` |
+| resume 加载 `raceAbortCall` | `:409` |
 
 kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt 响应（`src/engine-kimi/agent.ts:554`）。
 
 ### 改它会波及谁
 
-四个引擎的生命周期正确性全部压在这 127 行上。这里任何一个判定时序的变化（比如 `dispose()` 里 abort 与等待的顺序、`isActive()` 的双判条件）都是四份 loop 代码的共同行为；改完必须跑 kimi/pi 的 `tests/engine-*/loop.spec.ts`，以及 claude/codex 落在各自 `tests/engine-*/index.spec.ts` 里的工厂槽位与中途卸载场景。注意 `dispose()` 里的错误文案 `agent loop is not active` 同时被各 loop 的守门分支复用（如 `src/engine-codex/loop.ts:457`），改文案要全局搜。
+`ownership.ts` 的 127 行是**原语**；真正的编排在 `hosted-loop-factory.ts`（约 380 行共享体），四个引擎的生命周期正确性全部压在这两份文件上。任何判定时序的变化（比如 `dispose()` 里 abort 与等待的顺序、`isActive()` 的双判条件）**同时**改变四个引擎的行为——这正是它现在只有一份的原因。改完必须跑 kimi/pi 的 `tests/engine-*/loop.spec.ts`，以及 claude/codex 落在各自 `tests/engine-*/index.spec.ts` 里的工厂槽位与中途卸载场景。注意 `dispose()` 里的错误文案 `agent loop is not active` 同时被守门分支复用（`src/driver-core/hosted-loop-factory.ts:137`、`:436`），改文案要全局搜。
+
+**新增一个引擎时**：写一个 `extends HostedLoopFactory<ResolvedConfig, XAgent>` 的子类，给出 label、`static inject`、`buildAgent` 三件事即可，**不要**再复制事务体——`package.json` 的 `files` 与构建产物都会跟着涨，而事务体的正确性只需要维护一次。
 
 ## 5. inbox.ts / assistant-stream.ts：驱动自有的收件箱与流式尝试
 
