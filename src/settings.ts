@@ -31,9 +31,12 @@ export interface LoopEngineSettings {
   showInComposer: boolean
 }
 
-/** Schema of the loop engine settings section. */
+/**
+ * Schema of the loop engine settings section. The engine union derives from
+ * {@link LOOP_ENGINE_IDS}, so adding an engine there also admits it here.
+ */
 export const LOOP_ENGINE_SETTINGS_SCHEMA: z<LoopEngineSettings> = z.object({
-  engine: z.union([z.const('in-process'), z.const('claude-code'), z.const('codex'), z.const('pi'), z.const('kimi')]).default('in-process'),
+  engine: z.union(LOOP_ENGINE_IDS.map(id => z.const(id))).default('in-process'),
   showInComposer: z.boolean().default(true),
 })
 

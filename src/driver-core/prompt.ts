@@ -1,6 +1,6 @@
 /**
  * Serialization of the durable session history into the prompt text of one
- * hosted-engine query. Both the Claude Code and Codex drivers build their
+ * hosted-engine query. Every hosted driver builds its
  * per-step input from the durable session log: the transcript is the log's
  * exact projection, so a later replay of the same log derives the identical
  * prompt (Model-visible ⟺ logged bridge).

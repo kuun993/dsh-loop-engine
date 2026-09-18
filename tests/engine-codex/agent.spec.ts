@@ -7,19 +7,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
+import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 
-/** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new CodexLoop(ctx, config as Parameters<typeof CodexLoop>[1])
-  },
-}
+const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
 
 type RunStreamed = (
   input: string,
@@ -160,16 +154,7 @@ function turnCompleted(usage: typeof TURN_USAGE = TURN_USAGE): AppServerEvent {
 }
 
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  const ctx = new Context()
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(loopPlugin, config)
-  return ctx
-}
-
-function message(text: string) {
-  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+  return await mountHarness(loopPlugin, config, 'none')
 }
 
 /** One durable assistant message event, narrowed from the session event union. */

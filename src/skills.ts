@@ -13,6 +13,8 @@ import { join, resolve } from 'node:path'
 
 // ── Inline type mirrors (avoiding a direct peer dep on @deepseek-ai/dsh-skill) ──
 
+import type { SkillDefinition } from './driver-core/skill-inject.ts'
+
 export interface SkillInvocationPolicy {
   readonly modelInvocable: boolean
   readonly userInvocable: boolean
@@ -33,17 +35,11 @@ export interface SkillCandidate {
   readonly resourceBase?: { readonly kind: string; readonly path: string }
 }
 
-export interface SkillDefinition {
-  readonly name: string
-  readonly description: string
-  readonly whenToUse?: string
-  readonly invocation: SkillInvocationPolicy
-  readonly source: SkillSource
-  readonly provider: string
-  readonly content: string
-  readonly path?: string
-  readonly resourceBase?: { readonly kind: string; readonly path: string }
-}
+/**
+ * The providers' loaded-skill shape is the driver-core one, so the skill
+ * providers and the engine agents that consume them cannot drift apart.
+ */
+export type { SkillDefinition } from './driver-core/skill-inject.ts'
 
 export interface SkillLookupOptions {
   readonly cwd?: string

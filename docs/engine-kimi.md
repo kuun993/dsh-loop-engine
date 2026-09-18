@@ -9,7 +9,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 核心模型：
 
 - **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:522,554`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:93-127`），保证 "Model-visible ⟺ logged"。
-- **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13,120`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
+- **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13`、`:83`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
 - **方向辨析**：主仓自带 `@deepseek-ai/dsh-acp`（`../deepseek-harness/packages/acp/acp`）是 **ACP server**（把 dsh agent 暴露给外部 ACP 客户端）；本驱动是 **ACP client**（dsh 作客户端驱动 kimi CLI 这个 agent）。两者方向相反，不要混淆。
 - **kimiBin 解析**：`kimiBinResolver`（`src/engine-kimi/process.ts:59-64`）三级回退——① 配置钉死的路径（`kimiBin` 配置项，空字符串视为未配置）；② 探测标准安装位 `<kimi home>/bin/kimi[.exe]`，其中 kimi home = `KIMI_CODE_HOME` 环境变量或 `~/.kimi-code`（`kimiHomeDir`，`process.ts:47-50`）；③ 回退裸命令 `'kimi'`，由 spawner 经 PATH 解析。
 
@@ -132,14 +132,14 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 `KimiSkillProvider` 把 Kimi 的两类磁盘内容暴露为 dsh 技能：
 
-- **`agents-md`（rank 140）**：cwd→git root 链上每个目录的 `AGENTS.md`（`KIMI_CONTEXT_POLICY` 只认 AGENTS.md，skills.ts:49-51），合并为一个候选，body 是各文件按就近优先拼接（`readSources`，`src/driver-core/context-files.ts:126-133`）；全为空文件则不产生候选。
-- **SKILL.md 条目**：项目级 `<dir>/.kimi-code/skills/`（rank 150，沿目录链每层都查）与用户级 `$KIMI_CODE_HOME/skills/`（默认 `~/.kimi-code/skills/`，rank 160）（skills.ts:43-47,90-104）。两种布局都收：子目录 `SKILL.md` 和根下扁平 `<name>.md`（skills.ts:157-186）；目录条目经 `stat` 跟随链接（Windows junction 的 Dirent 两者都不是，skills.ts:166-172 注释）。重名时项目文件因 rank 更低而胜出。
+- **`agents-md`（rank 140）**：cwd→git root 链上每个目录的 `AGENTS.md`（`KIMI_CONTEXT_POLICY` 只认 AGENTS.md，skills.ts:46-48），合并为一个候选，body 是各文件按就近优先拼接（`readSources`，`src/driver-core/context-files.ts:126-133`）；全为空文件则不产生候选。
+- **SKILL.md 条目**：项目级 `<dir>/.kimi-code/skills/`（rank 150，沿目录链每层都查）与用户级 `$KIMI_CODE_HOME/skills/`（默认 `~/.kimi-code/skills/`，rank 160）（skills.ts:40-45、`src/driver-core/agents-md-skill-provider.ts:115`）。两种布局都收：子目录 `SKILL.md` 和根下扁平 `<name>.md`（`agents-md-skill-provider.ts:186-197`）；目录条目经 `stat` 跟随链接（Windows junction 的 Dirent 两者都不是，`agents-md-skill-provider.ts:179-185` 注释）。重名时项目文件因 rank 更低而胜出。
 
 约束与留白：
 
-- 通用 `~/.agents/skills/`、`.agents/skills/` 根**刻意不扫**（skills.ts:14-16）——in-process 下它们由 web profile 的 `skill-filesystem` provider 覆盖；而托管引擎下 `skill-filesystem` 行已被 hosted preset 剥掉（见 architecture.md §3.5），这些根在 kimi 会话里就不出现，这正是"引擎接管技能面"的语义。
-- 复用共享 `parseSkillFile`（agents-skill frontmatter：`name`/`description`/`whenToUse`/`disable-model-invocation`）；Kimi 自己的 `disableModelInvocation`/`type` 字段**不翻译**，`type: flow` 技能会被当作 model-invocable 暴露（skills.ts:19-23）。
-- Kimi CLI 内建技能没有稳定磁盘位置，不在本 provider 范围（skills.ts:16-18）。
+- 通用 `~/.agents/skills/`、`.agents/skills/` 根**刻意不扫**（skills.ts:17-19）——in-process 下它们由 web profile 的 `skill-filesystem` provider 覆盖；而托管引擎下 `skill-filesystem` 行已被 hosted preset 剥掉（见 architecture.md §3.5），这些根在 kimi 会话里就不出现，这正是"引擎接管技能面"的语义。
+- 复用共享 `parseSkillFile`（agents-skill frontmatter：`name`/`description`/`whenToUse`/`disable-model-invocation`）；Kimi 自己的 `disableModelInvocation`/`type` 字段**不翻译**，`type: flow` 技能会被当作 model-invocable 暴露（skills.ts:21-25）。
+- Kimi CLI 内建技能没有稳定磁盘位置，不在本 provider 范围（skills.ts:19-21）。
 
 ### 7.3 技能注入（agent 侧）
 
@@ -156,15 +156,15 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 | 组合字段 | KimiLoop 字段 | 含义 |
 |---|---|---|
-| `model` | `model?: string` | **只作 request/header 与消息 provenance 的模型标签**（agent.ts:434-436,679）。不进 argv——`kimiAcpArgv` 无模型旗标（process.ts:74-76），模型由 Kimi 原生配置持有。⚠️ `Config` 与 `ResolvedConfig` 的 JSDoc 仍写着"传给子进程的 `-m`/`--model`"（loop.ts:46、types.ts:17），与实际行为不符，见第 9 节 |
-| `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:49,57；spawn spec 原样带，agent.ts:487） |
-| `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:50-51,83） |
+| `model` | `model?: string` | **只作 request/header 与消息 provenance 的模型标签**（agent.ts:434-436,679）。不进 argv——`kimiAcpArgv` 无模型旗标（process.ts:74-76），模型由 Kimi 原生配置持有。⚠️ `Config` 与 `ResolvedConfig` 的 JSDoc 仍写着"传给子进程的 `-m`/`--model`"（loop.ts:38、types.ts:17），与实际行为不符，见第 9 节 |
+| `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:41、49；spawn spec 原样带，agent.ts:487） |
+| `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:42-43、52） |
 
 环境变量：
 
-- `KIMI_CODE_HOME`：影响 bin 探测的 kimi home（process.ts:47-50）与用户级 skills 目录（skills.ts:71-75，两处各自独立读取，注意是**进程环境**而非 `env` 配置项）。
+- `KIMI_CODE_HOME`：影响 bin 探测的 kimi home（process.ts:47-50）与用户级 skills 目录（skills.ts:55-60，两处各自独立读取，注意是**进程环境**而非 `env` 配置项）。
 
-固定常量：`KIMI_DISPOSE_GRACE_MS = 3000`（loop.ts:42）。
+固定常量：`KIMI_DISPOSE_GRACE_MS = 3000`（loop.ts:29）。
 
 ## 9. 错误处理与已知边界
 
@@ -189,7 +189,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 1. **`process.ts` 模块头过时**（process.ts:2-8）：描述的是"`kimi -p --output-format stream-json`、每步一个一次性子进程"，实际实现是常驻 `kimi acp` + JSON-RPC。`KimiSpawnSpec` 的 JSDoc（process.ts:19"one `kimi -p` child"）同样过时。
 2. **`types.ts` 模块头过时**（types.ts:4-10）：仍在讲 `-p` 面自动批准、无 `--tools` 旗标，与 ACP 驱动模型不符。
-3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:46"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
+3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:38"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
 4. **客户端生命周期注释**：client.ts:11 说子进程"long-lived (one per factory)"，实际客户端按 **agent** 缓存（agent.ts:115-118），一个工厂下多个会话各有自己的子进程。client.ts:53"once per driver scope"才是准确说法。
 5. **块序注释内部张力**：agent.ts:586-587 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
 6. **permission.ts 模块头易误导**（permission.ts:9-13）：大段谈论 full-access/workspace-write 沙箱如何自动批准，但函数根本不读沙箱旋钮（permission.ts:24-27 的函数 JSDoc 才是准的）。
