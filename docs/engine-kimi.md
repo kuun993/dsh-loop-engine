@@ -36,19 +36,21 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 ### 3.1 KimiLoop（工厂）
 
-- `static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（loop.ts:102）；host 面 ctx key 为 `agentLoopKimi`（loop.ts:88-92）。
-- 构造时：解析配置（`resolveConfig`，loop.ts:79-85）；建 `FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:40-85`）；spawn capability 固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:42,120）；`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（loop.ts:122）。
-- Kimi 原生拥有自己的 prompt，所以 `provider`/`model`/`cwd` 三个 systemPrompt 变量只服务 dsh 系统提示词的下游消费者，镜像默认 loop 的注册（loop.ts:126-128）。
+- `static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（loop.ts:72）；host 面 ctx key 为 `agentLoopKimi`（loop.ts:70）。子类是 `HostedLoopFactory<ResolvedConfig, KimiAgent>`（loop.ts:70）。
+- 构造时：`super(ctx, 'agentLoopKimi', resolveConfig(config))`（loop.ts:81）解析配置（`resolveConfig`，loop.ts:49-58）并交给基类——`FactoryOwnership`（agent 拆除跟踪 + 工厂 teardown 信号，`src/driver-core/ownership.ts:40-85`）、`ctx.agents.setFactory(this)` 抢占唯一 AgentFactory 槽位（`src/driver-core/hosted-loop-factory.ts:102`、`:110`）都在基类里；子类自己只补 spawn capability：固定走 subprocess 接缝并带 3000ms 进程树终止宽限（`KIMI_DISPOSE_GRACE_MS`，loop.ts:29、`:83`）。
+- Kimi 原生拥有自己的 prompt，所以 `provider`/`model`/`cwd` 三个 systemPrompt 变量只服务 dsh 系统提示词的下游消费者，镜像默认 loop 的注册（`src/driver-core/hosted-loop-factory.ts:114-116`）。唯一的重写是 `buildAgent`（loop.ts:86-88）：`new KimiAgent(..., this.config, this.spawn, this.config.bin)`。
 
 ### 3.2 创建/恢复事务
 
-`createAgent`/`resume` 共享同一条 prepare→setup→publish 事务（loop.ts:138-288）：
+> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面条目里的行号除特别注明外都指该共享文件。
 
-1. **prepare**：先验活（owner fiber 活跃、工厂接受中、调用方信号未中止），然后构造三重融合的 abort——调用方取消、owner fiber 卸载、工厂 teardown 任一触发即中止 setup（loop.ts:139-162）。拆除函数 `dispose` 在发布**之前**就注册进工厂跟踪集和 owner fiber effect，中途卸载会整体回滚（loop.ts:160-199）。
-2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 运行调用方 setup 并取其 commit（loop.ts:278-279）。
-3. **publish**：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → 发出 `agent/session-start` 事件，每步之间 `assertLive()`（loop.ts:231-242）。
+`createAgent`/`resume` 共享同一条 prepare→setup→publish 事务（`hosted-loop-factory.ts:133-248`、`:250-281`、`:368-456`）：
 
-`resume` 额外要求 `sessionPersistence` 服务在场，否则直接抛错（loop.ts:381-387）；加载阶段用 `raceAbortCall` 保证取消后被遗弃的 preparation 仍能 `[Symbol.dispose]()` 释放（loop.ts:414-419）。
+1. **prepare**：先验活（owner fiber 活跃、工厂接受中、调用方信号未中止），然后构造三重融合的 abort——调用方取消、owner fiber 卸载、工厂 teardown 任一触发即中止 setup（`hosted-loop-factory.ts:134-162`）。拆除函数 `dispose` 在发布**之前**就注册进工厂跟踪集和 owner fiber effect，中途卸载会整体回滚（`hosted-loop-factory.ts:195-198`）。
+2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 运行调用方 setup 并取其 commit（`hosted-loop-factory.ts:273`）。
+3. **publish**：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → 发出 `agent/session-start` 事件，每步之间 `assertLive()`（`hosted-loop-factory.ts:223-238`）。
+
+`resume` 额外要求 `sessionPersistence` 服务在场，否则直接抛错（`hosted-loop-factory.ts:377-380`）；加载阶段用 `raceAbortCall` 保证取消后被遗弃的 preparation 仍能 `[Symbol.dispose]()` 释放（`hosted-loop-factory.ts:409-415`）。
 
 ### 3.3 KimiAgent（相位机）
 
