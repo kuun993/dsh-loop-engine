@@ -70,8 +70,9 @@ managed block 本身是**根级 block sequence**，这带来两个真实踩过�
 
 `apply(ctx, config)`（`src/index.ts:258`）依次做：
 
-1. `resolvePatchPath` 解析 patch 文件路径：`patchPath` 显式指定优先，否则 `$DSH_HOME/profiles/<profile>/<patchFilename>`，默认 `web/cordis.patch.yml`（`src/index.ts:136-144`）。空字符串 `patchPath` 视为未指定。
-2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`（`src/index.ts:261`）。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
+1. `resolvePatchPath` 解析 patch 文件路径：`patchPath` 显式指定优先，否则 `$DSH_HOME/profiles/<profile>/<patchFilename>`，默认 `web/cordis.patch.yml`。空字符串 `patchPath` 视为未指定。
+2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
+3. **修复无法识别的引擎块**：若文件里有 managed block 但 `managedBlockEngineOf` 返回 `undefined`（块写的引擎 id 本版本不认识，比如新版写、旧版读），就**同步**把块摘掉改写为 in-process 并 loud 记日志。详见 §7 的对应条目——不修的话这个 profile 会完全没有 AgentFactory。
 3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:620-627`）。
 4. `steerPresetDefault(fileEngine)`：把会话的命令/技能面导向匹配当前引擎的 preset（见 §3.5）。
 5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:653`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
@@ -80,22 +81,24 @@ managed block 本身是**根级 block sequence**，这带来两个真实踩过�
 
 ### 3.2 运行时切换：onChange 管线
 
-settings 提交后的 `onChange`（`src/index.ts:646-669`）：
+settings 提交后的 `onChange`：
 
 1. `next = source!().engine`；与 `fileEngine` 相同则返回。
-2. `mountedEngine !== next` 时先 `unmountEngine()` 再 `mountEngine(next)`——切回 `in-process` 即卸载托管 fiber，让基础 loop 重占槽位；在托管引擎之间互切则先卸后挂（`tests/index.spec.ts:611-639` 等逐个验证）。重复进入已挂载引擎是 no-op。
-3. **同步**重写 managed block 并更新 `fileEngine`。写失败只记 error、保持旧值——此时工厂已经换了但文件没换，`fileEngine` 不变使得下次 onChange 还会再进挂载/写盘路径，而已挂载的 fiber 靠 `engineFiber` 守卫保证第二次挂载是 no-op 而非重复（`tests/index.spec.ts:461-488`）。
-4. 写盘成功（即选择真正提交）后 `steerPresetDefault(next)`，把新会话的 preset 默认导向匹配引擎的那套（见 §3.5）；写失败不导向，保持与文件一致。
+2. **先写盘**：**同步**重写 managed block。这一步排在挂载之前，因为「活着的工厂」「选择器显示的值」「磁盘上的块」三者必须一致；挂载在前的话，写失败会留下一个文件与 settings 都不承认的引擎（`tests/index.spec.ts` 的 `logs, keeps the old engine, and mounts nothing when the write fails`）。
+3. 写失败：记 error、**不改** `fileEngine`、**不挂载**，并在 `setTimeout(…, 0)` 里把 settings 值回滚到 `fileEngine`（延迟是为了避免从 watch 内部同步重入本回调）。回滚失败再记一条 error；用户会看到选择器退回旧引擎，而不是一次与文件矛盾的"成功"切换。
+4. 写成功后 `fileEngine = next`，再在 `mountedEngine !== next` 时 `unmountEngine()` + `mountEngine(next)`——切回 `in-process` 即卸载托管 fiber，让基础 loop 重占槽位；在托管引擎之间互切则先卸后挂。重复进入已挂载引擎是 no-op（该守卫现在是防御性的：`mountedEngine` 只会是 `undefined` 或等于 `fileEngine`，而走到这里必有 `next !== fileEngine`）。
+5. `steerPresetDefault(next)`，把新会话的 preset 默认导向匹配引擎的那套（见 §3.5）。
 
 ### 3.3 工厂的挂载与槽位竞争重试
 
 `hostFactory`（`src/index.ts:492-522`）是挂载的核心，两个要点：
 
 - **触碰 fiber 使其立即启动**：Cordis 的插件 fiber 在 await 时才懒启动，而 settings 钩子是同步回调没有 await，所以 `void fiber.then(...)` 主动触发（`src/index.ts:506`）。
-- **有界槽位竞争重试**：运行时切到托管引擎时，patch 层的 reload（禁用基础 `agent-loop` 行）与新工厂注册是**竞争关系**——reload 落地前基础工厂仍占槽位，`setFactory` 以 `an agent factory is already registered` 拒绝。命中这条错误消息且未超上限时，每 50ms 重试一次，上限 `MAX_MOUNT_ATTEMPTS = 40`（约 2 秒窗口，`src/index.ts:84-85、517-523`）；reload 释放槽位后重试即成功（`tests/index.spec.ts:490-527`）。窗口耗尽或其他任何错误 → 一条 loud error，不无限循环（`tests/index.spec.ts:550-571`）。
-- 重试 timer 随插件 dispose 清理（`ctx.effect`，`src/index.ts:648`），否则在已停用的 context 上迟到的挂载会刷噪声日志（`tests/index.spec.ts:529-548`）。
+- **有界槽位竞争重试**：运行时切到托管引擎时，patch 层的 reload（禁用基础 `agent-loop` 行）与新工厂注册是**竞争关系**——reload 落地前基础工厂仍占槽位，`setFactory` 拒绝。命中槽位冲突且未超上限时，每 50ms 重试一次，上限 `MAX_MOUNT_ATTEMPTS = 40`（约 2 秒窗口，`src/index.ts:84-85`）；reload 释放槽位后重试即成功。窗口耗尽或其他任何错误 → 一条 loud error（含 `restart \`dsh web\`` 指引），不无限循环。
+- **陈旧挂载的 rejection 会被丢弃**：`hostFactory` 在挂载前取一个自增的 `mountGeneration`，拒绝回调先比对它；`unmountEngine` 也自增。快速 A→B 切换时 A 的 fiber 可能在 B 已上线后才拒绝，若不比对，那段清理会注销 B 的命令/技能注册并丢弃 B 的 fiber 句柄（B 泄漏且永久占住槽位）。回归测试：`tests/index.spec.ts` 的 `ignores a superseded mount failure…`。
+- 重试 timer 一律经 `retryLater` 挂载，它带 `disposed` 守卫；`ctx.effect` 清理会置位 `disposed` 并清掉待决 handle。两者都需要：清理只能清**已挂上**的 timer，而从异步续体（如一条 mutation 的 rejection）里**新挂**的 timer 只能靠 `disposed` 挡掉（回归测试：`ignores a retry that was armed after disposal`）。
 
-注意重试靠**错误消息字符串匹配**（`src/index.ts:519`），这是对主仓 `packages/core/agent/src/index.ts:357` 文案的脆弱耦合——主仓改文案时这里会静默退化为"不重试、直接报错"。
+**槽位冲突的识别是双信号**：`ctx.get('agentLoop') !== undefined` 是结构性的——基础 loop 的服务在，即基础行仍占着槽位，所以**启动竞争**不依赖文案，主仓改 `setFactory` 的报错文案不会破坏它。但**托管引擎之间互切**（A→B）没有这个信号：基础行早已被禁用，槽位由正在退场的 A 的 fiber 持着，那条路径仍只认消息文案（主仓 `packages/core/agent/src/index.ts:357` 抛的是**无 code 的裸 `Error`**，没有可路由的结构信号）。文案若被改写，A→B 会退化为「不重试、直接 loud 失败」——但此时磁盘上的块**已经写好**（§3.2 的顺序改动），按日志提示重启即可恢复。
 
 ### 3.4 挂载的副作用：命令与技能注册
 
@@ -128,7 +131,7 @@ settings 提交后的 `onChange`（`src/index.ts:646-669`）：
 几个关键决策：
 
 - **切回 `in-process` 时还原**：被替换的旧默认值记在 `savedPresetDefault`，切回时 set 回去；没有旧值（或启动时读到残留的本插件 id）则 unset，落回行配置的 `standard`（`src/index.ts:421-437`）。
-- **namespace 注册竞争**：roster 的 settings 段由它自己的 inject 回调注册，可能晚于本插件的 apply；mutate 撞上 `not registered` 时有界重试（30×100ms），其他错误 loud 一次（`src/index.ts:399-413`）。同理，in-process 启动时的"残留值清理"先读到的可能是 attach 前的 config 默认，所以干净首读也要按同一窗口复查几轮（`src/index.ts:421-437`）。
+- **namespace 注册竞争**：roster 的 settings 段由它自己的 inject 回调注册，可能晚于本插件的 apply。识别靠**结构性优先**：settings provider 的 `describe()` 能枚举已注册 namespace（`packages/settings/settings/src/index.ts:505`），段不在其中就只调度有界重试（30×100ms）而**根本不尝试写入**（回归测试：`tests/index.spec.ts` 的 `waits for the roster namespace without attempting a write…`）；耗尽后 loud 一次。provider 没有 `describe` 时退回「写入 + 匹配 `not registered` 文案」的老路径。其他错误一律 loud 一次、不重试——`tests/index.spec.ts` 的 `FailingPersist`（`disk full`）证明不能对任意错误重试。同理，in-process 启动时的"残留值清理"先读到的可能是 attach 前的 config 默认，所以干净首读也要按同一窗口复查几轮。
 - **authoring 失败不导默认值**：preset 没写成就绝不能把默认指过去，否则每个新会话都 loud 失败（`src/index.ts:461-469`）。
 - **preset 永不删除**：会话日志记着 `agent-preset/selected`，resume 要按它重新解析；留下的 `loop-engine` preset 目录是无害的（roster 发现是文件系统的，`tests/index.spec.ts:991` 起的分组覆盖以上每条）。
 - **活会话不迁移**：默认只影响之后新建的会话；已在跑的会话保持自己 join 的 preset，页面刷新（§4.3 的 reload）后新建会话自然落到新面。
@@ -202,11 +205,12 @@ schema（`src/settings.ts:36-39`）：`engine` 五选一并默认 `in-process`�
 ## 7. 已知约束与坑
 
 - **手改 patch 文件不会在运行中生效**。文件只在 `apply()` 启动时读、在 onChange 时写；HMR watcher 重放 patch 也换不了 AgentFactory（`src/index.ts:15-16`）。调试时改了文件请重启 `dsh web`。
-- **槽位竞争重试是字符串匹配**（见 §3.3）：主仓改 `setFactory` 的报错文案即破坏重试。2 秒窗口内 patch reload 不落地就 loud 失败。
-- **provider 路由占位依赖 llm 注册表文案**（见 §3.6）：与槽位重试同理，"部署方已占标签"的识别靠 `already registered` 消息匹配（主仓 `packages/llm/llm/src/index.ts:429`），主仓改文案时会退化成一条 error 日志且不占位——第二轮 prompt 的拒绝会复现。
-- **未知引擎 id 的降级路径有缺口**：begin 标记里出现当前版本不认识的引擎 id（如新版写、旧版读）时，`currentEngineOf` 读作 `in-process`（`src/patch-manager.ts:71-76`），插件不会挂载任何工厂；同时 managed block 仍在文件里禁用着基础 `agent-loop` 行，而启动路径里 `next === fileEngine` 会短路、**不会**清理这个块（`src/index.ts:657`）。净效果是没有任何 AgentFactory 注册，`ctx.agents.create` 全部拒绝。代码中没有针对该场景的修复路径，降级使用前先手工清块。
-- **同步写盘不可改为异步**（§2.4）：onChange 无 await，提交即落盘是重启正确性的前提。
-- **managed block 之外的 patch 内容受字符串变换保护，但不要动标记行**：`MANAGED_BLOCK_BEGIN` 的子串匹配（`hasManagedBlock` 用 `includes`，`src/patch-manager.ts:63-65`）意味着用户手写一行同前缀注释也会被当成 managed span 吃掉。
+- **槽位竞争重试是双信号**（见 §3.3）：启动竞争靠基础 loop 服务 `agentLoop` 的结构性存在，扛文案改动；**托管引擎互切（A→B）仍只靠消息匹配**，因为主仓 `setFactory` 抛的是无 code 的裸 `Error`（主仓 `packages/core/agent/src/index.ts:357`），而那条路径上基础行早已禁用、没有结构信号。文案被改写时 A→B 退化为「不重试、直接 loud 失败」，但文件此时已写好，按日志重启即可恢复。
+- **provider 路由占位**（见 §3.6）："部署方已占标签"的识别**结构性 code 优先**——该处抛的是 `LlmError`，code 为 `DUPLICATE_ADAPTER`（主仓 `packages/llm/llm/src/error.ts:15` 与 `index.ts:429`；其 docstring 明写 「route on this, never by parsing `message`」），所以主仓改文案不会破坏它；`already registered` 消息匹配仅作为抛出无 code 错误的 registry 的兜底（回归测试：`tests/index.spec.ts` 的 `treats a duplicate adapter by its error code…`）。
+- **未知引擎 id 现在会在启动时自动修复**：begin 标记里出现当前版本不认识的引擎 id（如新版写、旧版读）时，`currentEngineOf` 仍读作 `in-process`（`src/patch-manager.ts`），但 `apply()` 会先用 `managedBlockEngineOf` 把这个「有块但 id 不认识」的情形和「没有块」区分开（它返回 `undefined` 才走 repath），随即**同步**摘掉块并 loud 记日志（见 §3.1 第 3 步）。**天花板**：摘块只是让基础 `agent-loop` 行在下次 loader pass 重新生效，基础工厂真正回来仍需一次重启（或 patch HMR watcher），所以日志里明说 `restart \`dsh web\``。若摘块写入失败（文件只读等），会记一条 `could not repair…` 的 error 并保留原块——此时该 profile 仍然没有 AgentFactory，必须手工清块。
+- **同步写盘不可改为异步**（§2.4）：onChange 无 await，提交即落盘是重启正确性的前提。**写盘也必须排在挂载之前**（§3.2）：反过来的话写失败会留下「工厂已换、文件没换」的分裂状态，而回切时的 `next === fileEngine` 短路会让内存里的工厂一直跑下去。
+- **`hasRootEntry` 的列 0 锚定是刻意的**（`src/patch-manager.ts:111-113`）：正则 `/^(?:- |\[)/m` 只认列 0 的根级条目，所以 `# - note` 这类注释、以及块标量/多行标量里必然缩进的内容都匹配不上，`seedEmptyArray` 不会因此被误跳过。
+- **managed block 之外的 patch 内容受字符串变换保护，但不要动标记行**：`MANAGED_BLOCK_BEGIN` 的子串匹配（`hasManagedBlock` 用 `includes`，与 `managedSpan` 的 `indexOf` 同理）意味着用户手写一行同前缀注释也会被当成 managed span 吃掉；无 end 标记时该 span 一直延伸到文件末尾。
 - **空行记账是功能不是洁癖**：`managedSpan` 的 `blankBefore` 与移除时的折叠逻辑保证往返 byte-for-byte（`tests/patch-manager.spec.ts:124-137`），改这里先跑 `tests/patch-manager.spec.ts`。
 - **hosted preset 是托管产物**：`$DSH_HOME/.agent-presets/loop-engine/` 每次托管引擎启动时从当时的 `standard` 重新生成，手改会被覆盖；`stripPresetRows` 按列 0 的 `- id:` 切分顶层行，主仓 preset 文件若改了行结构（比如行首不是 `- id:`），剥除会保守地保留该行而不是出错（`src/preset.ts`）。托管期间 settings 文档里的 `agent-presets.default` 被本插件占用——用户在设置页另选的默认 preset 会在切回 `in-process` 时被还原值覆盖语义见 §3.5。
 - **Windows**：构建/测试里的 junction、`rm` 需要重试（`tests/index.spec.ts:119-123`）；`stat` 跟随链接正是因为 Windows 的 junction 在 `Dirent` 上既非文件也非目录（`src/skills.ts:277-283`）。

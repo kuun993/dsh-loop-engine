@@ -10,6 +10,7 @@ import {
   hasManagedBlock,
   MANAGED_BLOCK_BEGIN,
   MANAGED_BLOCK_END,
+  managedBlockEngineOf,
   renderManagedBlock,
 } from '../src/patch-manager.ts'
 
@@ -87,6 +88,15 @@ describe('block presence and engine derivation', () => {
     const text = `${SEED}\n${MANAGED_BLOCK_BEGIN}future-engine --\n- id: agent-loop\n  disabled: true\n${MANAGED_BLOCK_END}\n`
     expect(hasManagedBlock(text)).toBe(true)
     expect(currentEngineOf(text)).toBe('in-process')
+  })
+
+  it('reports undefined from managedBlockEngineOf for an unknown marker, so boot can repair it', () => {
+    const unknown = `${SEED}\n${MANAGED_BLOCK_BEGIN}future-engine --\n- id: agent-loop\n  disabled: true\n${MANAGED_BLOCK_END}\n`
+    // Same input currentEngineOf collapses to in-process: the caller needs to
+    // tell "no block" apart from "a block this build cannot honor".
+    expect(managedBlockEngineOf(unknown)).toBeUndefined()
+    expect(managedBlockEngineOf(`${SEED}\n${renderManagedBlock('codex')}`)).toBe('codex')
+    expect(managedBlockEngineOf(SEED)).toBeUndefined()
   })
 })
 

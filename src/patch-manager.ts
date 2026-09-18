@@ -67,12 +67,22 @@ export function hasManagedBlock(text: string): boolean {
 /** Begin-marker line pattern carrying the engine name (`<name>` is the engine id). */
 const BEGIN_MARKER_RE = /^# -- dsh-loop-engine managed block: (\S+) --$/m
 
-/** Derive the current engine from a patch-file text by the managed block's begin marker. */
-export function currentEngineOf(text: string): LoopEngineId {
+/**
+ * The engine id the managed block's begin marker names, when this build knows
+ * it. `undefined` covers both "no managed block" and "the block names an engine
+ * this build does not recognize" — the second being the state where the block
+ * still disables the base `agent-loop` row while no factory can take the slot.
+ */
+export function managedBlockEngineOf(text: string): LoopEngineId | undefined {
   const engine = BEGIN_MARKER_RE.exec(text)?.[1]
   return (LOOP_ENGINE_IDS as readonly string[]).includes(engine ?? '')
     ? engine as LoopEngineId
-    : 'in-process'
+    : undefined
+}
+
+/** Derive the current engine from a patch-file text by the managed block's begin marker. */
+export function currentEngineOf(text: string): LoopEngineId {
+  return managedBlockEngineOf(text) ?? 'in-process'
 }
 
 /** Split a patch-file text at the managed span; absent span means it appends. */

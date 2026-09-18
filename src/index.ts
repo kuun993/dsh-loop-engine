@@ -55,6 +55,8 @@ import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types
 import {
   applyManagedBlock,
   currentEngineOf,
+  hasManagedBlock,
+  managedBlockEngineOf,
 } from './patch-manager.ts'
 import { ensureHostedPreset, HOSTED_PRESET_ID } from './preset.ts'
 import { HOSTED_PROVIDER_ROUTES, HostedEngineRouteAdapter } from './provider-route.ts'
@@ -258,7 +260,25 @@ function kimiConfig(config: Config): KimiConfig {
 export function apply(ctx: Context, config: Config): void {
   const patchPath = resolvePatchPath(config)
   // Seed from the file so attach is a no-op when the file already matches.
-  let fileEngine = currentEngineOf(readPatchFileSync(patchPath))
+  const patchText = readPatchFileSync(patchPath)
+  let fileEngine = currentEngineOf(patchText)
+  // A block naming an engine this build does not recognize (written by a newer
+  // or different build) disables the base `agent-loop` row with nothing to take
+  // the slot: the plugin mounts no factory, and every session then fails with
+  // "no agent factory registered". Strip the block so the base loop can own the
+  // slot again. Re-enabling the base row takes a recomposition, hence the
+  // restart instruction; leaving the file alone would deadlock the profile.
+  if (hasManagedBlock(patchText) && managedBlockEngineOf(patchText) === undefined) {
+    try {
+      writePatchFileSync(patchPath, applyManagedBlock(patchText, 'in-process'))
+      fileEngine = 'in-process'
+      ctx.logger.error(
+        'loop-engine: the managed block names an engine this build does not recognize; removed it so the base agent loop can own the factory slot. Restart `dsh web` to bring the base loop back.',
+      )
+    } catch (error: unknown) {
+      ctx.logger.error(`loop-engine: could not repair the unrecognized managed block: ${String(error)}`)
+    }
+  }
   // Only the non-default engines live here. Their managed block disables the
   // base `agent-loop` row, freeing the single AgentFactory slot for the
   // selected loop's own registration; `in-process` mounts no factory here
@@ -285,6 +305,8 @@ export function apply(ctx: Context, config: Config): void {
   // Minimal shape of the host settings service mutation seam.
   interface SettingsMutator {
     mutate(ns: SettingsNamespace, ops: readonly SettingsPathOp[]): Promise<void>
+    /** Registered namespaces, when the provider can enumerate them. */
+    describe?(): { ns: string }[]
   }
   // Minimal shape of the host llm registry: only the route registration a
   // hosted engine's request/header provider label needs.
@@ -301,6 +323,27 @@ export function apply(ctx: Context, config: Config): void {
   let engineFiber: (Fiber & PromiseLike<Fiber>) | undefined
   /** The engine whose fiber is currently mounted (or mounting), if any. */
   let mountedEngine: LoopEngineId | undefined
+  /**
+   * Bumped for every mount and every unmount, so an in-flight mount can tell
+   * whether it is still the current one. A fast A→B switch settles A's fiber
+   * after B is live, and A's rejection must not run against B.
+   */
+  let mountGeneration = 0
+  /**
+   * Set by the plugin's cleanup effect. Every scheduled retry checks it before
+   * acting: a retry armed from an async continuation can otherwise outlive the
+   * context and re-enter the mount or settings path after disposal.
+   */
+  let disposed = false
+
+  /**
+   * Arm a retry timer that must not act after the plugin is disposed. Retries
+   * armed from async continuations (a settings mutation rejecting, an unsettled
+   * fiber) can be scheduled *after* the cleanup effect already ran, so clearing
+   * pending handles is not enough on its own.
+   */
+  const retryLater = (run: () => void, ms: number): ReturnType<typeof setTimeout> =>
+    setTimeout(() => { if (!disposed) run() }, ms)
   let commandDisposers: (() => void)[] | undefined
   let skillDisposer: (() => void) | undefined
   /** Cached Pi model catalog from `pi --list-models`, shared by the Pi route adapter.
@@ -378,7 +421,7 @@ export function apply(ctx: Context, config: Config): void {
     const llm = ctx.get('llm') as LlmRegistry | undefined
     if (llm === undefined) {
       if (attempt < ROUTE_ATTEMPTS) {
-        routeRetry = setTimeout(() => { mountProviderRoute(engine, attempt + 1) }, ROUTE_RETRY_MS)
+        routeRetry = retryLater(() => mountProviderRoute(engine, attempt + 1), ROUTE_RETRY_MS)
       }
       return
     }
@@ -387,8 +430,11 @@ export function apply(ctx: Context, config: Config): void {
       routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options))
       routeEngine = engine
     } catch (error: unknown) {
-      // A deployment whose own adapter already serves the label needs no placeholder.
-      if (error instanceof Error && error.message.includes('already registered')) {
+      // A deployment whose own adapter already serves the label needs no
+      // placeholder. The llm registry signals that structurally with an error
+      // code; the message arm stays for a registry that throws an uncoded error.
+      const duplicateAdapter = (error as { code?: unknown } | null)?.code === 'DUPLICATE_ADAPTER'
+      if (error instanceof Error && (duplicateAdapter || error.message.includes('already registered'))) {
         ctx.logger.warn(`loop-engine: provider route "${label}" is already served by another adapter`)
         return
       }
@@ -405,13 +451,25 @@ export function apply(ctx: Context, config: Config): void {
   const mutatePresetDefault = (op: SettingsPathOp, attempt = 0): void => {
     const settings = ctx.get('settings') as SettingsMutator | undefined
     if (settings === undefined) return
+    // A provider that can enumerate its namespaces says structurally whether
+    // the roster's section has attached yet, so the roster's attach race needs
+    // no failed write (let alone a message match) to detect. Providers without
+    // `describe` fall through to the write and the message arm below.
+    if (settings.describe !== undefined && !settings.describe().some(entry => entry.ns === AGENT_PRESETS_NS)) {
+      if (attempt < PRESET_DEFAULT_ATTEMPTS) {
+        presetRetry = retryLater(() => mutatePresetDefault(op, attempt + 1), PRESET_DEFAULT_RETRY_MS)
+      } else {
+        ctx.logger.error(`loop-engine: preset default switch failed: the "${AGENT_PRESETS_NS}" settings namespace never registered`)
+      }
+      return
+    }
     settings.mutate(AGENT_PRESETS_NS, [op]).then(() => undefined, (error: unknown) => {
       if (
         error instanceof Error
         && error.message.includes('not registered')
         && attempt < PRESET_DEFAULT_ATTEMPTS
       ) {
-        presetRetry = setTimeout(() => { mutatePresetDefault(op, attempt + 1) }, PRESET_DEFAULT_RETRY_MS)
+        presetRetry = retryLater(() => mutatePresetDefault(op, attempt + 1), PRESET_DEFAULT_RETRY_MS)
         return
       }
       ctx.logger.error(`loop-engine: preset default switch failed: ${String(error)}`)
@@ -439,7 +497,7 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     if (attempt < PRESET_DEFAULT_ATTEMPTS) {
-      presetRetry = setTimeout(() => { restorePresetDefault(attempt + 1) }, PRESET_DEFAULT_RETRY_MS)
+      presetRetry = retryLater(() => restorePresetDefault(attempt + 1), PRESET_DEFAULT_RETRY_MS)
     }
   }
 
@@ -500,10 +558,15 @@ export function apply(ctx: Context, config: Config): void {
     /* v8 ignore next -- see above */
     if (engineFiber !== undefined) return
     /* v8 ignore stop */
+    const generation = ++mountGeneration
     const fiber = mount()
     engineFiber = fiber
     mountedEngine = engine
     void fiber.then(() => undefined, (error: unknown) => {
+      // A mount superseded by a later switch must not run its failure handling:
+      // the fast A→B window leaves A rejecting after B is live, and the cleanup
+      // below would dispose B's registrations and drop B's fiber handle.
+      if (generation !== mountGeneration) return
       // Cleanup claude-specific registrations on failure (a no-op for codex).
       cleanupEngineRegistrations()
       engineFiber = undefined
@@ -514,16 +577,38 @@ export function apply(ctx: Context, config: Config): void {
       // rejects. Retry on exactly that collision — bounded — so the hosted
       // factory registers right after the reload frees the slot; any other
       // failure is deployment trouble and fails loud once.
+      // The base loop's service is present exactly while the base `agent-loop`
+      // row still owns the slot, so a boot race is detected structurally and
+      // survives a reword of the collision message. A runtime switch between
+      // two hosted engines has no such signal — the base row is long gone and
+      // the outgoing engine holds the slot until its fiber unwinds — so the
+      // message arm stays as the only signal for that case.
+      const baseLoopHoldsSlot = ctx.get('agentLoop') !== undefined
       if (
         error instanceof Error
-        && error.message.includes('an agent factory is already registered')
+        && (baseLoopHoldsSlot || error.message.includes('an agent factory is already registered'))
         && mountAttempts < MAX_MOUNT_ATTEMPTS
       ) {
         mountAttempts += 1
-        mountRetry = setTimeout(() => { mountEngine(engine) }, MOUNT_RETRY_MS)
+        mountRetry = retryLater(() => {
+          // Mounting on a context that disposal already tore down throws
+          // synchronously, and a timer callback has no caller to report it.
+          try {
+            mountEngine(engine)
+          } catch (retryError: unknown) {
+            /* v8 ignore start -- only reachable inside the unload window, where the
+               context is already inactive but the cleanup effect that raises
+               `disposed` has not run yet; no test can schedule that deterministically */
+            /* v8 ignore next -- see above */
+            ctx.logger.error(`loop-engine: ${engine} mount retry failed: ${String(retryError)}`)
+            /* v8 ignore stop */
+          }
+        }, MOUNT_RETRY_MS)
         return
       }
-      ctx.logger.error(`loop-engine: ${engine} factory failed to start: ${String(error)}`)
+      ctx.logger.error(
+        `loop-engine: ${engine} factory failed to start: ${String(error)} — restart \`dsh web\` to release the factory slot`,
+      )
     })
   }
 
@@ -628,16 +713,28 @@ export function apply(ctx: Context, config: Config): void {
 
   const unmountEngine = (): void => {
     const fiber = engineFiber
+    const engine = mountedEngine
     mountAttempts = 0
+    // Supersede any in-flight mount, so a late rejection from the engine being
+    // torn down cannot act on the engine that replaces it.
+    mountGeneration += 1
     CLEAR_RETRY()
     releaseRoute()
     cleanupEngineRegistrations()
     mountedEngine = undefined
     if (fiber === undefined) return
     engineFiber = undefined
-    /* v8 ignore start -- a fiber that failed already cleared engineFiber in hostFactory's rejection handler, so this rejection arm is unreachable */
-    void fiber.then((resolved) => { void resolved.dispose() }, () => undefined)
-    /* v8 ignore stop */
+    void fiber.then(
+      (resolved) => {
+        // A rejecting dispose must not surface as an unhandled rejection; the
+        // slot is already released either way.
+        resolved.dispose().catch((error: unknown) => {
+          ctx.logger.error(`loop-engine: ${String(engine)} factory dispose failed: ${String(error)}`)
+        })
+      },
+      /* v8 ignore next -- a fiber that failed already cleared engineFiber in hostFactory's rejection handler, so this rejection arm is unreachable */
+      () => undefined,
+    )
   }
   mountEngine(fileEngine)
   steerPresetDefault(fileEngine)
@@ -645,7 +742,12 @@ export function apply(ctx: Context, config: Config): void {
   // this fiber is gone would fail on the inactive context and log noise. The
   // preset-default and route-registration retries are bounded the same way,
   // and the route placeholder leaves the llm registry with the plugin.
-  ctx.effect(() => () => { CLEAR_RETRY(); CLEAR_PRESET_RETRY(); releaseRoute() }, 'loop-engine: retry cleanup')
+  ctx.effect(() => () => {
+    disposed = true
+    CLEAR_RETRY()
+    CLEAR_PRESET_RETRY()
+    releaseRoute()
+  }, 'loop-engine: retry cleanup')
   // installSection always calls setSource before the first onChange,
   // so `source` is guaranteed set here; the assertion is a contract guard.
   let source: (() => LoopEngineSettings) | undefined
@@ -655,25 +757,46 @@ export function apply(ctx: Context, config: Config): void {
       onChange: () => {
         const next = source!().engine
         if (next === fileEngine) return
+        // Synchronous: the settings watch has no await, and a user may restart
+        // `dsh web` immediately after switching — the managed block must be on
+        // disk before the commit returns, or the restart reads the old engine.
+        // The write lands BEFORE the mount: a failed write must leave the live
+        // engine, the picker, and the file in agreement, rather than swapping in
+        // an engine the file and the settings doc do not name.
+        try {
+          const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
+          writePatchFileSync(patchPath, updated)
+        } catch (error: unknown) {
+          ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
+          // Pull the selection back so the picker cannot claim a switch that
+          // never reached the file. Deferred: reverting from inside the watch
+          // would re-enter this callback synchronously. `settingsCtx.settings`
+          // is injected, so the service is present by construction.
+          setTimeout(() => {
+            settingsCtx.settings.mutate(loopEngineSettingsNamespace(), [{ op: 'set', path: ['engine'], value: fileEngine }])
+              .catch((revertError: unknown) => {
+                ctx.logger.error(`loop-engine: engine selection revert failed: ${String(revertError)}`)
+              })
+          }, 0)
+          return
+        }
+        fileEngine = next
         // Runtime engines follow the selection in the same process: switching
         // to a hosted engine mounts its factory, switching back to in-process
         // unmounts it so the base loop regains the single AgentFactory slot.
-        // Re-entering the already-mounted engine is a no-op, not a churn.
+        // Re-entering the already-mounted engine must stay a no-op — mounting
+        // it again would tear down and rebuild the fiber that hosts the live
+        // sessions — but it cannot happen here: reaching this point required
+        // `next !== fileEngine`, and mountedEngine is only ever `undefined` or
+        // equal to fileEngine (a failed mount clears it, a successful switch
+        // sets both). The comparison is a backstop, not a live branch.
+        /* v8 ignore start -- unreachable as argued above; guards live sessions against churn */
+        /* v8 ignore next -- see above */
         if (mountedEngine !== next) {
           unmountEngine()
           mountEngine(next)
         }
-        // Synchronous: the settings watch has no await, and a user may restart
-        // `dsh web` immediately after switching — the managed block must be on
-        // disk before the commit returns, or the restart reads the old engine.
-        try {
-          const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
-          writePatchFileSync(patchPath, updated)
-          fileEngine = next
-        } catch (error: unknown) {
-          ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
-          return
-        }
+        /* v8 ignore stop */
         // The selection committed: steer new sessions to the matching preset.
         steerPresetDefault(next)
       },
