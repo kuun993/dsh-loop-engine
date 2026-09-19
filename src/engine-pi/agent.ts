@@ -73,6 +73,14 @@ type Phase =
   }
   | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
+/**
+ * The running phase. Its `turn`/`step` are the position of the step currently
+ * open: rotating a step mutates them in place, so every holder of the phase
+ * (the turn loop's fail-safe close, `agent/error` reporting) sees the step that
+ * is actually open rather than the one the prompt was started under.
+ */
+type RunningPhase = Extract<Phase, { kind: 'running' }>
+
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
 type PreparedStep =
@@ -105,6 +113,31 @@ export class PiAgent implements Agent {
 
   /** This step's RPC child; released by the step teardown and the scope teardown. */
   private rpc: PiRpcClient | undefined
+
+  /**
+   * Tool results logged into the currently open step. A result means the
+   * segment that requested the call is finished, so the next assistant content
+   * opens the next step (see {@link beginSegment}).
+   */
+  private stepSettledTools = 0
+
+  /**
+   * Rotate to the next step when the segment that ran a tool has finished, so
+   * each assistant segment lands in its own step.
+   *
+   * Called as new assistant content begins. A step holding a settled tool
+   * result means the previous segment is complete, and the content about to be
+   * written belongs to the next one. Rotating at a message boundary keeps calls
+   * announced together — one model turn — in one step.
+   * @param phase - the running phase carrying the open step's position.
+   */
+  private beginSegment(phase: RunningPhase): void {
+    if (this.stepSettledTools === 0) return
+    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    phase.step += 1
+    this.session.append('step/start', { turn: phase.turn, step: phase.step })
+    this.stepSettledTools = 0
+  }
 
   constructor(
     private loopCtx: Context,
@@ -400,7 +433,10 @@ export class PiAgent implements Agent {
           const stepEnd = await this.step()
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
-          this.session.append('step/end', { turn, step })
+          // The driver rotates steps as the prompt's segments complete, so
+          // `phase.step` — not the step this iteration opened — is the one still
+          // open here.
+          this.session.append('step/end', { turn, step: phase.step })
         }
         signal.throwIfAborted()
         /* v8 ignore start -- every step() completes, so turnEnds is always set here; the short-circuit arm is a defensive backstop */
@@ -535,8 +571,10 @@ export class PiAgent implements Agent {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
-    const { turn, step, abort: { signal } } = this.phase
+    const phase = this.phase
+    const { abort: { signal } } = phase
     signal.throwIfAborted()
+    this.stepSettledTools = 0
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -580,8 +618,8 @@ export class PiAgent implements Agent {
           live = new DriverAssistantStream(
             this.id,
             ++this.streamAttempts,
-            turn,
-            step,
+            phase.turn,
+            phase.step,
             frame => this.dispatch.emit('agent/assistant-stream', { frame }),
           )
           live.start()
@@ -617,6 +655,17 @@ export class PiAgent implements Agent {
       const emittedToolCalls = new Set<string>()
       /** Tool-call blocks not yet folded into a flushed assistant message. */
       let pendingToolCalls: ContentBlock[] = []
+      /**
+       * `tool/call` events whose owning assistant message has not been flushed
+       * yet, paired 1:1 with {@link pendingToolCalls}. They are appended only
+       * once that message lands, so the durable log reads
+       * `assistant/message` → `tool/call` → `tool/result`: logging the call at
+       * `toolcall_end` would place it before the message that requested it, and
+       * the chat view sorts a tool row by its own seq.
+       */
+      let pendingCallLog: Array<{ callId: string; name: string; arguments: string }> = []
+      /** Calls released by the flush that just folded their owner message. */
+      let callsToLog: Array<{ callId: string; name: string; arguments: string }> = []
       /** Last usage snapshot, folded onto the message that closes a turn. */
       let lastUsage: TokenUsage | undefined
       /** Whether an assistant message already flushed for this turn (message_end). */
@@ -627,8 +676,8 @@ export class PiAgent implements Agent {
         if (held === undefined) return
         const attempt = live
         const data = {
-          turn,
-          step,
+          turn: phase.turn,
+          step: phase.step,
           message: createAssistantMessage({
             content: held.content,
             source: { provider: PROVIDER, model: this.modelLabel() },
@@ -644,6 +693,13 @@ export class PiAgent implements Agent {
           live = undefined
         }
         held = undefined
+        // The message just committed owns these calls; log them after it.
+        for (const call of callsToLog) {
+          this.session.append('tool/call', {
+            turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments,
+          })
+        }
+        callsToLog = []
       }
 
       /** Ensure a text block has been block-start-ed at the given index. */
@@ -660,18 +716,16 @@ export class PiAgent implements Agent {
         currentStream().push({ type: 'block-start', index, blockType: 'reasoning' })
       }
 
-      /** Emit a durable tool/call unless the call id was already written. */
+      /** Record a tool call, to be logged once its owner message is flushed. */
       const emitToolCall = (callId: string, name: string, rawArguments: unknown): void => {
         if (emittedToolCalls.has(callId)) return
         emittedToolCalls.add(callId)
         const argumentsValue = typeof rawArguments === 'string' ? rawArguments : JSON.stringify(rawArguments ?? {})
-        this.session.append('tool/call', {
-          turn, step, callId: ToolCallId(callId), name, arguments: argumentsValue,
-        })
         // The assistant message that requested this call must carry its
         // tool-call block, otherwise a later resume on the in-process engine
         // derives a `tool` result with no preceding assistant `tool_calls`.
         pendingToolCalls.push({ type: 'tool-call', id: ToolCallId(callId), name, arguments: argumentsValue })
+        pendingCallLog.push({ callId, name, arguments: argumentsValue })
       }
 
       /**
@@ -686,6 +740,8 @@ export class PiAgent implements Agent {
         flushHeld()
         held = { content: [...pendingToolCalls] }
         pendingToolCalls = []
+        callsToLog = pendingCallLog
+        pendingCallLog = []
         flushHeld()
       }
 
@@ -721,6 +777,8 @@ export class PiAgent implements Agent {
         if (pendingToolCalls.length > 0) {
           blocks = [...blocks, ...pendingToolCalls]
           pendingToolCalls = []
+          callsToLog = pendingCallLog
+          pendingCallLog = []
         }
         return blocks
       }
@@ -740,6 +798,9 @@ export class PiAgent implements Agent {
             break
           case 'message_start':
             if (event.message.role === 'assistant') {
+              // A new assistant message after a settled tool result is the next
+              // segment, so it opens the next step.
+              this.beginSegment(phase)
               startedText.clear()
               startedReasoning.clear()
               thinkingByIndex.clear()
@@ -793,10 +854,11 @@ export class PiAgent implements Agent {
             emitToolCall(event.toolCallId, event.toolName, undefined)
             ensureToolCallOwner()
             this.session.append('tool/result', {
-              turn,
-              step,
+              turn: phase.turn,
+              step: phase.step,
               message: mapToolResult({ toolCallId: event.toolCallId, result: event.result, isError: event.isError }),
             }, { surfaceOp: 'append' })
+            this.stepSettledTools += 1
             break
           case 'turn_end': {
             if (!assistantFlushed && event.message !== undefined) {
@@ -809,7 +871,8 @@ export class PiAgent implements Agent {
             assistantFlushed = true
             for (const toolResult of event.toolResults ?? []) {
               ensureToolCallOwner()
-              this.appendToolResult(turn, step, toolResult)
+              this.appendToolResult(phase.turn, phase.step, toolResult)
+              this.stepSettledTools += 1
             }
             finished = true
             break
