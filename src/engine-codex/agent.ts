@@ -27,7 +27,7 @@ import type {
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
-import { LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { LlmError, ToolCallId, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -678,8 +678,23 @@ export class CodexAgent implements Agent {
           return live
         }
 
+        /** Fold accumulated reasoning into the open message (synthesizing one when none is open). */
+        const foldReasoning = (): void => {
+          if (pendingReasoning.length === 0) return
+          const reasoningBlocks = pendingReasoning.map(text => ({ type: 'reasoning' as const, text }))
+          held = held === undefined
+            ? { content: reasoningBlocks, stream: [...pendingReasoningStream] }
+            : { ...held, content: [...held.content, ...reasoningBlocks], stream: [...held.stream, ...pendingReasoningStream] }
+          pendingReasoning.length = 0
+          pendingReasoningStream.length = 0
+          reasoningBlockStarted = false
+        }
+
         /** Append the held assistant message, optionally carrying the turn's usage. */
         const flushHeld = (usage?: TokenUsage): void => {
+          // Trailing reasoning that no agent message claimed folds into this
+          // message instead of being dropped or split into a bare follow-up.
+          foldReasoning()
           if (held === undefined) return
           const attempt = live
           const data = {
@@ -701,17 +716,20 @@ export class CodexAgent implements Agent {
           }
           held = undefined
         }
-        /** Flush accumulated reasoning as its own durable message; an agent message folds it instead. */
-        const flushReasoning = (usage?: TokenUsage): void => {
-          if (pendingReasoning.length === 0) return
-          flushHeld()
-          held = {
-            content: pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
-            stream: [...pendingReasoningStream],
-          }
-          pendingReasoning.length = 0
-          pendingReasoningStream.length = 0
-          flushHeld(usage)
+
+        /**
+         * Fold one completed tool call into the open assistant message, so the
+         * message that requested it carries its `tool-call` block. Any trailing
+         * reasoning that no agent message claimed is folded first, so the
+         * tool-call block joins that same message instead of a bare follow-up.
+         * @param call - the call's identity and JSON arguments string.
+         */
+        const foldToolCall = (call: { callId: ToolCallId; name: string; arguments: string }): void => {
+          foldReasoning()
+          const block: ContentBlock = { type: 'tool-call', id: call.callId, name: call.name, arguments: call.arguments }
+          held = held === undefined
+            ? { content: [block], stream: [] }
+            : { ...held, content: [...held.content, block] }
         }
 
         signal.throwIfAborted()
@@ -724,7 +742,10 @@ export class CodexAgent implements Agent {
               // item-started carries the item type; block-start is emitted on the first delta.
               if (event.itemType === 'agentMessage') {
                 textBlockStarted = false
-                textBlockIndex = pendingReasoning.length
+                // The text block opens after every block already folded into the
+                // held message plus the reasoning items completed since — the
+                // position the merge at `item-completed` will give it.
+                textBlockIndex = (held?.content.length ?? 0) + pendingReasoning.length
               }
               break
             }
@@ -744,8 +765,10 @@ export class CodexAgent implements Agent {
               // rotate here — otherwise live reasoning frames would paint into
               // the finished step and only the durable message would move.
               this.beginSegment(phase)
-              // Token-level streaming of the model's thinking — live.
-              const index = pendingReasoning.length
+              // Token-level streaming of the model's thinking — live. The block
+              // index is its position in the held message: every block already
+              // folded in, plus the reasoning items completed before this one.
+              const index = (held?.content.length ?? 0) + pendingReasoning.length
               if (!reasoningBlockStarted) {
                 reasoningBlockStarted = true
                 currentStream().push({ type: 'block-start', index, blockType: 'reasoning' })
@@ -794,40 +817,54 @@ export class CodexAgent implements Agent {
                 // Cut before flushing: a committed earlier message ends the
                 // attempt, and the cut must observe the live one.
                 const textStream = live?.takeStream() ?? []
-                flushHeld()
-                held = {
-                  content: [
-                    ...pendingReasoning.map(text => ({ type: 'reasoning' as const, text })),
-                    { type: 'text' as const, text: item.text ?? '' },
-                  ],
-                  stream: [...pendingReasoningStream, ...textStream],
+                const reasoningBlocks = pendingReasoning.map(text => ({ type: 'reasoning' as const, text }))
+                const textBlock: ContentBlock = { type: 'text', text: item.text ?? '' }
+                // Consecutive agent messages in one segment (no tool result
+                // settled) merge into the SAME message; a message that follows
+                // settled tool work begins a fresh one (the tool item already
+                // flushed `held`, and `beginSegment` above rotated the step).
+                if (held === undefined) {
+                  held = { content: [...reasoningBlocks, textBlock], stream: [...pendingReasoningStream, ...textStream] }
+                } else {
+                  held = {
+                    ...held,
+                    content: [...held.content, ...reasoningBlocks, textBlock],
+                    stream: [...held.stream, ...pendingReasoningStream, ...textStream],
+                  }
                 }
                 pendingReasoning.length = 0
                 pendingReasoningStream.length = 0
                 reasoningBlockStarted = false
                 textBlockStarted = false
               } else if (item.type === 'commandExecution') {
-                flushReasoning()
-                flushHeld()
+                // A tool that follows a settled tool in this step is the next
+                // segment, so rotate first — each tool's assistant message lands
+                // in its own step, matching the in-process one-message-per-step
+                // shape.
+                this.beginSegment(phase)
                 const activity = mapCommandExecution(item as { id: string; command?: string; aggregatedOutput?: string | null; exitCode?: number | null; status?: string })
+                foldToolCall(activity.call)
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
                 this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
                 this.stepSettledTools += 1
               } else if (item.type === 'fileChange') {
-                flushReasoning()
-                flushHeld()
+                this.beginSegment(phase)
                 const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
+                foldToolCall(activity.call)
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
                 this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
                 this.stepSettledTools += 1
               } else if (item.type === 'mcpToolCall') {
-                flushReasoning()
-                flushHeld()
+                this.beginSegment(phase)
                 const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
+                foldToolCall(activity.call)
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
@@ -840,16 +877,13 @@ export class CodexAgent implements Agent {
               const usage = event.turn.usage
                 ? mapUsage(event.turn.usage)
                 : undefined
-              // Turn usage attaches to the step's final durable message: the
-              // trailing reasoning-only message when thinking closed the turn,
-              // otherwise the last held agent message.
-              if (pendingReasoning.length > 0) flushReasoning(usage)
-              else flushHeld(usage)
+              // Turn usage attaches to the step's final durable message, which
+              // folds in any trailing reasoning (flushHeld does that folding).
+              flushHeld(usage)
               finished = true
               break
             }
             case 'error':
-              flushReasoning()
               flushHeld()
               throw new LlmError(event.error.message, 'CODEX_ERROR')
             /* v8 ignore next -- AppServerEvent is a closed union; no unknown kinds */
@@ -857,7 +891,6 @@ export class CodexAgent implements Agent {
               break
           }
         }
-        flushReasoning()
         flushHeld()
         if (!finished) {
           throw new LlmError(

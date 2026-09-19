@@ -348,7 +348,7 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
-  it('flushes trailing reasoning as its own durable message carrying the turn usage', async () => {
+  it('folds trailing reasoning into the turn-closing message carrying the turn usage', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -368,27 +368,26 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
-      expect(assistants).toHaveLength(2)
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'answer' }])
-      expect(assistants[0]?.data.usage).toBeUndefined()
-      expect(assistants[1]?.data.message.content).toEqual([{ type: 'reasoning', text: 'trailing thought' }])
-      expect(assistants[1]?.data.usage).toMatchObject({ outputTokens: 7 })
-      // Each message embeds only the chunks its own content streamed: the
-      // trailing reasoning belongs to the second message, not the first.
+      // The trailing reasoning folds into the closing message so the chat view
+      // renders the answer and its thinking together (one message per step).
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'answer' },
+        { type: 'reasoning', text: 'trailing thought' },
+      ])
+      expect(assistants[0]?.data.usage).toMatchObject({ outputTokens: 7 })
       expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'answer' },
-      ])
-      expect(expandAssistantStream(assistants[1]!.data.stream).map(member => member.chunk)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'reasoning' },
-        { type: 'reasoning-delta', index: 0, text: 'trailing thought' },
+        { type: 'block-start', index: 1, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 1, text: 'trailing thought' },
       ])
     } finally {
       await ctx.fiber.dispose()
     }
   })
 
-  it('flushes an earlier agent message without usage when a later item completes', async () => {
+  it('merges consecutive agent messages into one message', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -408,19 +407,19 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
-      expect(assistants).toHaveLength(2)
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
-      expect(assistants[0]?.data.usage).toBeUndefined()
-      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
-      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
-      // Each message keeps its own streamed chunks.
+      // Consecutive agent messages in one segment merge into ONE message, so
+      // the chat view does not drop the earlier text.
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'first' },
+        { type: 'text', text: 'second' },
+      ])
+      expect(assistants[0]?.data.usage).toMatchObject({ inputTokens: 12 })
       expect(expandAssistantStream(assistants[0]!.data.stream).map(member => member.chunk)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'first' },
-      ])
-      expect(expandAssistantStream(assistants[1]!.data.stream).map(member => member.chunk)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'text' },
-        { type: 'text-delta', index: 0, text: 'second' },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'second' },
       ])
     } finally {
       await ctx.fiber.dispose()
@@ -432,6 +431,11 @@ describe('CodexAgent turn mapping', () => {
     ['fileChange', fileChange()],
     ['mcpToolCall', mcpToolCall()],
   ])('splits the stream at a %s item interleaved between two agent messages', async (kind, toolItem) => {
+    const expectedToolCall = {
+      commandExecution: { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+      fileChange: { type: 'tool-call', id: 'patch-1', name: 'apply_patch', arguments: '[{"path":"src/a.ts","kind":"update"}]' },
+      mcpToolCall: { type: 'tool-call', id: 'mcp-1', name: 'docs/search', arguments: '{"q":"cordis"}' },
+    }[kind]
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -454,7 +458,9 @@ describe('CodexAgent turn mapping', () => {
       const events = agent.session.snapshotEvents()
       const assistants = events.filter(event => event.type === 'assistant/message')
       expect(assistants).toHaveLength(2)
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      // The tool-call block folds into the message that requested it, so the
+      // serialized transcript keeps the tool invocation beside its result.
+      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }, expectedToolCall])
       expect(assistants[0]?.data.usage).toBeUndefined()
       expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
       expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
@@ -475,7 +481,7 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
-  it('cuts the stream at a reasoning item interleaved between two agent messages', async () => {
+  it('merges a reasoning item interleaved between two agent messages', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -498,32 +504,29 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
-      expect(assistants).toHaveLength(2)
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
-      expect(assistants[0]?.data.usage).toBeUndefined()
-      expect(assistants[1]?.data.message.content).toEqual([
+      // Reasoning between two agent messages belongs to the SAME segment, so it
+      // folds into the one merged message with its block index after the text.
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'first' },
         { type: 'reasoning', text: 'think' },
         { type: 'text', text: 'second' },
       ])
-      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
-      // The reasoning folds into the second message, so the first keeps only
-      // its own text chunks and the second carries the reasoning chunks too.
+      expect(assistants[0]?.data.usage).toMatchObject({ inputTokens: 12 })
       expect(embeddedChunks(assistants[0]!)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'first' },
-      ])
-      expect(embeddedChunks(assistants[1]!)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'reasoning' },
-        { type: 'reasoning-delta', index: 0, text: 'think' },
-        { type: 'block-start', index: 1, blockType: 'text' },
-        { type: 'text-delta', index: 1, text: 'second' },
+        { type: 'block-start', index: 1, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 1, text: 'think' },
+        { type: 'block-start', index: 2, blockType: 'text' },
+        { type: 'text-delta', index: 2, text: 'second' },
       ])
     } finally {
       await ctx.fiber.dispose()
     }
   })
 
-  it('flushes a reasoning item as its own message when a tool item closes it before the next agent message', async () => {
+  it('folds trailing reasoning and its tool call into one message when a tool item closes the segment', async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -548,24 +551,27 @@ describe('CodexAgent turn mapping', () => {
 
       const events = agent.session.snapshotEvents()
       const assistants = events.filter(event => event.type === 'assistant/message')
-      expect(assistants).toHaveLength(3)
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
+      // The reasoning and the tool call fold into the message that requested
+      // the tool, so a single segment keeps one message (the chat view renders
+      // only the last message per step).
+      expect(assistants).toHaveLength(2)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'first' },
+        { type: 'reasoning', text: 'think' },
+        { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+      ])
       expect(assistants[0]?.data.usage).toBeUndefined()
-      expect(assistants[1]?.data.message.content).toEqual([{ type: 'reasoning', text: 'think' }])
-      expect(assistants[1]?.data.usage).toBeUndefined()
-      expect(assistants[2]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
-      expect(assistants[2]?.data.usage).toMatchObject({ inputTokens: 12 })
-      // The tool item flushes the reasoning as its own message; the following
-      // agent message carries only the chunks its own text streamed.
+      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
+      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The tool item folds the reasoning and the call into the first message;
+      // the following agent message carries only the chunks its own text streamed.
       expect(embeddedChunks(assistants[0]!)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'first' },
+        { type: 'block-start', index: 1, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 1, text: 'think' },
       ])
       expect(embeddedChunks(assistants[1]!)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'reasoning' },
-        { type: 'reasoning-delta', index: 0, text: 'think' },
-      ])
-      expect(embeddedChunks(assistants[2]!)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'second' },
       ])
@@ -576,7 +582,44 @@ describe('CodexAgent turn mapping', () => {
     }
   })
 
-  it("does not leak a plan item's streamed chunks into the following agent message", async () => {
+  it('folds a reasoning item and its tool call into one message when no agent message precedes the tool', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemStarted('reasoning', 'reason-1'),
+        reasoningSummaryDelta('reason-1', 'think'),
+        itemCompleted(reasoningItem('think')),
+        itemCompleted(commandItem()),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('reasoning-tool-no-message-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const assistants = events.filter(event => event.type === 'assistant/message')
+      // The reasoning is the only authoring content, so it synthesizes the
+      // message that owns the tool call.
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'reasoning', text: 'think' },
+        { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+      ])
+      expect(embeddedChunks(assistants[0]!)).toEqual([
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'reasoning-delta', index: 0, text: 'think' },
+      ])
+      expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it("does not leak a plan item's streamed chunks into the merged agent message", async () => {
     const ctx = await harness()
     try {
       mock.runStreamed.mockImplementation(() => stream([
@@ -599,23 +642,21 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const assistants = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
-      expect(assistants).toHaveLength(2)
-      // A plan item contributes no durable content block, so neither message
-      // may carry it as content.
-      expect(assistants[0]?.data.message.content).toEqual([{ type: 'text', text: 'first' }])
-      expect(assistants[0]?.data.usage).toBeUndefined()
-      expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
-      expect(assistants[1]?.data.usage).toMatchObject({ inputTokens: 12 })
-      // The plan's chunks streamed between the two messages belong to neither:
-      // the first keeps only its text and the second must not embed the plan's
-      // reasoning segment.
+      // A plan item contributes no durable content block, and the two agent
+      // messages merge into ONE message.
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.data.message.content).toEqual([
+        { type: 'text', text: 'first' },
+        { type: 'text', text: 'second' },
+      ])
+      expect(assistants[0]?.data.usage).toMatchObject({ inputTokens: 12 })
+      // The plan's chunks streamed between the two text blocks belong to
+      // neither: the merged message must not embed the plan's reasoning segment.
       expect(embeddedChunks(assistants[0]!)).toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'first' },
-      ])
-      expect(embeddedChunks(assistants[1]!)).toEqual([
-        { type: 'block-start', index: 0, blockType: 'text' },
-        { type: 'text-delta', index: 0, text: 'second' },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'text-delta', index: 1, text: 'second' },
       ])
     } finally {
       await ctx.fiber.dispose()
