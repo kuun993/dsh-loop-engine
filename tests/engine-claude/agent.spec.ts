@@ -41,6 +41,65 @@ function stream(messages: SDKMessage[]): Query {
   return Object.assign(inner(), { close: vi.fn() }) as unknown as Query
 }
 
+/** Step-scoped event types, in the order a reader sees them. */
+const STEP_SCOPED = new Set(['step/start', 'assistant/message', 'tool/call', 'tool/result', 'step/end'])
+
+/**
+ * The log's step-scoped events as ordered `type@step` tags, so a test can read
+ * the step structure directly: which step each message and tool event landed in.
+ */
+function stepStructure(session: Session): string[] {
+  return session.snapshotEvents()
+    .filter(event => STEP_SCOPED.has(event.type))
+    .map(event => `${event.type}@${(event.data as { step: number }).step}`)
+}
+
+/** An assistant message carrying one tool_use block. */
+function assistantToolUse(id: string, name: string, input: unknown): SDKMessage {
+  return {
+    type: 'assistant',
+    parent_tool_use_id: null,
+    uuid: `u-${id}`,
+    session_id: `s-${id}`,
+    message: {
+      id: `msg-${id}`,
+      container: null,
+      context_management: null,
+      role: 'assistant',
+      type: 'message',
+      content: [{ type: 'tool_use', id, name, input }],
+      stop_reason: 'tool_use',
+      stop_sequence: null,
+      stop_details: null,
+      model: 'claude-sonnet-4-5',
+      usage: {
+        cache_creation: null,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        inference_geo: null,
+        input_tokens: 9,
+        iterations: null,
+        output_tokens: 4,
+        server_tool_use: null,
+      },
+    },
+  } as unknown as SDKMessage
+}
+
+/** The SDK's tool-result delivery (a `user` message echoing one tool_use_id). */
+function toolResultMessage(id: string, content: string): SDKMessage {
+  return {
+    type: 'user',
+    parent_tool_use_id: id,
+    uuid: `u-${id}-r`,
+    session_id: `s-${id}`,
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: id, content, is_error: false }],
+    },
+  } as unknown as SDKMessage
+}
+
 function assistantText(text: string): SDKMessage {
   return {
     type: 'assistant',
@@ -432,6 +491,88 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+
+  it('gives each assistant segment its own step', async () => {
+    // One Claude Code query runs the model's whole agentic loop, so a single
+    // dsh step would otherwise hold every segment. The chat view keys an
+    // assistant node by `${turn}:${step}` and replaces its blocks on each
+    // message, so N messages in one step render only the last — the fix is one
+    // step per segment, matching the in-process engine's shape.
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        assistantToolUse('toolu_1', 'Read', { file_path: 'a.txt' }),
+        toolResultMessage('toolu_1', 'contents of a'),
+        assistantToolUse('toolu_2', 'Bash', { command: 'ls' }),
+        toolResultMessage('toolu_2', 'b.txt'),
+        assistantText('both read'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('segments-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read both' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1', 'tool/result@1', 'step/end@1',
+        'step/start@2', 'assistant/message@2', 'tool/call@2', 'tool/result@2', 'step/end@2',
+        'step/start@3', 'assistant/message@3', 'step/end@3',
+      ])
+      // The assistant message that requested each call still precedes it, in
+      // the same step, carrying its tool-call block.
+      const events = agent.session.snapshotEvents()
+      const first = events.find(event => event.type === 'assistant/message')!
+      expect(first).toMatchObject({
+        data: {
+          turn: 1,
+          step: 1,
+          message: { content: [{ type: 'tool-call', id: 'toolu_1', name: 'Read', arguments: '{"file_path":"a.txt"}' }] },
+        },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports the query usage total only while a step holds the whole query', async () => {
+    // `result` appends a usage-only attempt carrying the QUERY's totals. With
+    // one step per segment that total belongs to no single step, so it is only
+    // reported when the query stayed in a single step (each segment's message
+    // already carries its own request usage).
+    const run = async (messages: SDKMessage[]): Promise<{ attempts: number; usageSteps: number[] }> => {
+      const ctx = await harness()
+      try {
+        queryMock.mockImplementation(() => stream(messages))
+        const { agent } = await ctx.agents.create({
+          sessionId: SessionId(`usage-${Math.random()}`),
+          meta: { cwd: process.cwd() },
+        })
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+        await agent.whenIdle()
+        const events = agent.session.snapshotEvents()
+        return {
+          attempts: events.filter(event => event.type === 'assistant/attempt').length,
+          usageSteps: events
+            .filter(event => event.type === 'assistant/attempt')
+            .map(event => (event.data as { step: number }).step),
+        }
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    }
+
+    // Single segment: the total is that step's own total, so it is kept.
+    expect(await run([assistantText('hi'), successResult()])).toEqual({ attempts: 1, usageSteps: [1] })
+    // Multi segment: per-step usage comes from each segment's message.
+    expect(await run([
+      assistantToolUse('toolu_u', 'Read', { file_path: 'a.txt' }),
+      toolResultMessage('toolu_u', 'x'),
+      assistantText('done'),
+      successResult(),
+    ])).toEqual({ attempts: 0, usageSteps: [] })
+  })
 
   it('records tool calls and tool results beside the assistant message', async () => {
     const ctx = await harness()

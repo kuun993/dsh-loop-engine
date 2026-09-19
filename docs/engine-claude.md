@@ -6,7 +6,7 @@
 
 claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-sdk`）驱动 dsh 会话。核心模型是：
 
-- **每个 dsh step 一次无状态 query**（`src/engine-claude/loop.ts:2-6` 模块注释）。SDK 进程不保留任何会话状态：`persistSession: false`（`src/engine-claude/sdk.ts:97`），dsh 的持久化 session log 是模型上下文的唯一来源。
+- **每个 dsh step 一次无状态 query**（`src/engine-claude/loop.ts:2-6` 模块注释）。SDK 进程不保留任何会话状态：`persistSession: false`（`src/engine-claude/sdk.ts:97`），dsh 的持久化 session log 是模型上下文的唯一来源。注意**反方向不成立**：一次 query 里模型会跑很多个内部轮次，driver 会在片段边界把 dsh step 轮转开（§4.1），所以一个 query ≠ 一个 step。
 - **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:472-473`、`src/driver-core/prompt.ts:93-127`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。
 - **Claude Code 拥有自己的 prompt、工具和权限**。SDK 子进程是真正的 agent 运行时（自带系统提示、内置工具、技能展开）；dsh 侧只做收件箱、turn/step 边界、事件落盘和审批转发（`src/engine-claude/agent.ts:1-8`）。
 - **进程模型**：SDK 的 `query()` 内部 spawn 一个 `claude` CLI 子进程。引擎通过 SDK 的 `spawnClaudeCodeProcess` 钩子把 spawn 请求转交给 dsh 的 subprocess seam（`src/engine-claude/sdk.ts:145-148`），子进程树的生命周期（终止升级阶梯、grace）由 harness 统一管理，而不是 SDK 直接 `child_process.spawn`。
@@ -74,7 +74,8 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 
 - **收件箱**：`DriverInbox` 区分 `next-turn` 与 `next-step` 两个目标；`followup` 排 next-turn 并唤醒、`steer` 排 next-step 并唤醒、`inject` 排 next-step 不唤醒（`src/engine-claude/agent.ts:156-174`）。`cancel` 默认清空收件箱并 abort 当前 phase；`keepInbox` 保队列（`src/engine-claude/agent.ts:176-182`）。
 - **唤醒**：`wakeDriver` 只在 idle 时开新 driver；非 idle 时若原因是 maintenance 或"abort 后唤醒"则 latch `wakeRequested`，driver 退出时若收件箱仍有消息会接力唤醒（`src/engine-claude/agent.ts:219-237`、`254-268`）。一个细节：abort 之后收到的 wakeup 会被 `send` 重分类为 `next-turn`（`src/engine-claude/agent.ts:146-148`），保证它开启新 turn 而不是混入已死的 step。
-- **turn**：`turn/start` 落盘 → 循环 `preStep`（claim 消息 → `agent/pre-step` waterfall，可被拦截 reject → 技能注入）→ `step/start` → 每条用户消息落 `user/message` → `step()` → `step/end`。turn 结束原因在 `turn/end` 落盘：`completed` / `blocked` / `aborted` / `error`（`src/engine-claude/agent.ts:364-439`）。`agent/turn-stopping` serial 事件给拦截器最后一次注入输入的机会（`src/engine-claude/agent.ts:407-411`）。
+- **turn**：`turn/start` 落盘 → 循环 `preStep`（claim 消息 → `agent/pre-step` waterfall，可被拦截 reject → 技能注入）→ `step/start` → 每条用户消息落 `user/message` → `step()` → `step/end`。turn 结束原因在 `turn/end` 落盘：`completed` / `blocked` / `aborted` / `error`。`agent/turn-stopping` serial 事件给拦截器最后一次注入输入的机会。
+  两个关键点：① `step()` 内部会在助手片段边界轮转 step（§4.1），所以收尾的 `step/end` 关的是 `phase.step` 而非本次迭代开头开的 step；② **轮转出来的 step 不重跑 `preStep`**——只有 turn 的第一个 step 走 inbox claim / waterfall / 技能注入，因为一次 query 是原子的、中途也无法投递 steer/inject。
 - **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:447-458`）。header 的 model 标签是 `config.model ?? 'claude-code-native'`——**故意不镜像** web 会话的模型选择，因为那个选择从不驱动 query（`src/engine-claude/agent.ts:51-56`；背景见 `docs/proposals/model-selection-disable.md`）。provider 标签 `'claude-code'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ### 3.4 中断与销毁
@@ -97,7 +98,17 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 2. provider 流式发了 thinking delta 但完整消息里没有 thinking block：用 chunk 累积的 reasoning 合成 block 补在内容前面；完整消息自带 thinking 时丢弃累积，防止重复。
 3. step 以 reasoning-only 消息结束（`result` 到达时仍按着）：作为独立 durable 消息 flush，模型标签记 `claude-code-native`。
 
-另外，`assistant/message` 落盘时把这次尝试的 compact stream **内嵌**成 `data.stream`——harness 禁止内嵌了 stream 的消息再带 `sourceEventSeqs`（主仓 `packages/core/session/src/surface.ts:275` 直接抛错）；提交成功后 `DriverAssistantStream.settle` 发 `end`（`committed`）帧（`src/engine-claude/agent.ts:593`、`633`），而流过却没能提交 durable 消息的那一段会在 `finally` 里 `abandon()`，发 `end`（`abandoned`）帧，让 web 端停止绘制被遗弃的 partial（`src/engine-claude/agent.ts:659-662`）。
+### 4.1 一段一步（step 轮转）
+
+一次 query 跑完模型的整个 agentic loop，所以**一个 dsh step 里会出现多个助手片段**（实测一个 step 最多 16 条 `assistant/message`）。这必须拆开，原因是渲染侧的硬约束：chat 的助手节点按 `${turn}:${step}` 建键（`packages/client/ui-chat/src/client/conversation-nodes/assistant.ts`），同一 step 里的多条消息落到**同一个**节点，而 `settleMessage` 是**整体替换** blocks——N 条只渲染最后一条。节点排序又只按 `anchorSeq`（= 消息的 seq），没有"step 的助手节点排在它的工具行之前"这种规则。
+
+所以 `beginSegment`（`src/engine-claude/agent.ts`）在新助手内容落盘前轮转 step：本 step 已有 settled 的 `tool/result` 时补 `step/end` + `step/start` 并就地 `phase.step += 1`；该段自己的 `assistant/message` 与 `tool/call` 随后落进新 step。这复刻了 in-process 引擎的形状（**一步恰好一条消息、且该消息在工具执行之前落盘**，于是消息的 seq 小于它自己的工具行）。`turn()` 的 `finally` 关的是 `phase.step`（当前真正打开的那个），不是本次迭代开头开的那个。
+
+轮转由「本 step 已有 settled 结果」触发，**不是**「有调用被公告」：模型一次请求多个工具时调用会在任何结果之前全部公告，此时仍属同一个模型轮次，必须留在同一个 step。
+
+连带的取舍：`result` 会把**整个 query** 的 token 总量作为一条 usage-only 的 `assistant/attempt` 落盘（见上）。一个 step 独占整个 query 时这就是该 step 的总量、行为不变；一旦轮转过，没有任何一个 step 拥有这个总量，而每个片段的消息已各自携带自己的 request usage，所以该记录在轮转后**不再落盘**（`rotated` 标志）。
+
+另外，`assistant/message` 落盘时把这次尝试的 compact stream **内嵌**成 `data.stream`——harness 禁止内嵌了 stream 的消息再带 `sourceEventSeqs`（主仓 `packages/core/session/src/surface.ts:275` 直接抛错）；提交成功后 `DriverAssistantStream.settle` 发 `end`（`committed`）帧，而流过却没能提交 durable 消息的那一段会在 `finally` 里 `abandon()`，发 `end`（`abandoned`）帧，让 web 端停止绘制被遗弃的 partial。
 
 ## 5. 权限模型
 
@@ -192,7 +203,7 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 
 claude 引擎的测试在 `tests/engine-claude/`（另有 `tests/commands.spec.ts`、`tests/skills.spec.ts` 覆盖入口层），统一手法是 `vi.mock('@anthropic-ai/claude-agent-sdk')` 替换 `query`，用内存 SDKMessage 流驱动真实 `ClaudeCodeLoop` + 真实 session store/subprocess 插件，断言落在 session log 上：
 
-- `agent.spec.ts` — 工厂注册、turn/step/事件落盘、流式 chunk 与其内嵌 `data.stream`／live `agent/assistant-stream` 帧（含 committed 收尾）、三种思维链兜底、工具调用/结果配对、SDK 错误码映射、request header 的 initial/resume、取消与 pre-step 拦截、会话权限旋钮折叠（ask 转发 / 无审批服务落 deny / 中途切 full access）、技能注入全部分支（含取消丢弃、无 cwd 提示）。
+- `agent.spec.ts` — 工厂注册、turn/step/事件落盘、**一段一步的 step 轮转（`stepStructure` 辅助函数断言 `type@step` 序列）**、**query 总量 usage 只在未轮转时落盘**、流式 chunk 与其内嵌 `data.stream`／live `agent/assistant-stream` 帧（含 committed 收尾）、三种思维链兜底、工具调用/结果配对、SDK 错误码映射、request header 的 initial/resume、取消与 pre-step 拦截、会话权限旋钮折叠（ask 转发 / 无审批服务落 deny / 中途切 full access）、技能注入全部分支（含取消丢弃、无 cwd 提示）。
 - `controls.spec.ts` — steer/inject 同批消费、cancel 清队列与 `keepInbox`、maintenance 的门闩唤醒、运行中取消后新 turn、防御性 guard（无 driver 的 turn、无 cwd、未来 subtype）、多步 continuation、resume header 落盘。
 - `coverage-edges.spec.ts` — commit veto（`turn/start` / `turn/end` 落盘被拒）、空步完成、mid-turn 输入链接、disposed 后不门闩唤醒、工厂 ownership 竞速（setup 中途卸载回滚、非 Error abort 原因包装）、resume 取消与 preparation 释放、无 schema 构造的默认值、system-prompt 变量服务。
 - `index.spec.ts` — 工厂槽位随 owner fiber dispose 清空、createAgent 的 seed/meta 透传、setup commit/失败/悬挂取消、resume 无持久化后端响亮失败、JSONL 后端真实 resume。
