@@ -97,11 +97,11 @@ html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"] {
   --dsw-static-deepseek-200: #e6eaf2;
 }
 html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"]::before {
-  content: "⠋";
+  content: "•";
   color: #a9b1c0;
   -webkit-text-fill-color: #a9b1c0;
-  font-size: 1.1em;
-  animation: le-braille 1s linear infinite;
+  text-shadow: 0 0 6px currentColor;
+  animation: le-pulse 1.4s ease-in-out infinite;
 }
 
 html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"] {
@@ -109,10 +109,11 @@ html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"] {
   --dsw-static-deepseek-200: #d6bff0;
 }
 html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"]::before {
-  content: "π";
+  content: "⠋";
   color: #8e4ec6;
   -webkit-text-fill-color: #8e4ec6;
-  animation: le-sway 1.8s ease-in-out infinite;
+  font-size: 1.1em;
+  animation: le-braille 1s linear infinite;
 }
 
 html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"] {
@@ -151,12 +152,11 @@ html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"]::before {
   90% { content: "⠏"; }
   100% { content: "⠋"; }
 }
-/* A pendulum swing: π tilts left and right. Rotation reads clearly on a shape
-   with a distinct vertical stem, and needs no layout room the way a
-   translation would. */
-@keyframes le-sway {
-  0%, 100% { transform: rotate(-12deg); }
-  50% { transform: rotate(12deg); }
+/* A soft pulse for the codex dot: the glyph breathes between a small, dim
+   point and a larger, full-brightness one — a light dot, not a spinner. */
+@keyframes le-pulse {
+  0%, 100% { transform: scale(0.5); opacity: 0.35; }
+  50% { transform: scale(1.3); opacity: 1; }
 }
 /* Moon phases rather than a rigid rotation: a spinning moon bitmap can only
    squash and mirror itself, never show a full or a new moon. Stepping the
