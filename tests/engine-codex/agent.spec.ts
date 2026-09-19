@@ -74,6 +74,19 @@ function stream(events: AppServerEvent[]): RunStreamed {
   return inner()
 }
 
+/** Step-scoped event types, in the order a reader sees them. */
+const STEP_SCOPED = new Set(['step/start', 'assistant/message', 'tool/call', 'tool/result', 'step/end'])
+
+/**
+ * The log's step-scoped events as ordered `type@step` tags, so a test can read
+ * the step structure directly: which step each message and tool event landed in.
+ */
+function stepStructure(session: Session): string[] {
+  return session.snapshotEvents()
+    .filter(event => STEP_SCOPED.has(event.type))
+    .map(event => `${event.type}@${(event.data as { step: number }).step}`)
+}
+
 const TURN_USAGE = {
   inputTokens: 12,
   cachedInputTokens: 5,
@@ -899,6 +912,72 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants).toHaveLength(1)
       expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(0)
       expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'completed' } } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('gives each assistant segment its own step', async () => {
+    // One codex turn runs the model's whole agentic loop, so a single dsh step
+    // would otherwise hold every segment. The chat view keys an assistant node
+    // by `${turn}:${step}` and replaces its blocks on each message, so N
+    // messages in one step render only the last — the fix is one step per
+    // segment, matching the in-process engine's shape.
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemCompleted(reasoningItem('think one')),
+        itemCompleted(agentMessage('reading the file')),
+        itemCompleted(commandItem()),
+        itemCompleted(reasoningItem('think two')),
+        itemCompleted(agentMessage('all done')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('segments-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1', 'tool/result@1', 'step/end@1',
+        'step/start@2', 'assistant/message@2', 'step/end@2',
+      ])
+      // Each message stays ahead of the tool it requested, in its own step.
+      const messages = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+      expect(messages.map(event => (event.data as { step: number }).step)).toEqual([1, 2])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rotates the step at the first streamed reasoning of a new segment', async () => {
+    // Reasoning streams before its item completes, so the rotation has to
+    // happen at the delta — otherwise live reasoning frames would paint into
+    // the finished step and only the durable message would move.
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemCompleted(agentMessage('first')),
+        itemCompleted(commandItem()),
+        itemStarted('reasoning', 'r-2'),
+        reasoningSummaryDelta('r-2', 'think two'),
+        itemCompleted(reasoningItem('think two')),
+        itemCompleted(agentMessage('second')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('segments-delta-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1', 'tool/result@1', 'step/end@1',
+        'step/start@2', 'assistant/message@2', 'step/end@2',
+      ])
     } finally {
       await ctx.fiber.dispose()
     }
