@@ -92,6 +92,14 @@ type Phase =
   }
   | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
+/**
+ * The running phase. Its `turn`/`step` are the position of the step currently
+ * open: rotating a step mutates them in place, so every holder of the phase
+ * (the turn loop's fail-safe close, `agent/error` reporting) sees the step that
+ * is actually open rather than the one the query was started under.
+ */
+type RunningPhase = Extract<Phase, { kind: 'running' }>
+
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
 type PreparedStep =
@@ -128,6 +136,31 @@ export class CodexAgent implements Agent {
 
   /** Agent-lifecycle-local counter naming each streamed attempt. */
   private streamAttempts = 0
+
+  /**
+   * Tool results logged into the currently open step. A result means the
+   * segment that requested the call is finished, so the next assistant content
+   * opens the next step (see {@link beginSegment}).
+   */
+  private stepSettledTools = 0
+
+  /**
+   * Rotate to the next step when the segment that ran a tool has finished, so
+   * each assistant segment lands in its own step.
+   *
+   * Called as new assistant content begins. A step holding a settled tool
+   * result means the previous segment is complete, and the content about to be
+   * written belongs to the next one. Rotating here (rather than when a call is
+   * announced) keeps calls announced together — one model turn — in one step.
+   * @param phase - the running phase carrying the open step's position.
+   */
+  private beginSegment(phase: RunningPhase): void {
+    if (this.stepSettledTools === 0) return
+    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    phase.step += 1
+    this.session.append('step/start', { turn: phase.turn, step: phase.step })
+    this.stepSettledTools = 0
+  }
 
   /** Lazily created app-server client, reused across steps and released on scope teardown. */
   private appServer: AppServerClient | undefined
@@ -491,7 +524,10 @@ export class CodexAgent implements Agent {
           const stepEnd = await this.step()
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
-          this.session.append('step/end', { turn, step })
+          // The driver rotates steps as the turn's segments complete, so
+          // `phase.step` — not the step this iteration opened — is the one still
+          // open here.
+          this.session.append('step/end', { turn, step: phase.step })
         }
         signal.throwIfAborted()
         if (turnEnds && this.inbox.nextStep.length === 0) {
@@ -552,8 +588,10 @@ export class CodexAgent implements Agent {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
-    const { turn, step, abort: { signal } } = this.phase
+    const phase = this.phase
+    const { abort: { signal } } = phase
     signal.throwIfAborted()
+    this.stepSettledTools = 0
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -631,8 +669,8 @@ export class CodexAgent implements Agent {
             live = new DriverAssistantStream(
               this.id,
               ++this.streamAttempts,
-              turn,
-              step,
+              phase.turn,
+              phase.step,
               frame => this.dispatch.emit('agent/assistant-stream', { frame }),
             )
             live.start()
@@ -645,8 +683,8 @@ export class CodexAgent implements Agent {
           if (held === undefined) return
           const attempt = live
           const data = {
-            turn,
-            step,
+            turn: phase.turn,
+            step: phase.step,
             message: createAssistantMessage({
               content: held.content,
               source: { provider: PROVIDER, model: this.modelLabel() },
@@ -702,6 +740,10 @@ export class CodexAgent implements Agent {
             case 'reasoning-summary-delta':
             case 'reasoning-text-delta':
             case 'plan-delta': {
+              // Reasoning streams before its item completes, so the step has to
+              // rotate here — otherwise live reasoning frames would paint into
+              // the finished step and only the durable message would move.
+              this.beginSegment(phase)
               // Token-level streaming of the model's thinking — live.
               const index = pendingReasoning.length
               if (!reasoningBlockStarted) {
@@ -745,6 +787,9 @@ export class CodexAgent implements Agent {
                 live?.takeStream()
                 reasoningBlockStarted = false
               } else if (item.type === 'agentMessage') {
+                // A completed agent message that follows settled tool work is
+                // the next segment; a plan/reasoning-only item is not.
+                this.beginSegment(phase)
                 // Agent message completed — fold reasoning + text into one message.
                 // Cut before flushing: a committed earlier message ends the
                 // attempt, and the cut must observe the live one.
@@ -766,25 +811,28 @@ export class CodexAgent implements Agent {
                 flushHeld()
                 const activity = mapCommandExecution(item as { id: string; command?: string; aggregatedOutput?: string | null; exitCode?: number | null; status?: string })
                 this.session.append('tool/call', {
-                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
-                this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
+                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                this.stepSettledTools += 1
               } else if (item.type === 'fileChange') {
                 flushReasoning()
                 flushHeld()
                 const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
                 this.session.append('tool/call', {
-                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
-                this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
+                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                this.stepSettledTools += 1
               } else if (item.type === 'mcpToolCall') {
                 flushReasoning()
                 flushHeld()
                 const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
                 this.session.append('tool/call', {
-                  turn, step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
                 })
-                this.session.append('tool/result', { turn, step, message: activity.result }, { surfaceOp: 'append' })
+                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                this.stepSettledTools += 1
               }
               break
             }
