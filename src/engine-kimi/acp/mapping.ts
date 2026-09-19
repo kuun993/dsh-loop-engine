@@ -5,9 +5,11 @@
  * thinking (`agent_thought_chunk`), a tool-call announcement (`tool_call`) and its
  * progress/result updates (`tool_call_update`). Assistant text and thinking are
  * Deltas; a tool update's content is a whole Snapshot that replaces the previous
- * one. This module is pure: it classifies an update, extracts chunk deltas, and
- * projects the tool-call identity/content/result so the agent can fold them into
- * the durable log. Content blocks use the observed kimi
+ * one. A tool call's identity arrives on the announcement but its input
+ * (`rawInput`) does not — only a later update carries it. This module is pure: it
+ * classifies an update, extracts chunk deltas, and projects the tool-call
+ * identity/input/content/result so the agent can fold them into the durable log.
+ * Content blocks use the observed kimi
  * `{ type: 'content', content: { type: 'text', text } }` nesting; unknown block
  * types are ignored.
  *
@@ -54,6 +56,26 @@ export function toolCallIdOf(update: AcpUpdate): string {
 /** The tool display name (`title`). */
 export function toolCallName(update: AcpUpdate): string {
   return (update as { title?: unknown }).title as string
+}
+
+/**
+ * The tool call's real input as the JSON `arguments` string the durable
+ * `tool/call` carries, when the frame supplies it.
+ *
+ * The `tool_call` announcement never carries `rawInput`; a later
+ * `tool_call_update` does (measured against kimi 0.28.x: the execution-start
+ * frame, `status: 'in_progress'`). A call's arguments are therefore unknowable
+ * at announce time, and the driver logs the call only once an update supplies
+ * them — or when the call settles, whichever comes first.
+ * @param update - one tool-call announcement or update.
+ * @returns the arguments string, or `undefined` when the frame omits the field.
+ */
+export function toolRawInput(update: AcpToolCallExt | AcpToolCallStreamExt): string | undefined {
+  const raw = update.rawInput
+  if (raw === undefined) return undefined
+  // A wire string is already the arguments payload; anything else is a parsed
+  // JSON value (`rawInput` is `unknown` in the protocol), so serialize it.
+  return typeof raw === 'string' ? raw : JSON.stringify(raw)
 }
 
 /** Whether a tool stream status is settled (no longer streaming). */

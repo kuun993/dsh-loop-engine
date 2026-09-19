@@ -59,7 +59,9 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 - **入口**：`followup`（next-turn + 唤醒）、`steer`（next-step + 唤醒）、`inject`（next-step 不唤醒）、`cancel`（agent.ts:160-197）。`send` 里有一个关键分类：abort 后再唤醒的消息会被重分类到 `next-turn`（agent.ts:161-162）。
 - **驱动循环**：`wakeDriver` → `kick` → `while (await this.turn())`（agent.ts:234-287）。`kick` 的 finally 负责把 running 相位收回 idle 并按 latch 的 wake 重放。
 - **turn**：`turn/start` → 循环 `preStep`（inbox claim + `agent/pre-step` waterfall + 技能注入）→ `step/start` → 落 `user/message` → `step()` → `step/end` → … → `turn/end`（agent.ts:350-431）。每个退出路径都保证写 `turn/end`（completed / blocked / aborted / error）。
-- **step**：每个 step 重置块/工具累积器（agent.ts:498-502）→ 校验 cwd（无 cwd 直接抛错，504-507）→ `deriveMessages` + `serializeHistory` 造 prompt（508-513）→ 写一次 request/header（agent.ts:515，见下）→ 取/建 ACP 客户端 → 注册权限回调（521）→ `session/new`（522）→ 挂 `onUpdate`（549）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（551-557）→ `flushAssistant` 落 `assistant/message`（559）。
+- **step**：每个 step 重置块/工具累积器与产出台账（agent.ts:513-517）→ 校验 cwd（无 cwd 直接抛错，519-521）→ `deriveMessages` + `serializeHistory` 造 prompt（526-532）→ 写一次 request/header（agent.ts:533，见下）→ 取/建 ACP 客户端 → 注册权限回调（539）→ `session/new`（540）→ 挂 `onUpdate`（548）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（550-556）→ 收尾：`flushAssistant` 落尾段消息，再把「公告了但从未给出输入」的调用补记进日志（561-563）→ 无产出则抛 `KIMI_NO_RESULT`（564-569）。
+- **一次 prompt ≠ 一个 step**：`session/prompt` 跑完 Kimi 的整个内部 loop（实测一次 prompt 内可以连续 60+ 次工具调用），但 dsh 的 **step 是在流处理中途轮转的**——每个助手片段各自一个 step，见 §5「一段一步」。`beginSegment`（agent.ts:623-629）在片段边界补 `step/end` + `step/start` 并就地 `phase.step += 1`；`turn()` 的 finally 关的是 `phase.step`（当前真正打开的那个），不是本次迭代开头开的那个（agent.ts:400-406）。
+  因此 `phase` 被当作「当前打开的 step」的载体：轮转就地改它，`agent/error` 上报和 `turn()` 的兜底关闭都读到正确的编号（`RunningPhase`，agent.ts:92）。
 - **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:63-70,434-449）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:447）。provider 标签 `'kimi'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ### 3.4 ACP 客户端缓存
@@ -87,23 +89,29 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 ## 5. 事件映射（ACP update ↔ dsh SessionEvent）
 
-映射分两层：`acp/mapping.ts` 是纯分类/提取，`agent.ts` 的 `applyUpdate`（agent.ts:594-648）负责落日志——每个 delta 都交给本步的 `DriverAssistantStream`（agent.ts:532-544）出 live 帧，块内容则累积进 `blocks`，最后交给 `flushAssistant` 合成 durable 消息。
+映射分两层：`acp/mapping.ts` 是纯分类/提取，`agent.ts` 的 `applyUpdate`（agent.ts:632-703）负责落日志——每个 delta 都交给当前段的 `DriverAssistantStream`（`currentStream`，agent.ts:705-717）出 live 帧，块内容则累积进 `blocks`，到段落边界交给 `flushAssistant`（agent.ts:753-790）合成 durable 消息。
 
 | ACP update | dsh 事件 | 说明 |
 |---|---|---|
-| `agent_thought_chunk` | live `agent/assistant-stream` 帧（block-start/reasoning-delta）+ `assistant/message` 的 reasoning 块 | 空 delta 忽略，不开块（agent.ts:601-609） |
-| `agent_message_chunk` | 同上，text 块 | agent.ts:611-619 |
-| `tool_call` | `tool/call` | `callId` 取 `toolCallId`，`name` 取 `title`；**arguments 恒为 `'{}'`**——ACP 公告不携带真实参数（agent.ts:621-631）。空 id 或重复 id 忽略 |
-| `tool_call_update` | `tool/result`（settled 时） | 文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套提取，**但语义是快照不是增量**（mapping.ts:69-86）：每条 update 重发该调用的完整内容，所以只取**最后一条**（`toolContentText` 返回 `string \| undefined`，`undefined` = 这条 update 未带 content 字段，保留上一条，见 agent.ts:636-641）。status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:59-61），`failed/error/denied` 记 `isError`（mapping.ts:64-66）；空结果文本回退 `'(no content)'`（mapping.ts:88-95）。未announce过的 callId 的 update 被忽略（agent.ts:634） |
-| 其他（`available_commands_update`、`config_option_update`、`plan`…） | 无 | 不属于忠实模型上下文投影，直接跳过（agent.ts:646-647） |
+| `agent_thought_chunk` | live `agent/assistant-stream` 帧（block-start/reasoning-delta）+ `assistant/message` 的 reasoning 块 | 空 delta 忽略，不开块（agent.ts:633-641）；到达前先 `beginSegment` 视情况轮转 step |
+| `agent_message_chunk` | 同上，text 块 | agent.ts:644-652 |
+| `tool_call` | 仅登记（不落日志） | `callId` 取 `toolCallId`、`name` 取 `title`，存进 `pendingCalls` 等参数（agent.ts:655-663）。空 id、已登记或已落日志的 id 忽略。**公告本身不带 `rawInput`**，所以此刻还写不出 `tool/call` |
+| `tool_call_update` | 落 `tool/call` + `tool/result` | 参数取 `rawInput`（JSON 序列化，`toolRawInput`，mapping.ts:71-77）——Kimi 只在 update 上给参数（实测 0.28.x：执行开始那条 `status: 'in_progress'`）。拿到参数的**第一条** update 就把该调用落成 `assistant/message` + `tool/call`（见下），settled 才补 `tool/result`；若一直没等到参数，则在 settled 时以 `'{}'` 落日志，保证不丢调用。文本按 `{ type: 'content', content: { type: 'text', text } }` 嵌套提取，**但语义是快照不是增量**（mapping.ts:89-107）：每条 update 重发该调用的完整内容，所以只取**最后一条**（`toolContentText` 返回 `string \| undefined`，`undefined` = 这条 update 未带 content 字段，保留上一条）。登记期收到的快照同样保留（`pendingCalls` 的 `content` 字段），否则「先给输出后给输入」的帧序会丢掉结果文本。status 离开 `pending/queued/running/in_progress` 即视为 settled（mapping.ts:79-82），`failed/error/denied` 记 `isError`（mapping.ts:84-87）；空结果文本回退 `'(no content)'`（mapping.ts:108-115）。未 announce 过的 callId 的 update 被忽略 |
+| 其他（`available_commands_update`、`config_option_update`、`plan`…） | 无 | 不属于忠实模型上下文投影，直接跳过（agent.ts:659-661） |
 
 落日志的几个不变量：
 
-- **块序**：reasoning/text 块按首次出现顺序分配连续 index（agent.ts:583-592）；每步结束 `flushAssistant` 把所有块合成一条 `assistant/message`，并把这批块对应的 compact stream 内嵌成 `data.stream`（agent.ts:658-689）。
-- **工具专属步**：一个只有工具活动、没有文本的 step 也会发一条（可能空的）`assistant/message`——此时没有 open attempt，`data.stream` 落空数组，但 `tool/call` + `tool/result` 仍有父消息可配对（agent.ts:658-666 注释）。
-- **空步报错**：prompt 返回后既无块也无工具调用，抛 `LlmError`，code `'KIMI_NO_RESULT'`（agent.ts:560-564）——防止模型静默空转。
+- **块序**：reasoning/text 块按首次出现顺序分配连续 index（agent.ts:597-604）；每段结束 `flushAssistant` 把该段的块合成一条 `assistant/message`，并把这批块对应的 compact stream 内嵌成 `data.stream`（agent.ts:753-792）。
+- **一段一步，工具调用是段的结尾**：一个助手片段（文本/思考 + 它请求的工具调用）合成**一条** `assistant/message`，并用**独立的 attempt**（各自的 `start`…`end` 帧）settle。`logToolCall`（agent.ts:732-737）先 `flushAssistant` 再写 `tool/call`，所以持久日志里恒为 `assistant/message` → `tool/call` → `tool/result`；该段收尾（`tool/result` 落盘）后，下一条助手内容到达时 `beginSegment` 轮转 step（agent.ts:623-629），于是**每个片段各自一个 step**。
+- **为什么必须拆成 step（不能只拆成消息）**：chat 的助手节点按 `${turn}:${step}` 建键（`packages/client/ui-chat/src/client/conversation-nodes/assistant.ts`），同一 step 内的多条 `assistant/message` 会落到**同一个**节点，而 `settleMessage` 是**整体替换** blocks——即一个 step 里发 N 条消息，最终只渲染**最后一条**。而节点排序只按 `anchorSeq`（= 消息的 seq），没有「step 的助手节点排在它的工具行之前」这种规则。所以在一个 step 内，工具行的 seq 夹在中间、唯一那条消息只能落在最后，**任何消息排列都无法交错**。in-process 引擎之所以正常，正是因为它 **一个 step 恰好一条消息、且该消息在工具执行之前落盘**（`packages/core/agent-loop`），于是消息的 seq 小于它自己的工具行。拆成 step 就是复刻这个形状。
+  宿主客户端还按「一条持久消息 ↔ 一个 attempt 的 `end` 帧」配对（`packages/api/session-controller/src/client/sessions/assistant-stream.ts`）：一条消息一个 attempt，且 attempt 未结束前收到第二个 `start` 会触发整页 rebaseline。所以**不能**让多条消息共用一个 attempt。
+- **纯工具段**：一个只有工具调用、没有文本的片段也会发一条 `assistant/message`，其内容就是该调用的 `tool-call` 块（此时没有 open attempt，`data.stream` 落空数组）。这条消息是 `tool/call` + `tool/result` 的父消息，也是重放到 in-process 引擎时 `tool_calls` 的来源。
+- **同一模型轮次的多个调用共用一个 step**：轮转的判据是「本 step 已有 settled 的 `tool/result`」而非「有调用被公告」（`stepSettledTools`，agent.ts:587-592）。模型一次请求多个工具时 Kimi 会在任何结果之前把调用全部公告出来，此时 `stepSettledTools` 仍为 0，不轮转——这些调用属于同一个模型轮次，本就该在同一个 step 里。
+- **孤儿调用**：公告了却始终没有 update 的调用（工具被中止、会话中断）在 step 收尾时以 `'{}'` 补记，只落 `tool/call` 不落 `tool/result`（agent.ts:561-563）。
+- **空步报错**：prompt 返回后整轮没有任何助手产出（既无块也无工具调用），抛 `LlmError`，code `'KIMI_NO_RESULT'`（agent.ts:564-569）——防止模型静默空转。产出与否由 `producedOutput` 台账记录，而不是「step 结束时 `blocks` 是否为空」：块在每段落盘时就被清空，用后者会把有文本的步误判成空步。
+- **轮转的 step 不重跑 `preStep`**：只有 `turn()` 开口的第一个 step 走 inbox claim + `agent/pre-step` waterfall + 技能注入。轮转出来的 step 没有新的用户消息（ACP prompt 已是原子的，中途也无法投递 steer/inject），所以不跑 waterfall。这与 in-process 引擎的续接 step 有差异，是刻意取舍。
 
-时序保证：`session/prompt` 的响应帧在该轮全部 update 之后派发，因此每个 update 都在 prompt resolve 前应用完毕，无 EOF/"finished" 竞态；ACP 子进程跨 step 存活，其流不会自行结束（agent.ts:545-548 注释）。
+时序保证：`session/prompt` 的响应帧在该轮全部 update 之后派发，因此每个 update 都在 prompt resolve 前应用完毕，无 EOF/"finished" 竞态；ACP 子进程跨 step 存活，其流不会自行结束（agent.ts:529-532 注释）。
 
 ## 6. 权限模型
 
@@ -182,12 +190,18 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 ### 已知边界与坑
 
-- **arguments 恒为 `'{}'`**：`tool/call` 没有真实参数可记（ACP `tool_call` 公告不含参数，agent.ts:626）。下游若依赖工具参数回放会拿不到。
+- **~~`tool/call` 的参数恒为 `'{}'`~~**：已修（2026-09-18）。旧实现把 arguments 硬编码成 `'{}'`，理由是「ACP 公告不携带真实参数」——前半句对，结论错。实测（`kimi acp` 直连抓帧，Read/Write/Bash 三类工具）证实：`tool_call` 公告的键是 `sessionUpdate/toolCallId/title/kind/status/content`，**确实没有** `rawInput`；但紧接着的 `status: 'in_progress'` 那条 `tool_call_update` 带 `rawInput`（如 `{"command":"echo probe-done"}`），完成帧另带 `rawOutput`。协议侧 `zToolCall`/`zToolCallUpdate` 都声明了 `rawInput: unknown().optional()`。
+  现在的做法是：公告只登记进 `pendingCalls`，拿到 `rawInput` 的第一条 update 才落 `assistant/message` + `tool/call`（真参数），一直没等到则在 settled 时以 `'{}'` 落，保证调用不丢（agent.ts:619-660）。**代价**：工具行出现在执行开始而非被请求的瞬间（差一条 update）。教训：ACP 的「公告帧」和「执行帧」字段可以不同，别拿公告的字段集当整个调用的字段集——抓帧要抓到 settled，否则会像旧实现一样把「公告没给」误判成「协议没有」。
+
+> 复现这次实测的最小手段：`kimi acp` 起子进程，按 ACP 顺序发 `initialize` → `session/new` → `session/prompt`，把每条 `session/update` 原样打印；`session/request_permission` 要回一条选中 `allow_once` 的 `{ outcome: { outcome: 'selected', optionId } }`，否则工具不执行、`rawInput` 也不会出现。
+- **~~一轮的工具行全堆在最后、中间的思考和文字看不见~~**：已修（2026-09-18）。旧实现每个 step 只在 prompt 返回后写一条 `assistant/message`，而 Kimi 把整个内部 loop 塞进一次 `session/prompt`，于是一次 step 的工具行全部先落、文字最后才出（实测：一个 kimi step 里 61 个 tool call 挤在 step 1，而 in-process 引擎平均 1.3 个/step）。
+  **中间走过一次弯路值得记下来**：第一版修法只把消息拆成「一段一条」，没拆 step。结果更糟——chat 的助手节点按 `${turn}:${step}` 建键且 `settleMessage` 整体替换 blocks，一个 step 里 N 条消息只渲染最后一条，于是屏幕上只剩最后一段的 `思考`，前面的全被覆盖。正确做法是连同 step 一起拆（`beginSegment`，agent.ts:623-629），复刻 in-process 的「一步一消息、消息在工具之前」形状。教训：**判断渲染问题的根因必须同时看日志形状和 UI 的节点建键/替换规则**，只盯日志顺序会得出错的方向。
+- **ACP 会话的粒度是「一次 prompt / 一个 turn-loop 迭代」，不是轮转后的 step**：`session/new` 每次调用 `step()` 一次（agent.ts:540），而 `beginSegment` 轮转出来的 step 共用同一次 ACP prompt 与同一个 ACP 会话——轮转只发生在 dsh 的持久日志层，不重开子进程侧的会话。
 - **每步全新 ACP 会话**：`session/new` 每步一次（agent.ts:522），Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量的代价，与 claude/codex 驱动一致。
 - **done-rejection 分支不拒 pending**：`done` 以 rejection 落定时在飞请求永不结算（client.ts:130-133），见 4.2。
 - **`config.model` 不进子进程**：想真正钉模型只能靠 Kimi 自己的配置；插件的 `model` 只是日志标签。
 - **撞名命令被跳过**：见 7.1。
-- **~~审批被拒的 `tool/result` 文本会被 Kimi 的输入回显撑爆~~**：已修（2026-09-18）。`tool_call_update.content` 是**累计快照**而非增量，旧实现逐条追加（`toolText` accumulator），一次被拒的 Bash 调用会留下 6.6KB 的 `{{"command{"command"...` 嵌套垃圾并被喂回模型上下文。现在改为一律**替换**最新快照（见 §5 表与 `mapping.ts:69-86`）。教训：Kimi 的 chunk 类字段（`agent_message_chunk`/`agent_thought_chunk`）是增量，工具卡字段是快照——两类字段不能按同一套假设折叠。
+- **~~审批被拒的 `tool/result` 文本会被 Kimi 的输入回显撑爆~~**：已修（2026-09-18）。`tool_call_update.content` 是**累计快照**而非增量，旧实现逐条追加（`toolText` accumulator），一次被拒的 Bash 调用会留下 6.6KB 的 `{{"command{"command"...` 嵌套垃圾并被喂回模型上下文。现在改为一律**替换**最新快照（见 §5 表与 `mapping.ts:95-113`）。教训：Kimi 的 chunk 类字段（`agent_message_chunk`/`agent_thought_chunk`）是增量，工具卡字段是快照——两类字段不能按同一套假设折叠。
 - **Kimi 的 question / plan_review 桥未被利用**：Kimi 把 `AskUserQuestion` 和 plan_review 也塞进 `session/request_permission`（选项 id 形如 `q0_opt_*`、`plan_*`）。当前实现只按 `kind` 找唯一的 `allow_once`/`reject_once`，多候选一律 `cancelled`（fail-closed、诚实但不作答）。dsh 有 `ctx.userQuestions`（codex 驱动已接，见 `docs/engine-codex.md` §6.4），理论上可把这类请求转过去真答；需要先把 ACP 选项 id 空间映射回问题/选项，属于**新功能**而非修 bug。
 
 ### 代码与注释不一致之处（改动前先核对）
@@ -196,19 +210,19 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 2. **`types.ts` 模块头过时**（types.ts:4-10）：仍在讲 `-p` 面自动批准、无 `--tools` 旗标，与 ACP 驱动模型不符。
 3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:38"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
 4. **客户端生命周期注释**：client.ts:11 说子进程"long-lived (one per factory)"，实际客户端按 **agent** 缓存（agent.ts:115-118），一个工厂下多个会话各有自己的子进程。client.ts:53"once per driver scope"才是准确说法。
-5. **块序注释内部张力**：agent.ts:586-587 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
+5. **块序注释内部张力**：agent.ts:589-590 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
 6. **permission.ts 模块头易误导**（permission.ts:9-13）：大段谈论 full-access/workspace-write 沙箱如何自动批准，但函数根本不读沙箱旋钮（permission.ts:24-27 的函数 JSDoc 才是准的）。
 
 ## 10. 测试覆盖要点
 
 Kimi 相关 spec 共 9 个文件（约 2800 行），仓库覆盖门槛为 `src/**` 逐文件 100%（`src/client` 除外），所以源码里大量 `v8 ignore` 注释标记的是防御性 backstop，不是可删代码。
 
-- `tests/engine-kimi/agent.spec.ts`（895 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含工具专属步的空父消息；**连续增长的快照只留最后一条**；settle 帧不带 content 时沿用上一条快照）；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
+- `tests/engine-kimi/agent.spec.ts`（约 1110 行）：核心。mock `AcpClient` 喂 `session/update` 流，覆盖——流式 text/thought → 单条 assistant/message；tool_call/tool_call_update → tool/call + tool/result（含**落日志时序：assistant/message 先于其 tool/call、tool/call 先于其 tool/result**；**真参数来自 update 的 `rawInput`**；**settle 时仍无参数则回退 `'{}'`**；**纯工具段仍发父消息**；**公告后无 update 的孤儿调用在收尾补记且不配 tool/result**；**连续增长的快照只留最后一条**；**先给输出后给输入的帧序不丢结果**；settle 帧不带 content 时沿用上一条快照；空 id 与未公告 id 的 update 被忽略）；**step 轮转（`stepStructure` 辅助函数读 `type@step` 序列）：两段各自的 assistant/message + tool/call + tool/result 落在连续的两个 step，尾段自成第三个 step；任何结果之前公告的多个调用留在同一个 step**；未知 update 跳过；`KIMI_NO_RESULT`；权限回调（auto 批准 / ask 拒绝）；abort → `session/cancel`；客户端跨步复用（`created` 仅 1 次）；initialize 失败清理；无 cwd 报错；技能注入全部分支（注入、无服务、加载失败/undefined/非 user-invocable 跳过、加载中取消丢弃、无 cwd 时仍注入再失败）；steer/inject/maintenance/keepInbox；turn 链式（mid-turn followup/steer/disposed 不重放）；空 step 与 reject 的 turn 收场；commit veto；resume request header。
 - `tests/engine-kimi/index.spec.ts`（692 行）：工厂注册与 HMR 安全拆除（fiber dispose 后槽位清空）；create 的 seed/meta 透传、预中止信号（Error 与非 Error reason）、setup commit/失败回滚/挂起中止、owner fiber 中途卸载回滚（含 scope minting 竞态）；resume 全路径（无 persistence 报错、JSONL 后端恢复、预中止、取消加载时释放遗弃 preparation、加载后工厂失活、prepare 失败传播、取消后迟到失败吞掉）。
 - `tests/engine-kimi/loop.spec.ts`（231 行）：spawn 管线——bin 解析优先级、spawn spec → 接缝投影（argv/stdio/graceMs/env/signal）、handle → 传输层 round-trip、stderr 排空；systemPrompt 变量在无 agent 时为 undefined。
 - `tests/engine-kimi/process.spec.ts`（125 行）：`kimiHomeDir`/`kimiBinResolver`（mock `existsSync` 与 homedir）、`kimiAcpArgv`、`kimiSubprocessSpec`（argv 复制、signal 透传）、`fromSubprocess`（缺 pipe 抛错）。
 - `tests/engine-kimi/acp/client.spec.ts`（439 行）：假 `KimiProcess` 上的全协议行为——请求关联（result/error/无 message 回退/孤儿响应）、session 生命周期（newSession 无 id 抛错、prompt 体形、cancel 吞 rejection）、update 缓冲与生成器、反向 RPC（按 `CANONICAL_OPTIONS` 批准→`approve_once` / 拒绝→`reject`、多候选与无 option 词汇→`cancelled`、畸形 option 条目被丢弃、未知 method → -32601、无 handler fail-closed）、`create` 的注入 spawn 与裸 spawn 回退、notify、帧健壮性（`\r\n`、空行、非 JSON、string chunk、method 非字符串）、封口后行为、子进程退出拒 pending、done rejection 只封口。
-- `tests/engine-kimi/acp/mapping.spec.ts`（116 行）：分类谓词、chunkDelta 边界（image/缺 content）、status 分类（settled/error）、嵌套 content 拼接、**无 content 字段 → `undefined`（区别于空 content → `''`）**、`toolResult` 投影与 `(no content)` 回退。
+- `tests/engine-kimi/acp/mapping.spec.ts`（约 140 行）：分类谓词、chunkDelta 边界（image/缺 content）、status 分类（settled/error）、嵌套 content 拼接、**无 content 字段 → `undefined`（区别于空 content → `''`）**、**`toolRawInput`（对象序列化 / 字符串原样透传 / 字段缺失 → `undefined`）**、`toolResult` 投影与 `(no content)` 回退。
 - `tests/engine-kimi/permission.spec.ts`（30 行）：`resolveToolApproval` 折叠——never/沙箱/无旋钮批准，ask 拒绝且压过 full-access。
 - `tests/engine-kimi/skills.spec.ts`（254 行）：`kimiAgentDir` 覆盖；AGENTS.md 发现/空文件忽略/cwd→git root 合并；项目与用户 SKILL.md 发现（含 `KIMI_CODE_HOME` 覆盖、扁平 .md、垃圾条目跳过、目录缺 SKILL.md、abort 返回空）；get 的内容加载与文件消失 → undefined。
 - `tests/engine-kimi/commands.spec.ts`（50 行）：转发 handler 的原文行拼装（带/不带参数）与 `KIMI_COMMANDS` 每条都有转发 handler。

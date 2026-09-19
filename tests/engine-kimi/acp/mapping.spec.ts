@@ -16,6 +16,7 @@ import {
   toolCallIdOf,
   toolCallName,
   toolContentText,
+  toolRawInput,
   toolResult,
 } from '../../../src/engine-kimi/acp/mapping.ts'
 import type { AcpToolCallStreamExt, AcpUpdate } from '../../../src/engine-kimi/acp/types.ts'
@@ -96,6 +97,25 @@ describe('toolContentText', () => {
       { type: 'not-content', content: { type: 'text', text: 'x' } } as never,
     ] as never
     expect(toolContentText(update)).toBe('')
+  })
+})
+
+describe('toolRawInput', () => {
+  it('serializes the parsed input object the update carries', () => {
+    const update = toolStream('c1', 'in_progress', 'x') as unknown as AcpToolCallStreamExt
+    update.rawInput = { command: 'ls' }
+    expect(toolRawInput(update)).toBe('{"command":"ls"}')
+  })
+
+  it('passes a wire string through unchanged', () => {
+    const update = toolStream('c1', 'in_progress', 'x') as unknown as AcpToolCallStreamExt
+    update.rawInput = '{"command":"ls"}'
+    expect(toolRawInput(update)).toBe('{"command":"ls"}')
+  })
+
+  it('returns undefined while the frame carries no input', () => {
+    // The announcement never carries it — this is the shape the driver waits on.
+    expect(toolRawInput(toolCall('c1', 'Bash') as AcpToolCallStreamExt)).toBeUndefined()
   })
 })
 

@@ -48,6 +48,7 @@ import {
   toolCallIdOf,
   toolCallName,
   toolContentText,
+  toolRawInput,
   toolResult,
 } from './acp/mapping.ts'
 import { resolveToolApproval } from './permission.ts'
@@ -81,6 +82,14 @@ type Phase =
   | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
+
+/**
+ * The running phase. Its `turn`/`step` are the position of the step currently
+ * open: rotating a step mutates them in place, so every holder of the phase
+ * (the turn loop's fail-safe close, `agent/error` reporting) sees the step that
+ * is actually open rather than the one the ACP prompt was started under.
+ */
+type RunningPhase = Extract<Phase, { kind: 'running' }>
 
 type PreparedStep =
   | { kind: 'reject' }
@@ -391,7 +400,10 @@ export class KimiAgent implements Agent {
           const stepEnd = await this.step()
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
-          this.session.append('step/end', { turn, step })
+          // The driver rotates steps as kimi's internal segments complete, so
+          // `phase.step` — not the step this iteration opened — is the one still
+          // open here.
+          this.session.append('step/end', { turn, step: phase.step })
         }
         signal.throwIfAborted()
         /* v8 ignore start -- every step() completes, so turnEnds is always set here; the short-circuit arm is a defensive backstop */
@@ -493,13 +505,16 @@ export class KimiAgent implements Agent {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
-    const { turn, step, abort: { signal } } = this.phase
+    const phase = this.phase
+    const { abort: { signal } } = phase
     signal.throwIfAborted()
     // Step-local state: multiple steps run within one turn (steering), so each
     // step starts with a clean assistant-blocks/tool accumulator.
     this.blocks = []
-    this.emittedToolCalls = new Set()
+    this.pendingCalls = new Map()
     this.toolContent = new Map()
+    this.producedOutput = false
+    this.stepSettledTools = 0
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -522,31 +537,12 @@ export class KimiAgent implements Agent {
     const acpSessionId = await client.newSession(cwd)
     signal.throwIfAborted()
 
-    /**
-     * The live attempt for the current streamed segment. Chunks open one; the
-     * durable assistant message they built settles it, so the step's message
-     * carries exactly its own stream.
-     */
-    let live: DriverAssistantStream | undefined
     try {
-      const currentStream = (): DriverAssistantStream => {
-        if (live === undefined) {
-          live = new DriverAssistantStream(
-            this.id,
-            ++this.streamAttempts,
-            turn,
-            step,
-            frame => this.dispatch.emit('agent/assistant-stream', { frame }),
-          )
-          live.start()
-        }
-        return live
-      }
       // Consume streamed updates via the callback as they arrive. The prompt
       // response frame is dispatched after the turn's updates, so every update is
       // applied before it resolves — no EOF or "finished" race. (The ACP child
       // stays open between steps, so its stream never ends on its own.)
-      client.onUpdate((update) => this.applyUpdate(turn, step, update, currentStream))
+      client.onUpdate((update) => this.applyUpdate(phase, update))
 
       const cancel = (): void => { client.cancel(acpSessionId) }
       signal.addEventListener('abort', cancel, { once: true })
@@ -556,8 +552,13 @@ export class KimiAgent implements Agent {
         signal.removeEventListener('abort', cancel)
       }
 
-      this.flushAssistant(turn, step, currentStream)
-      if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) {
+      // Close the final segment: trailing blocks, then any call the engine
+      // announced without ever supplying its input, so the transcript keeps
+      // every request the model made.
+      this.flushAssistant(phase)
+      for (const [callId, call] of this.pendingCalls) this.logToolCall(phase, callId, call.name, '{}')
+      this.pendingCalls.clear()
+      if (!this.producedOutput) {
         throw new LlmError(
           `agent "${this.id}": kimi query produced no assistant output`,
           'KIMI_NO_RESULT',
@@ -567,15 +568,32 @@ export class KimiAgent implements Agent {
     } finally {
       // A step that streamed without committing a durable message closes its
       // live frames, so the client stops painting an abandoned partial.
-      if (live !== undefined && !live.ended) live.abandon()
+      if (this.live !== undefined && !this.live.ended) this.live.abandon()
+      this.live = undefined
     }
   }
 
   /** Per-step accumulation state for streamed assistant blocks and tool calls. */
   private blocks: OpenBlock[] = []
-  private emittedToolCalls = new Set<string>()
-  /** Latest content snapshot per open tool call (see {@link applyUpdate}). */
+  /**
+   * Announced calls still waiting for the update that carries their input,
+   * keyed by call id, holding the latest content snapshot seen meanwhile (a
+   * frame can report output before it reports input). `toolContent` holds the
+   * calls already logged, so a call is in exactly one of the two.
+   */
+  private pendingCalls = new Map<string, { name: string; content?: string }>()
+  /** Whether the current step published any assistant message at all. */
+  private producedOutput = false
+  /**
+   * Tool results logged into the currently open step. A result means the
+   * segment that requested the call is finished, so the next assistant content
+   * opens the next step (see {@link beginSegment}).
+   */
+  private stepSettledTools = 0
+  /** Latest content snapshot per logged tool call (see {@link applyUpdate}). */
   private toolContent = new Map<string, string>()
+  /** The live attempt framing the assistant message being assembled right now. */
+  private live: DriverAssistantStream | undefined
 
   private blockRef(type: 'text' | 'reasoning'): OpenBlock | undefined {
     return this.blocks.find(block => block.type === type)
@@ -592,58 +610,90 @@ export class KimiAgent implements Agent {
     return block
   }
 
-  /** Apply one streamed update to the current step's blocks and stream. */
-  private applyUpdate(
-    turn: number,
-    step: number,
-    update: AcpUpdate,
-    currentStream: () => DriverAssistantStream,
-  ): void {
+  /**
+   * Rotate to the next step when the segment that ran a tool has finished, so
+   * each assistant segment lands in its own step.
+   *
+   * Called as new assistant content begins. A step holding a settled tool
+   * result means the previous segment is complete, and the content about to be
+   * applied belongs to the next one. Rotating here (rather than when a call is
+   * announced) keeps calls that were announced before any result — one model
+   * turn — in a single step.
+   */
+  private beginSegment(phase: RunningPhase): void {
+    if (this.stepSettledTools === 0) return
+    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    phase.step += 1
+    this.session.append('step/start', { turn: phase.turn, step: phase.step })
+    this.stepSettledTools = 0
+  }
+
+  /** Apply one streamed update to the open step's blocks and stream. */
+  private applyUpdate(phase: RunningPhase, update: AcpUpdate): void {
     if (isThoughtChunk(update)) {
       const delta = chunkDelta(update)
       if (delta === '') return
+      this.beginSegment(phase)
       const block = this.ensureBlock('reasoning')
       // An empty block has published nothing yet, so it opens with a block-start.
-      if (block.text === '') currentStream().push({ type: 'block-start', index: block.index, blockType: 'reasoning' })
-      currentStream().push({ type: 'reasoning-delta', index: block.index, text: delta })
+      if (block.text === '') this.currentStream(phase).push({ type: 'block-start', index: block.index, blockType: 'reasoning' })
+      this.currentStream(phase).push({ type: 'reasoning-delta', index: block.index, text: delta })
       block.text += delta
       return
     }
     if (isTextChunk(update)) {
       const delta = chunkDelta(update)
       if (delta === '') return
+      this.beginSegment(phase)
       const block = this.ensureBlock('text')
       // An empty block has published nothing yet, so it opens with a block-start.
-      if (block.text === '') currentStream().push({ type: 'block-start', index: block.index, blockType: 'text' })
-      currentStream().push({ type: 'text-delta', index: block.index, text: delta })
+      if (block.text === '') this.currentStream(phase).push({ type: 'block-start', index: block.index, blockType: 'text' })
+      this.currentStream(phase).push({ type: 'text-delta', index: block.index, text: delta })
       block.text += delta
       return
     }
     if (isToolCall(update)) {
       const callId = toolCallIdOf(update)
-      if (callId === '' || this.emittedToolCalls.has(callId)) return
-      this.emittedToolCalls.add(callId)
-      const name = toolCallName(update)
-      this.session.append('tool/call', { turn, step, callId: ToolCallId(callId), name, arguments: '{}' })
-      this.toolContent.set(callId, '')
+      if (callId === '' || this.pendingCalls.has(callId) || this.toolContent.has(callId)) return
+      this.beginSegment(phase)
+      // The announcement names the call but never carries its input, so the
+      // call is logged only once an update supplies `rawInput` — or when it
+      // settles (see the update branch below).
+      this.pendingCalls.set(callId, { name: toolCallName(update) })
       return
     }
     if (isToolCallUpdate(update)) {
       const callId = toolCallIdOf(update)
-      if (callId === '' || !this.toolContent.has(callId)) return
+      if (callId === '') return
+      const status = (update as { status?: unknown }).status as string
+      const settled = isToolSettledStatus(status)
       // Kimi re-sends the whole content on every update, so this replaces the
       // stored snapshot rather than extending it (see acp/mapping.ts). An update
       // with no content field leaves the last snapshot standing, so a settling
       // frame that only carries the status still reports the real output.
       const snapshot = toolContentText(update)
-      if (snapshot !== undefined) this.toolContent.set(callId, snapshot)
-      const status = (update as { status?: unknown }).status as string
-      if (isToolSettledStatus(status)) {
-        // The has() guard above guarantees the entry exists, so a bare get() is
+      const pending = this.pendingCalls.get(callId)
+      if (pending !== undefined) {
+        if (snapshot !== undefined) pending.content = snapshot
+        const args = toolRawInput(update)
+        // Wait for the frame that carries the input; a settling call is logged
+        // with empty arguments rather than dropped, so every announced call
+        // still reaches the transcript.
+        if (args === undefined && !settled) return
+        this.pendingCalls.delete(callId)
+        this.logToolCall(phase, callId, pending.name, args ?? '{}', pending.content)
+      } else if (!this.toolContent.has(callId)) {
+        return
+      } else if (snapshot !== undefined) {
+        this.toolContent.set(callId, snapshot)
+      }
+      if (settled) {
+        // The branch guards above guarantee the entry exists, so a bare get() is
         // defined and needs no `?? ''` fallback.
         const message = toolResult(callId, this.toolContent.get(callId)!, isToolErrorStatus(status))
-        this.session.append('tool/result', { turn, step, message }, { surfaceOp: 'append' })
+        this.session.append('tool/result', { turn: phase.turn, step: phase.step, message }, { surfaceOp: 'append' })
         this.toolContent.delete(callId)
+        this.stepSettledTools += 1
       }
       return
     }
@@ -651,23 +701,65 @@ export class KimiAgent implements Agent {
     // plan, …) are not part of the faithful model context projection.
   }
 
+  /** The live attempt framing the current segment, opened on its first chunk. */
+  private currentStream(phase: RunningPhase): DriverAssistantStream {
+    if (this.live === undefined) {
+      this.live = new DriverAssistantStream(
+        this.id,
+        ++this.streamAttempts,
+        phase.turn,
+        phase.step,
+        frame => this.dispatch.emit('agent/assistant-stream', { frame }),
+      )
+      this.live.start()
+    }
+    return this.live
+  }
+
+  /**
+   * Log one tool call: first the assistant message that requested it — closing
+   * the open segment and carrying the call's `tool-call` block — then the keyed
+   * `tool/call`. The order is load-bearing: the assistant message must precede
+   * the call it owns, or the transcript pairs the call's result with the wrong
+   * assistant turn.
+   * @param phase - the open step the call belongs to.
+   * @param callId - the call's id as the wire carries it.
+   * @param name - the call's name (the ACP `title`).
+   * @param args - the call's JSON arguments string.
+   * @param content - the latest content snapshot already observed for the call,
+   *   so a frame that reported output before input keeps its result text.
+   */
+  private logToolCall(phase: RunningPhase, callId: string, name: string, args: string, content = ''): void {
+    this.flushAssistant(phase, [{ callId, name, arguments: args }])
+    this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(callId), name, arguments: args })
+    this.toolContent.set(callId, content)
+  }
+
   /**
    * Flush the accumulated assistant blocks into one durable assistant/message
-   * carrying the exact stream the attempt published live.
-   * @param turn - durable turn owning the message.
-   * @param step - durable step owning the message.
-   * @param currentStream - the step's live attempt accessor; a step whose
-   *   blocks streamed always has one open, while a tool-only step has none.
+   * carrying the exact stream the attempt published live, optionally closing it
+   * with the tool-call block(s) that ended the segment.
+   *
+   * Every flush settles its own attempt (and so its own live `end` frame): a
+   * step emits one message per assistant segment, and the client pairs a durable
+   * message with the attempt whose `end` cites it, so two messages may not share
+   * one attempt.
+   * @param phase - the open step the message belongs to.
+   * @param toolCalls - the calls that closed this segment, rendered as trailing
+   *   `tool-call` content blocks. A segment with no blocks of its own — a step
+   *   whose only activity was a tool call — still emits this message, so its
+   *   `tool/call` and `tool/result` events have a parent to pair with.
    */
-  private flushAssistant(turn: number, step: number, currentStream: () => DriverAssistantStream): void {
-    // A step with no assistant content and no tool activity produced nothing to
-    // publish; tool-only steps still emit an (possibly empty) assistant message so
-    // the `tool/call` + `tool/result` events have a parent message to pair with.
-    if (this.blocks.length === 0 && this.emittedToolCalls.size === 0) return
+  private flushAssistant(
+    phase: RunningPhase,
+    toolCalls: readonly { callId: string; name: string; arguments: string }[] = [],
+  ): void {
+    if (this.blocks.length === 0 && toolCalls.length === 0) return
     const content: ContentBlock[] = []
-    // Blocks exist only because a non-empty delta opened the attempt, so the
-    // accessor hands back the already-open attempt rather than creating one.
-    const attempt = this.blocks.length === 0 ? undefined : currentStream()
+    this.producedOutput = true
+    // A segment with no text/reasoning published no live chunks, so it has no
+    // attempt to settle and its message is appended directly.
+    const attempt = this.blocks.length === 0 ? undefined : this.currentStream(phase)
     for (const block of this.blocks) {
       // Blocks are created only when a non-empty delta arrives, so block.text is
       // always non-empty here — no `if (delta !== '')` guard needed.
@@ -675,9 +767,12 @@ export class KimiAgent implements Agent {
       content.push(block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta })
       attempt?.push({ type: 'block-end', index: block.index, block: block.type === 'text' ? { type: 'text', text: delta } : { type: 'reasoning', text: delta } })
     }
+    for (const call of toolCalls) {
+      content.push({ type: 'tool-call', id: ToolCallId(call.callId), name: call.name, arguments: call.arguments })
+    }
     const data = {
-      turn,
-      step,
+      turn: phase.turn,
+      step: phase.step,
       message: createAssistantMessage({
         content,
         source: { provider: PROVIDER, model: this.modelLabel() },
@@ -689,7 +784,11 @@ export class KimiAgent implements Agent {
       this.session.append('assistant/message', data, { surfaceOp: 'append' })
     } else {
       attempt.settle(() => this.session.append('assistant/message', data, { surfaceOp: 'append' }).seq)
+      // The next segment opens a fresh attempt, so this message keeps exactly
+      // the chunks its own content produced.
+      this.live = undefined
     }
+    this.blocks = []
   }
 }
 /* jscpd:ignore-end */
