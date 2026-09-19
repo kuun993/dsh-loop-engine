@@ -67,8 +67,11 @@ src/engine-codex/
 - **turn**（`src/engine-codex/agent.ts:387-462`）：append `turn/start` → 循环 `preStep`（Inbox claim + `agent/pre-step` waterfall + 技能注入）→ append `user/message` → `step()` → append `step/end`；turn 结束原因覆盖 `completed`/`blocked`/`aborted`/`error`，finally 中必 append `turn/end`。
   两个关键点：① `step()` 内部会在助手片段边界轮转 step（§4.1），所以收尾的 `step/end` 关的是 `phase.step` 而非本次迭代开头开的 step；② **轮转出来的 step 不重跑 `preStep`**——只有 turn 的第一个 step 走 inbox claim / waterfall / 技能注入，因为一个 codex turn 是原子的、中途也无法投递 steer/inject。
 - **一段一步（step 轮转）**：一次 codex turn 跑完模型的整个 agentic loop，一个 step 里会出现多条 assistant 消息（实测纯 codex 会话里 turn 1 有 6 条）与多组 tool/call。这必须拆开——chat 的助手节点按 `${turn}:${step}` 建键（`packages/client/ui-chat/src/client/conversation-nodes/assistant.ts`），同一 step 的多条消息落到**同一个**节点，而 `settleMessage` 是**整体替换** blocks，N 条只渲染最后一条。
-  所以 `beginSegment` 在新助手内容落盘前轮转：本 step 已有 settled 的 `tool/result` 时补 `step/end` + `step/start` 并就地 `phase.step += 1`。触发点有两处，都幂等（轮转后 `stepSettledTools` 归零，重复调用不做事）：**推理 delta**（`reasoning-summary-delta`/`reasoning-text-delta`/`plan-delta`）与 **`agentMessage` item 完成**。前者是必要的——推理在 item 完成之前就流式画出来了，只在 item 完成时轮转会让 live 帧画进已经收尾的 step、只有 durable 消息搬家；后者覆盖「本段没有推理、只有正文」的形状。
-  轮转判据是「本 step 已有 settled 结果」而非「有调用被公告」，这样同一模型轮次里连续发出的多个工具调用仍留在同一个 step。codex 的段内顺序本来就正确（工具项先 `flushReasoning()` + `flushHeld()` 再写 `tool/call`），所以这里只补轮转，不动顺序。
+  所以 `beginSegment` 在新助手内容落盘前轮转：本 step 已有 settled 的 `tool/result` 时补 `step/end` + `step/start` 并就地 `phase.step += 1`。触发点有三处，都幂等（轮转后 `stepSettledTools` 归零，重复调用不做事）：**推理 delta**（`reasoning-summary-delta`/`reasoning-text-delta`/`plan-delta`）、**`agentMessage` item 完成**、以及**工具 item**（`commandExecution`/`fileChange`/`mcpToolCall`）。前两者是原有的——推理在 item 完成之前就流式画出来了，只在 item 完成时轮转会让 live 帧画进已经收尾的 step、只有 durable 消息搬家；`agentMessage` 完成覆盖「本段没有推理、只有正文」的形状。工具 item 处的轮转是 2026-09-19 补的（见下）。
+  轮转判据是「本 step 已有 settled 结果」而非「有调用被公告」，这样同一模型轮次里连续发出的多个工具调用仍留在同一个 step。
+- **同一段的连续 agentMessage 合并为一条消息（2026-09-19 修）**：旧实现每个 `agentMessage` item 完成时 `flushHeld()` 刷掉上一条再设新 `held`，于是同一 turn 里连续的多个 agentMessage（无工具间隔）会在同一个 step 落多条 `assistant/message`，chat 节点按 `${turn}:${step}` 替换 blocks 只渲染最后一条——前一条的文本/思考全丢。现在 `agentMessage` 完成时改为：无 settled 工具结果（`stepSettledTools === 0`）时把 reasoning/text **追加进现有 `held`**（合并），有结果时 `beginSegment` 已轮转、`held` 已被工具项清空，于是新开一条。块 index 同步改为 `(held?.content.length ?? 0) + pendingReasoning.length`（推理 delta 与 item-started 的 text 块 index 都用它），保证合并后的 content 与 stream 的块序一致。
+- **工具调用块入消息（2026-09-19 修）**：旧实现里工具 item 先 `flushReasoning()` + `flushHeld()`（把 reasoning/text 单独落一条消息）再写 `tool/call`，于是 `assistant/message` 不含 `tool-call` 块。但 `Session.deriveMessages` 只投影 `assistant/message` 与 `tool/result`（不投影 `tool/call` 事件），而 codex 每步的 prompt 是 `deriveMessages → serializeHistory` 的无状态序列化——丢 `tool-call` 块等于模型下一步看不到自己上一步跑了什么工具。
+  现在改为：工具 item 先 `beginSegment`（连续工具各占一个 step）→ `foldToolCall`（把 `tool-call` 块折进 `held`，同时把未被 agent 消息认领的尾随推理先折进去）→ `flushHeld`（一条消息同时携带 reasoning/text 与 tool-call 块）→ 再写 `tool/call` + `tool/result`（`src/engine-codex/agent.ts:839-869`、`:727-738`）。这样持久日志恒为 `assistant/message`（含 `tool-call` 块）→ `tool/call` → `tool/result`，序列化出的 prompt 保留 `[tool call: name(args)]` 行。
 - **preStep 拦截链**（`src/engine-codex/agent.ts:311-332`）：`agent/pre-step` waterfall 可 reject（turn 记 `blocked`）或改写消息批次；通过后再做技能注入（见 §7）。
 
 生命周期要点：`scope`（`createScope`）是 agent 级注册边界，其上注册的 effect 在 scope 拆解时释放 app-server 客户端（`src/engine-codex/agent.ts:135-139`）。
@@ -94,11 +97,11 @@ src/engine-codex/
 
 ### 4.4 取消传播
 
-`turn()` 收到 abort 信号时：置 done、以 signal.reason 为 `turnError`（保留 `AgentCancelCause` 而不是泛化错误）、并发 `turn/interrupt` 尽力中断服务端 turn（错误吞掉）（`src/engine-codex/appserver/thread.ts:173-184`）。agent 侧把相位 signal 桥接到一个 per-step 的 `AbortController`（`src/engine-codex/agent.ts:505-514`），step 结束（含异常）时在 finally 里摘监听并 abort 该 controller（`src/engine-codex/agent.ts:753-759`）。
+`turn()` 收到 abort 信号时：置 done、以 signal.reason 为 `turnError`（保留 `AgentCancelCause` 而不是泛化错误）、并发 `turn/interrupt` 尽力中断服务端 turn（错误吞掉）（`src/engine-codex/appserver/thread.ts:173-184`）。agent 侧把相位 signal 桥接到一个 per-step 的 `AbortController`（`src/engine-codex/agent.ts:610-619`），step 结束（含异常）时在 finally 里摘监听并 abort 该 controller（`src/engine-codex/agent.ts:899-902`）。
 
 ### 4.5 线程模型与已知边界
 
-- **每 step 一个新线程**：`threadParams = { cwd, sandbox, approvalPolicy, model? }`（`src/engine-codex/agent.ts:524-529`），随后 `thread.turn([{ type: 'text', text: prompt }], { signal, params })`（`src/engine-codex/agent.ts:531-538`）。codex 侧不积累历史——全部上下文在序列化后的 prompt 文本里。
+- **每 step 一个新线程**：`threadParams = { cwd, sandbox, approvalPolicy, model? }`（`src/engine-codex/agent.ts:629-634`），随后 `thread.turn([{ type: 'text', text: prompt }], { signal, params })`（`src/engine-codex/agent.ts:636-642`）。codex 侧不积累历史——全部上下文在序列化后的 prompt 文本里。
 - 线程从不显式关闭/归档；它们随 app-server 进程在 agent 拆解时被杀而消亡。
 - `client.threadResume`（`src/engine-codex/appserver/client.ts:131-133`）在整个 `src/` 中**没有调用方**——dsh 的 resume 语义由会话日志恢复实现，不用 codex 的 thread/resume。它是当前未用的 API 表面。
 - `thread.ts` 会产出 `token-usage` 事件（`thread/tokenUsage/updated`），但 `agent.ts` 的事件 switch 不处理它（落进 default 忽略）；turn 用量只取自 `turn/completed` 的 `turn.usage`。同理 `ErrorNotification.willRetry` 被携带但无人消费。
@@ -109,29 +112,29 @@ src/engine-codex/
 
 ### 5.1 流式 delta → live 帧 + 消息内嵌 stream
 
-step 循环（`src/engine-codex/agent.ts:613-759`）维护一套折叠状态：`pendingReasoning` + `pendingReasoningStream`（待折入下一条消息的推理文本，以及它流出的 chunk）、`held`（组装中的 assistant 消息，含 `content` 与自己的 `stream`）、`reasoningBlockStarted`/`textBlockStarted`（对应块是否已开）与 `textBlockIndex`（`src/engine-codex/agent.ts:540-559`）。
+step 循环（`src/engine-codex/agent.ts:740-905`）维护一套折叠状态：`pendingReasoning` + `pendingReasoningStream`（待折入下一条消息的推理文本，以及它流出的 chunk）、`held`（组装中的 assistant 消息，含 `content` 与自己的 `stream`）、`reasoningBlockStarted`/`textBlockStarted`（对应块是否已开）与 `textBlockIndex`（`src/engine-codex/agent.ts:645-664`）。
 
-每个 delta 交给这次尝试的 `DriverAssistantStream`（`currentStream()`，`src/engine-codex/agent.ts:561-574`）：它把 chunk 压进 compact stream 并发一条 `agent/assistant-stream` 的 `chunk` 帧，因此 web 端可见逐 token 的实时渲染。compact stream 按**内容分段**切给 durable 消息：codex 的协议能指出内容边界，所以每个 item 终结时 `takeStream()` 把这一段 chunk 收走，`flushHeld` 只内嵌该消息自己流出的那段（§5.2）。
+每个 delta 交给这次尝试的 `DriverAssistantStream`（`currentStream()`，`src/engine-codex/agent.ts:667-679`）：它把 chunk 压进 compact stream 并发一条 `agent/assistant-stream` 的 `chunk` 帧，因此 web 端可见逐 token 的实时渲染。compact stream 按**内容分段**切给 durable 消息：codex 的协议能指出内容边界，所以每个 item 终结时 `takeStream()` 把这一段 chunk 收走，`flushHeld` 只内嵌该消息自己流出的那段（§5.2）。
 
-- `agent-delta`（来自 `item/agentMessage/delta`）：首个 delta 先 push `{ type: 'block-start', index, blockType: 'text' }`，之后每个 delta push `text-delta`（`src/engine-codex/agent.ts:626-634`）。
-- `reasoning-summary-delta` / `reasoning-text-delta` / `plan-delta`：三类**都折叠为 reasoning 块**——首个 push `block-start`（`blockType: 'reasoning'`），之后 push `reasoning-delta`（`src/engine-codex/agent.ts:635-651`）。注意 plan delta 也进推理流，不单独成块；plan item 自身没有内容块，所以它终结时这段 chunk 被切下并丢弃（§5.2）。
-- `item-started`：只用于重置 text 块状态，并把 text 块 index 置为当前已累积推理块数（`src/engine-codex/agent.ts:618-624`）——块 index 语义是"消息内第几个内容块"。
+- `agent-delta`（来自 `item/agentMessage/delta`）：首个 delta 先 push `{ type: 'block-start', index, blockType: 'text' }`，之后每个 delta push `text-delta`（`src/engine-codex/agent.ts:752-759`）。
+- `reasoning-summary-delta` / `reasoning-text-delta` / `plan-delta`：三类**都折叠为 reasoning 块**——首个 push `block-start`（`blockType: 'reasoning'`），之后 push `reasoning-delta`（`src/engine-codex/agent.ts:761-778`）。注意 plan delta 也进推理流，不单独成块；plan item 自身没有内容块，所以它终结时这段 chunk 被切下并丢弃（§5.2）。
+- `item-started`：只用于重置 text 块状态，并把 text 块 index 置为「现有 held 块数 + 已累积推理块数」（`src/engine-codex/agent.ts:741-750`）——块 index 语义是"消息内第几个内容块"。
 
 ### 5.2 item 终态 → 持久消息
 
-`item-completed` 按 `item.type` 分派（`src/engine-codex/agent.ts:652-721`）：
+`item-completed` 按 `item.type` 分派（`src/engine-codex/agent.ts:783-866`）：
 
-- `reasoning`：终态的两个数组 `summary` / `content` **都恒存在、也都可能为空**，所以取**第一个真的带文本**的那个（先 `summary`，再 `content`，`nonEmptyText`，`src/engine-codex/agent.ts:92-94`）；两者都空时回退到这一步流式收到的思考文本（`streamedReasoning`，按 item id 累积、**plan delta 不计入**，`agent.ts:647-648` / `:660-666`），再没有才记空串。落盘文本因此不会比用户已经看到的流式思考更空。同时 `takeStream()` 把这段推理流出的 chunk 收进 `pendingReasoningStream`。
-- `plan`：**不落任何内容块**——只在 item 边界 `takeStream()` 切掉这段 chunk 并丢弃，同时复位 `reasoningBlockStarted`（`src/engine-codex/agent.ts:672-679`）。plan 在协议里是独立 item 类型（`type: 'plan'`，带权威 `text`），其 delta 走上面的推理流；这个切点是必需的——少了它，plan 段会被**下一条** agent 消息的 `data.stream` 吞掉，而那条消息的 `content` 里并没有对应块（`tests/engine-codex/agent.spec.ts:581-655` 验证：有 delta 的形状切段丢弃，无 delta 的形状忽略不切）。
-- `agentMessage`：先 `takeStream()` 切下正文这段 chunk，再把累积推理 + 正文合成**一条** assistant message 暂存（reasoning 块在前、text 块在后），其 `stream` 是推理段与正文段的拼接（`src/engine-codex/agent.ts:679-695`）。
-- `commandExecution` / `fileChange` / `mcpToolCall`：先 `flushReasoning()` + `flushHeld()`（保证工具事件之前的文本/推理先落），再经 mapping 生成 `tool/call` + `tool/result` 事件（`src/engine-codex/agent.ts:696-719`）。**tool/call 是惰性的**——没有 item-started 也会在终态补记（`tests/engine-codex/agent.spec.ts:965-986` 验证）。
+- `reasoning`：终态的两个数组 `summary` / `content` **都恒存在、也都可能为空**，所以取**第一个真的带文本**的那个（先 `summary`，再 `content`，`nonEmptyText`，`src/engine-codex/agent.ts:92-94`）；两者都空时回退到这一步流式收到的思考文本（`streamedReasoning`，按 item id 累积、**plan delta 不计入**，`agent.ts:761-778`），再没有才记空串。落盘文本因此不会比用户已经看到的流式思考更空。同时 `takeStream()` 把这段推理流出的 chunk 收进 `pendingReasoningStream`。
+- `plan`：**不落任何内容块**——只在 item 边界 `takeStream()` 切掉这段 chunk 并丢弃，同时复位 `reasoningBlockStarted`（`src/engine-codex/agent.ts:803-810`）。plan 在协议里是独立 item 类型（`type: 'plan'`，带权威 `text`），其 delta 走上面的推理流；这个切点是必需的——少了它，plan 段会被**下一条** agent 消息的 `data.stream` 吞掉，而那条消息的 `content` 里并没有对应块（`tests/engine-codex/agent.spec.ts:581-655` 验证：有 delta 的形状切段丢弃，无 delta 的形状忽略不切）。
+- **agentMessage**：先 `takeStream()` 切下正文这段 chunk，再把累积推理 + 正文合成**一条** assistant message（reasoning 块在前、text 块在后）。**同一段里连续的多个 agentMessage 合并进同一条消息**——旧实现每个 agentMessage 完成时 `flushHeld()` 刷掉上一条，一个 step 里就会出现多条 assistant message，而 chat 节点按 `${turn}:${step}` 替换 blocks 只渲染最后一条，前面的文本/思考全丢；现在改为「无 settled 工具结果时追加进现有 `held`，有结果时开新段」（`src/engine-codex/agent.ts:812-833`）。其 `stream` 是各段推理与正文 chunk 的拼接。
+- `commandExecution` / `fileChange` / `mcpToolCall`：先 `beginSegment`（连续工具各占一个 step）→ `foldToolCall`（把 `tool-call` 块折进 `held`，同时把未被 agent 消息认领的尾随推理先折进去）→ `flushHeld`（一条消息同时携带 reasoning/text 与 `tool-call` 块）→ 再经 mapping 生成 `tool/call` + `tool/result` 事件（`src/engine-codex/agent.ts:839-869`）。**tool/call 是惰性的**——没有 item-started 也会在终态补记（`tests/engine-codex/agent.spec.ts:965-986` 验证）。
 - 未知 item 类型（如 `webSearch`）直接忽略，不产生任何日志事件（`tests/engine-codex/agent.spec.ts:896-920` 验证）。
 
-`flushHeld`（`src/engine-codex/agent.ts:576-598`）落 `assistant/message` 时带 `surfaceOp: 'append'`，并把**这条消息自己的** chunk 序列内嵌成 `data.stream`（`held.stream`，`src/engine-codex/agent.ts:588-589`）；codex 是四个引擎里唯一按内容分段切 stream 的（其余三个整段内嵌 `attempt.stream`）。提交成功后由 `DriverAssistantStream.settle` 发 `end`（`committed`）帧，而流过却没能提交 durable 消息的段会在 `finally` 里 `abandon()` 发 `end`（`abandoned`）帧（`src/engine-codex/agent.ts:757`）。消息 `source` 固定为 `{ provider: 'codex', model: modelLabel() }`。
+`flushHeld`（`src/engine-codex/agent.ts:694-724`）落 `assistant/message` 时带 `surfaceOp: 'append'`，并把**这条消息自己的** chunk 序列内嵌成 `data.stream`（`held.stream`，`src/engine-codex/agent.ts:706-707`）；它开头的 `foldReasoning`（`src/engine-codex/agent.ts:682-692`）先把未被 agent 消息认领的尾随推理折进 `held`（或合成推理-only 消息），`foldToolCall`（`src/engine-codex/agent.ts:727-738`）在 flush 之前把 tool-call 块折进 `held.content`，所以消息同时携带文本/推理与工具调用头。codex 是四个引擎里唯一按内容分段切 stream 的（其余三个整段内嵌 `attempt.stream`）。提交成功后由 `DriverAssistantStream.settle` 发 `end`（`committed`）帧，而流过却没能提交 durable 消息的段会在 `finally` 里 `abandon()` 发 `end`（`abandoned`）帧（`src/engine-codex/agent.ts:905`）。消息 `source` 固定为 `{ provider: 'codex', model: modelLabel() }`。
 
 ### 5.3 turn 完成与 usage
 
-`turn-completed` 时 `mapUsage` 把 `cachedInputTokens → cacheReadTokens`、`reasoningOutputTokens → reasoningTokens`（`src/engine-codex/appserver/mapping.ts:15-22`）。**usage 挂在 step 的最后一条持久消息上**：若 turn 以推理收尾（`pendingReasoning` 非空），先 `flushReasoning(usage)` 让尾随推理独占一条消息并携带 usage；否则挂到最后一条 held agent 消息（`src/engine-codex/agent.ts:723-732`）。若 turn 在工具 item 之后直接结束——`held` 已被工具项 `flushHeld()` 清空、`pendingReasoning` 也为空——两条路径都落空，该 turn 的 usage 不挂到任何持久消息上。`turn/completed` 无 usage 字段则消息不带 usage（`tests/engine-codex/agent.spec.ts:872-894` 验证）。
+`turn-completed` 时 `mapUsage` 把 `cachedInputTokens → cacheReadTokens`、`reasoningOutputTokens → reasoningTokens`（`src/engine-codex/appserver/mapping.ts:15-22`）。**usage 挂在 step 的最后一条持久消息上**：`flushHeld(usage)` 先 `foldReasoning` 把尾随推理折进 held，再把这条合并后的消息落盘并携带 usage（`src/engine-codex/agent.ts:876-884`）。若 turn 在工具 item 之后直接结束——`held` 已被工具项 `flushHeld()` 清空、`pendingReasoning` 也为空——`flushHeld` 落空，该 turn 的 usage 不挂到任何持久消息上。`turn/completed` 无 usage 字段则消息不带 usage（`tests/engine-codex/agent.spec.ts:872-894` 验证）。
 
 ### 5.4 工具项映射细节（mapping.ts）
 
@@ -166,8 +169,8 @@ Codex 的权限 = 线程启动时的 `sandboxMode` + `approvalPolicy` 对，叠�
 
 ### 6.3 权限落到哪两个 RPC 参数
 
-- **sandbox 只在线程级**：`thread/start` 的 `sandbox` 字段（`src/engine-codex/agent.ts:526`）；`turn/start` 的 params 只带 `approvalPolicy`（+可选 `model`），**不带 `sandboxPolicy`**（`src/engine-codex/agent.ts:534-537`，`tests/engine-codex/agent.spec.ts:265-266` 断言 `not.toHaveProperty('sandboxPolicy')`）。要改每步沙箱粒度，需要引入 `appserver/types.ts:52-62` 已定义但未用的 `SandboxPolicy` 联合类型。
-- `approvalPolicy` 同时出现在 `thread/start` 和 `turn/start` 两处（`src/engine-codex/agent.ts:527, 535`）。
+- **sandbox 只在线程级**：`thread/start` 的 `sandbox` 字段（`src/engine-codex/agent.ts:631`）；`turn/start` 的 params 只带 `approvalPolicy`（+可选 `model`），**不带 `sandboxPolicy`**（`src/engine-codex/agent.ts:640`，`tests/engine-codex/agent.spec.ts:265-266` 断言 `not.toHaveProperty('sandboxPolicy')`）。要改每步沙箱粒度，需要引入 `appserver/types.ts:52-62` 已定义但未用的 `SandboxPolicy` 联合类型。
+- `approvalPolicy` 同时出现在 `thread/start` 和 `turn/start` 两处（`src/engine-codex/agent.ts:632, 640`）。
 
 ### 6.4 审批请求的应答路径（server→client request）
 
@@ -235,7 +238,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 ### 9.1 错误分类与落日志
 
-- **RPC/协议错误**：JSON-RPC error 响应 reject 为 `Error(error.message)`（`client.ts:193-194`）；`error` 通知或 turn 失败在 agent 侧抛 `LlmError(message, 'CODEX_ERROR')`（`src/engine-codex/agent.ts:736-739`）；事件流结束时没有 `turn-completed` 抛 `LlmError(..., 'CODEX_NO_RESULT')`（`src/engine-codex/agent.ts:746-751`）。
+- **RPC/协议错误**：JSON-RPC error 响应 reject 为 `Error(error.message)`（`client.ts:193-194`）；`error` 通知或 turn 失败在 agent 侧抛 `LlmError(message, 'CODEX_ERROR')`（`src/engine-codex/agent.ts:880-883`）；事件流结束时没有 `turn-completed` 抛 `LlmError(..., 'CODEX_NO_RESULT')`（`src/engine-codex/agent.ts:891-894`）。
 - **turn 级归因**：`turn()` 的 catch 把 `LlmError` 的 failure 记入 `turn/end` 的 `{ kind: 'error' }`，其余错误包成 `{ message: errorChain(error), code: 'UNKNOWN' }`，并先发 `agent/error` 再抛出由驱动边界收敛（`src/engine-codex/agent.ts:437-448`、`288-293`）。**已流出的部分转录（chunk、held 消息、工具事件）在错误抛出前先 flush 落日志**——失败不丢已生成内容（`tests/engine-codex/agent.spec.ts:1044-1073` 验证已提交消息保留；只有 live chunk、没有 item 终态时整段走 `abandon()`，`:1075-1103` 验证不落消息）。
 - **子进程死亡**：所有 pending 请求 reject；下一次 `appServerClient()` 发现 `closed` 会重建客户端（`src/engine-codex/agent.ts:143-150`）——但**进行中的 step 会失败**，重建只惠及后续 step。
 - **缺 cwd**：step 直接抛 `no working directory`（`src/engine-codex/agent.ts:491-494`），turn 记 `code: 'UNKNOWN'` 的 error（`tests/engine-codex/controls.spec.ts:309-327` 验证）；技能注入发生在 preStep，先于该失败。
@@ -246,7 +249,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 - **单槽通知 handler**：`AppServerClient.onNotification` 是覆盖赋值，叠加订阅会互相顶掉；当前依赖"一个 agent 同一时刻至多一个活跃 turn"成立。
 - **stderr 丢弃**：`onStderr` 无人订阅，app-server 的日志不可见，排查协议问题时只能自己临时挂 handler。
 - **图片不进 prompt**：序列化把 image 块替换为 `[image omitted: ...]` 占位文本（`src/driver-core/prompt.ts:20-21`）；reasoning 块不进转录（各引擎每次查询自行重新推理，`src/driver-core/prompt.ts:33-37`）。
-- **推理摘要 vs 正文**：终态优先取非空的 `summary`，其次非空的 `content`，两者都空则回退到这一步流式收到的思考文本（plan delta 不计入），三者皆无才记空串（`agent.ts:647-666`）。plan delta 会流进 reasoning 块但不算思考文本，所以它不参与这个回退。
+- **推理摘要 vs 正文**：终态优先取非空的 `summary`，其次非空的 `content`，两者都空则回退到这一步流式收到的思考文本（plan delta 不计入），三者皆无才记空串（`agent.ts:785-801`）。plan delta 会流进 reasoning 块但不算思考文本，所以它不参与这个回退。
 
 ### 9.3 注释与实现不一致（撰写时发现）
 
