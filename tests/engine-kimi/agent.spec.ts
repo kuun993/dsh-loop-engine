@@ -56,8 +56,17 @@ const text = (delta: string): Record<string, unknown> => ({ sessionUpdate: 'agen
 const thought = (delta: string): Record<string, unknown> => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: delta } })
 /** Tool-call announcement. */
 const toolCall = (id: string, name: string): Record<string, unknown> => ({ sessionUpdate: 'tool_call', toolCallId: id, title: name, kind: 'execute', status: 'pending', content: [] })
-/** Tool-call stream/result update. */
-const toolStream = (id: string, status: string, text: string): Record<string, unknown> => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status, content: [{ type: 'content', content: { type: 'text', text } }] })
+/**
+ * Tool-call stream/result update. `rawInput` is the call's real input, which
+ * the live wire only carries on an update (never on the announcement).
+ */
+const toolStream = (id: string, status: string, text: string, rawInput?: unknown): Record<string, unknown> => ({
+  sessionUpdate: 'tool_call_update',
+  toolCallId: id,
+  status,
+  content: [{ type: 'content', content: { type: 'text', text } }],
+  ...(rawInput === undefined ? {} : { rawInput }),
+})
 
 /** Bind a fresh harness context with the loop plugin mounted. */
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
@@ -68,6 +77,19 @@ async function harness(config: Record<string, unknown> = {}): Promise<Context> {
 function textOf(input: UserMessage): string {
   const block = input.content[0]
   return block?.type === 'text' ? block.text : ''
+}
+
+/** Step-scoped event types, in the order a reader sees them. */
+const STEP_SCOPED = new Set(['step/start', 'assistant/message', 'tool/call', 'tool/result', 'step/end'])
+
+/**
+ * The log's step-scoped events as ordered `type@step` tags, so a test can read
+ * the step structure directly: which step each message and tool event landed in.
+ */
+function stepStructure(session: Session): string[] {
+  return session.snapshotEvents()
+    .filter(event => STEP_SCOPED.has(event.type))
+    .map(event => `${event.type}@${(event.data as { step: number }).step}`)
 }
 
 /** Collect the durable user messages injected by the skill-invocation seam. */
@@ -207,8 +229,158 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       // Each update carries the call's whole content, so the settled one wins.
       expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'b' }] }] } } })
-      // A tool-only step still publishes an (empty) assistant/message parent.
+      // The step still publishes the assistant message that requested the call,
+      // as its parent, exactly once.
       expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('logs the assistant message before its tool call and carries the real arguments', async () => {
+    // The ACP announcement has no rawInput, so the call and the assistant
+    // message that requested it can only be logged once an update supplies the
+    // input. Ordering matters: the durable assistant/message must precede the
+    // tool/call it owns, which must precede that call's tool/result — otherwise
+    // the model context pairs a result with the wrong (or no) assistant turn.
+    mock.updates.mockReturnValue([
+      text('Let me '),
+      toolCall('0:call_1', 'Bash'),
+      toolStream('0:call_1', 'in_progress', '{"command":"ls"}', { command: 'ls' }),
+      toolStream('0:call_1', 'completed', 'done'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-order'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const ordered = events
+        .filter(event => event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'tool/result')
+        .map(event => event.type)
+      expect(ordered).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+
+      const assistant = events.find(event => event.type === 'assistant/message')
+      expect(assistant).toMatchObject({
+        data: {
+          message: {
+            content: [
+              { type: 'text', text: 'Let me ' },
+              { type: 'tool-call', id: '0:call_1', name: 'Bash', arguments: '{"command":"ls"}' },
+            ],
+          },
+        },
+      })
+      const call = events.find(event => event.type === 'tool/call')
+      expect(call).toMatchObject({ data: { callId: '0:call_1', name: 'Bash', arguments: '{"command":"ls"}' } })
+      expect(call!.seq).toBeGreaterThan(assistant!.seq)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('falls back to empty arguments when a call settles without raw input', async () => {
+    mock.updates.mockReturnValue([
+      toolCall('0:call_2', 'Bash'),
+      toolStream('0:call_2', 'completed', 'done'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-noinput'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events
+        .filter(event => event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'tool/result')
+        .map(event => event.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+      expect(events.find(event => event.type === 'tool/call')).toMatchObject({ data: { arguments: '{}' } })
+      expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
+        data: { message: { content: [{ type: 'tool-call', id: '0:call_2', name: 'Bash', arguments: '{}' }] } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('interleaves each tool call with the assistant message that requested it', async () => {
+    // One ACP prompt runs kimi's whole internal loop, so a single dsh step
+    // routinely holds several tool calls. Each must be individually bracketed
+    // by its own assistant message rather than all landing after the last one.
+    mock.updates.mockReturnValue([
+      text('first '),
+      toolCall('c1', 'Bash'),
+      toolStream('c1', 'in_progress', 'x', { command: 'a' }),
+      toolStream('c1', 'completed', 'x'),
+      text('second '),
+      toolCall('c2', 'Read'),
+      toolStream('c2', 'in_progress', 'y', { path: 'f' }),
+      toolStream('c2', 'completed', 'y'),
+      text('third'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-interleave'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events
+        .filter(event => event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'tool/result')
+        .map(event => event.type)).toEqual([
+        'assistant/message', 'tool/call', 'tool/result',
+        'assistant/message', 'tool/call', 'tool/result',
+        'assistant/message',
+      ])
+      const contents = events
+        .filter(event => event.type === 'assistant/message')
+        .map(event => (event.data as { message: { content: unknown } }).message.content)
+      expect(contents).toEqual([
+        [{ type: 'text', text: 'first ' }, { type: 'tool-call', id: 'c1', name: 'Bash', arguments: '{"command":"a"}' }],
+        [{ type: 'text', text: 'second ' }, { type: 'tool-call', id: 'c2', name: 'Read', arguments: '{"path":"f"}' }],
+        [{ type: 'text', text: 'third' }],
+      ])
+      // Each segment is its OWN dsh step. One ACP prompt runs kimi's whole
+      // internal loop, but the chat view keys an assistant node by
+      // `${turn}:${step}` and replaces its blocks on every message — so N
+      // messages in one step would render only the last one. Splitting the
+      // segments into steps reproduces the in-process shape, where a step holds
+      // one assistant message followed by its own tool call and result.
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1', 'tool/result@1', 'step/end@1',
+        'step/start@2', 'assistant/message@2', 'tool/call@2', 'tool/result@2', 'step/end@2',
+        'step/start@3', 'assistant/message@3', 'step/end@3',
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps tool calls announced before any result in the same step', async () => {
+    // Two calls announced before either settles are one model turn — they must
+    // share a step, so the rotation cannot be keyed on "a call was announced".
+    mock.updates.mockReturnValue([
+      toolCall('c1', 'Bash'),
+      toolCall('c2', 'Read'),
+      toolStream('c1', 'in_progress', 'x', { command: 'a' }),
+      toolStream('c2', 'in_progress', 'y', { path: 'f' }),
+      toolStream('c1', 'completed', 'x'),
+      toolStream('c2', 'completed', 'y'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-parallel'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1',
+        'assistant/message@1', 'tool/call@1',
+        'assistant/message@1', 'tool/call@1',
+        'tool/result@1', 'tool/result@1',
+        'step/end@1',
+      ])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -510,6 +682,52 @@ describe('KimiAgent tool and chunk edges', () => {
       expect(agent.session.snapshotEvents().some(event => event.type === 'tool/result')).toBe(false)
       const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'ok' }] } } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('logs a call the engine announced but never updated', async () => {
+    // The engine can announce a call and then end the step (an aborted tool, a
+    // dropped session) without ever sending an update carrying the input. The
+    // request still belongs in the transcript, logged with empty arguments.
+    mock.updates.mockReturnValue([toolCall('0:call_orphan', 'Bash'), text('ok')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-orphan'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      const events = agent.session.snapshotEvents()
+      expect(events
+        .filter(event => event.type === 'assistant/message' || event.type === 'tool/call')
+        .map(event => event.type)).toEqual(['assistant/message', 'assistant/message', 'tool/call'])
+      expect(events.find(event => event.type === 'tool/call')).toMatchObject({
+        data: { callId: '0:call_orphan', name: 'Bash', arguments: '{}' },
+      })
+      // Nothing ran, so there is no result to pair it with.
+      expect(events.some(event => event.type === 'tool/result')).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignores an update with an empty id and a content-less update for a logged call', async () => {
+    const contentLess = { sessionUpdate: 'tool_call_update', toolCallId: '0:call_cl', status: 'in_progress' }
+    mock.updates.mockReturnValue([
+      { sessionUpdate: 'tool_call_update', toolCallId: '', status: 'completed' },
+      toolCall('0:call_cl', 'Bash'),
+      toolStream('0:call_cl', 'in_progress', 'seen', { command: 'ls' }),
+      contentLess,
+      toolStream('0:call_cl', 'completed', 'seen'),
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-contentless'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
+      // The content-less frame leaves the last snapshot standing.
+      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'seen' }] }] } } })
     } finally {
       await ctx.fiber.dispose()
     }

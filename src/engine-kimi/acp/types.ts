@@ -35,7 +35,14 @@ export interface AcpUpdate {
   readonly [key: string]: unknown
 }
 
-/** A tool-call announcement (`sessionUpdate: 'tool_call'`). */
+/**
+ * A tool-call announcement (`sessionUpdate: 'tool_call'`).
+ *
+ * Measured against kimi 0.28.x: an announcement carries the call's identity
+ * (`toolCallId`/`title`/`kind`) and an empty content card, but **never** its
+ * input — `rawInput` only ever arrives on a later `tool_call_update` (the
+ * execution-start frame).
+ */
 export interface AcpToolCallExt extends AcpUpdate {
   readonly sessionUpdate: 'tool_call'
   readonly toolCallId: string
@@ -43,6 +50,8 @@ export interface AcpToolCallExt extends AcpUpdate {
   readonly kind: string
   readonly status: string
   readonly content?: readonly AcpToolContentBlock[]
+  /** The call's real input; absent on the announcement (see above). */
+  readonly rawInput?: unknown
 }
 
 /** A tool-call progress/result stream (`sessionUpdate: 'tool_call_update'`). */
@@ -51,6 +60,10 @@ export interface AcpToolCallStreamExt extends AcpUpdate {
   readonly toolCallId: string
   readonly status: string
   readonly content?: readonly AcpToolContentBlock[]
+  /** The call's real input, first present on the execution-start frame. */
+  readonly rawInput?: unknown
+  /** The tool's raw structured output, present once the call settles. */
+  readonly rawOutput?: unknown
 }
 
 /** One option the agent offers for a `session/request_permission`. */
