@@ -79,6 +79,14 @@ type Phase =
   }
   | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
+/**
+ * The running phase. Its `turn`/`step` are the position of the step currently
+ * open: rotating a step mutates them in place, so every holder of the phase
+ * (the turn loop's fail-safe close, `agent/error` reporting) sees the step that
+ * is actually open rather than the one the query was started under.
+ */
+type RunningPhase = Extract<Phase, { kind: 'running' }>
+
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
 type PreparedStep =
@@ -116,6 +124,19 @@ export class ClaudeCodeAgent implements Agent {
 
   /** Agent-lifecycle-local counter naming each streamed attempt. */
   private streamAttempts = 0
+
+  /**
+   * Tool results logged into the currently open step. A result means the
+   * segment that requested the call is finished, so the next assistant content
+   * opens the next step (see {@link beginSegment}).
+   */
+  private stepSettledTools = 0
+
+  /**
+   * Whether the current query has rotated into a second step. The query-total
+   * usage record is only meaningful while one step holds the whole query.
+   */
+  private rotated = false
 
   constructor(
     private loopCtx: Context,
@@ -409,7 +430,10 @@ export class ClaudeCodeAgent implements Agent {
           const stepEnd = await this.step()
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
-          this.session.append('step/end', { turn, step })
+          // The driver rotates steps as the query's segments complete, so
+          // `phase.step` — not the step this iteration opened — is the one still
+          // open here.
+          this.session.append('step/end', { turn, step: phase.step })
         }
         signal.throwIfAborted()
         if (turnEnds && this.inbox.nextStep.length === 0) {
@@ -446,6 +470,25 @@ export class ClaudeCodeAgent implements Agent {
     return true
   }
 
+  /**
+   * Rotate to the next step when the segment that ran a tool has finished, so
+   * each assistant segment lands in its own step.
+   *
+   * Called as new assistant content begins. A step holding a settled tool
+   * result means the previous segment is complete, and the content about to be
+   * written belongs to the next one. Rotating here (rather than when a call is
+   * announced) keeps calls announced together — one model turn — in one step.
+   * @param phase - the running phase carrying the open step's position.
+   */
+  private beginSegment(phase: RunningPhase): void {
+    if (this.stepSettledTools === 0) return
+    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    phase.step += 1
+    this.session.append('step/start', { turn: phase.turn, step: phase.step })
+    this.stepSettledTools = 0
+    this.rotated = true
+  }
+
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
     return this.config.model ?? NATIVE_MODEL_LABEL
@@ -470,8 +513,11 @@ export class ClaudeCodeAgent implements Agent {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
-    const { turn, step, abort: { signal } } = this.phase
+    const phase = this.phase
+    const { abort: { signal } } = phase
     signal.throwIfAborted()
+    this.stepSettledTools = 0
+    this.rotated = false
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -522,15 +568,15 @@ export class ClaudeCodeAgent implements Agent {
           live = new DriverAssistantStream(
             this.id,
             ++this.streamAttempts,
-            turn,
-            step,
+            phase.turn,
+            phase.step,
             frame => this.dispatch.emit('agent/assistant-stream', { frame }),
           )
           live.start()
         }
         return live
       }
-      /** Per-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
+          /** Per-block-index tool identity, seeded by `mapStreamEvent` at a tool `content_block_start`. */
       const toolCalls = new Map<number, StreamToolCall>()
       /** Accumulated reasoning per block index, for the durable-message fallback below. */
       const reasoningByIndex = new Map<number, string>()
@@ -593,6 +639,8 @@ export class ClaudeCodeAgent implements Agent {
               content = [...synthesized, ...content]
             }
             if (content.length > 0) {
+              // This message begins the next assistant segment.
+              this.beginSegment(phase)
               // The message just appended is authoritative for its thinking:
               // drop the chunk accumulation so a later message cannot
               // synthesize a duplicate.
@@ -603,8 +651,8 @@ export class ClaudeCodeAgent implements Agent {
               pendingUsage = undefined
               const attempt = live
               const data = {
-                turn,
-                step,
+                turn: phase.turn,
+                step: phase.step,
                 message: createAssistantMessage({
                   content,
                   source: { provider: PROVIDER, model: mapped.model },
@@ -622,14 +670,15 @@ export class ClaudeCodeAgent implements Agent {
             }
             for (const call of mapped.toolCalls) {
               this.session.append('tool/call', {
-                turn, step, callId: call.callId, name: call.name, arguments: call.arguments,
+                turn: phase.turn, step: phase.step, callId: call.callId, name: call.name, arguments: call.arguments,
               })
             }
             break
           }
           case 'user': {
             for (const result of mapToolResults(message.message)) {
-              this.session.append('tool/result', { turn, step, message: result }, { surfaceOp: 'append' })
+              this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: result }, { surfaceOp: 'append' })
+              this.stepSettledTools += 1
             }
             break
           }
@@ -642,10 +691,12 @@ export class ClaudeCodeAgent implements Agent {
                 .sort((a, b) => a[0] - b[0])
                 .map(([, text]) => ({ type: 'reasoning' as const, text }))
               reasoningByIndex.clear()
+              // Trailing thinking is its own segment when a tool already ran.
+              this.beginSegment(phase)
               const attempt = live
               const data = {
-                turn,
-                step,
+                turn: phase.turn,
+                step: phase.step,
                 message: createAssistantMessage({
                   content: trailing,
                   source: { provider: PROVIDER, model: NATIVE_MODEL_LABEL },
@@ -661,19 +712,21 @@ export class ClaudeCodeAgent implements Agent {
               }
               pendingUsage = undefined
             }
-            // One dsh step is a whole agentic query — the model may make many
-            // requests inside it — so the step's token total is the query's,
-            // not any single message's. Per-step projections replace a step's
-            // earlier samples with its latest, so the total is appended as a
-            // usage-only attempt record: it carries no content (and so renders
-            // nothing) and leaves every message's own usage untouched.
+            // A query that stayed in ONE step has that step's token total equal
+            // to the query's, and per-step projections replace a step's earlier
+            // samples with its latest — so the query total is appended as a
+            // usage-only attempt record (it carries no content, and so renders
+            // nothing, leaving every message's own usage untouched). Once the
+            // query has rotated into several steps no single step owns the
+            // total, and each segment's message already carries its own
+            // request usage, so the record is skipped.
             const stepUsage = meaningfulUsage(mapUsage(message.usage))
-            if (stepUsage !== undefined) {
+            if (stepUsage !== undefined && !this.rotated) {
               const accumulator = new AssistantStreamAccumulator()
               accumulator.push({ time: Date.now(), chunk: { type: 'usage', usage: stepUsage } })
               this.session.append('assistant/attempt', {
-                turn,
-                step,
+                turn: phase.turn,
+                step: phase.step,
                 stream: [...accumulator.snapshot()],
               })
             }
