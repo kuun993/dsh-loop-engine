@@ -64,6 +64,31 @@ beforeEach(() => {
 
 const USAGE = { input: 12, output: 7, cacheRead: 5, cacheWrite: 0 }
 
+/** Step-scoped event types, in the order a reader sees them. */
+const STEP_SCOPED = new Set(['step/start', 'assistant/message', 'tool/call', 'tool/result', 'step/end'])
+
+/**
+ * The log's step-scoped events as ordered `type@step` tags, so a test can read
+ * the step structure directly: which step each message and tool event landed in.
+ */
+function stepStructure(session: Session): string[] {
+  return session.snapshotEvents()
+    .filter(event => STEP_SCOPED.has(event.type))
+    .map(event => `${event.type}@${(event.data as { step: number }).step}`)
+}
+
+/** One assistant segment that requests a tool: text, toolcall, message_end, execution. */
+function segment(text: string, id: string, name: string, args: unknown, output: string): Record<string, unknown>[] {
+  return [
+    { type: 'message_start', message: assistantMessage(text) },
+    messageDelta({ type: 'text_delta', contentIndex: 0, delta: text }),
+    messageDelta({ type: 'toolcall_end', contentIndex: 1, toolCall: { id, name, arguments: args } }),
+    { type: 'message_end', message: assistantMessage(text) },
+    { type: 'tool_execution_start', toolCallId: id, toolName: name, args },
+    { type: 'tool_execution_end', toolCallId: id, toolName: name, result: { content: [{ type: 'text', text: output }] }, isError: false },
+  ]
+}
+
 function assistantMessage(text: string, usage = USAGE): PiMessage {
   return { role: 'assistant', content: [{ type: 'text', text }], usage }
 }
@@ -248,6 +273,79 @@ describe('PiAgent turn mapping', () => {
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'split thinking' },
         { type: 'text', text: 'answer' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('gives each assistant segment its own step, with the message ahead of its tool call', async () => {
+    // One pi prompt runs the model's whole agentic loop. The chat view keys an
+    // assistant node by `${turn}:${step}` and replaces its blocks on each
+    // message, so N messages in one step render only the last — hence one step
+    // per segment. Within a segment the assistant message must also be logged
+    // BEFORE the tool/call it requested: the driver used to append tool/call at
+    // `toolcall_end`, ahead of the `message_end` that flushes the message, so
+    // the row sorted after its own tool and the text read as an afterthought.
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'agent_start' },
+        { type: 'turn_start' },
+        ...segment('reading', 'call-1', 'bash', { command: 'ls' }, 'one'),
+        ...segment('listing', 'call-2', 'read', { path: 'x' }, 'two'),
+        { type: 'message_start', message: assistantMessage('all done') },
+        messageDelta({ type: 'text_delta', contentIndex: 0, delta: 'all done' }),
+        { type: 'message_end', message: assistantMessage('all done') },
+        turnEnd(assistantMessage('all done')),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('segments-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1', 'tool/result@1', 'step/end@1',
+        'step/start@2', 'assistant/message@2', 'tool/call@2', 'tool/result@2', 'step/end@2',
+        'step/start@3', 'assistant/message@3', 'step/end@3',
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('logs a synthesized tool-call owner ahead of the call it owns', async () => {
+    // A call executed without a streamed assistant message still gets a
+    // synthesised owner message, and that message must precede the tool/call.
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'agent_start' },
+        { type: 'turn_start' },
+        { type: 'tool_execution_start', toolCallId: 'call-9', toolName: 'bash', args: { command: 'pwd' } },
+        { type: 'tool_execution_end', toolCallId: 'call-9', toolName: 'bash', result: { content: [{ type: 'text', text: '/tmp' }] }, isError: false },
+        { type: 'message_start', message: assistantMessage('done') },
+        messageDelta({ type: 'text_delta', contentIndex: 0, delta: 'done' }),
+        { type: 'message_end', message: assistantMessage('done') },
+        turnEnd(assistantMessage('done')),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('orphan-owner-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(stepStructure(agent.session)).toEqual([
+        'step/start@1',
+        'assistant/message@1', 'tool/call@1', 'tool/result@1',
+        'step/end@1',
+        // The reply after the tool work is the next segment, so it opens a step.
+        'step/start@2', 'assistant/message@2', 'step/end@2',
       ])
     } finally {
       await ctx.fiber.dispose()
