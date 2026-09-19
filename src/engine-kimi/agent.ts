@@ -512,6 +512,7 @@ export class KimiAgent implements Agent {
     // step starts with a clean assistant-blocks/tool accumulator.
     this.blocks = []
     this.pendingCalls = new Map()
+    this.segmentCalls = []
     this.toolContent = new Map()
     this.producedOutput = false
     this.stepSettledTools = 0
@@ -552,12 +553,15 @@ export class KimiAgent implements Agent {
         signal.removeEventListener('abort', cancel)
       }
 
-      // Close the final segment: trailing blocks, then any call the engine
-      // announced without ever supplying its input, so the transcript keeps
-      // every request the model made.
-      this.flushAssistant(phase)
-      for (const [callId, call] of this.pendingCalls) this.logToolCall(phase, callId, call.name, '{}')
+      // Close the final segment: trailing blocks plus every call the engine
+      // announced without ever supplying its input, folded into the segment's
+      // single assistant message so the transcript keeps every request the
+      // model made.
+      for (const [callId, call] of this.pendingCalls) {
+        this.segmentCalls.push({ callId, name: call.name, arguments: '{}' })
+      }
       this.pendingCalls.clear()
+      this.flushSegment(phase)
       if (!this.producedOutput) {
         throw new LlmError(
           `agent "${this.id}": kimi query produced no assistant output`,
@@ -590,6 +594,15 @@ export class KimiAgent implements Agent {
    * opens the next step (see {@link beginSegment}).
    */
   private stepSettledTools = 0
+  /**
+   * Tool calls the current segment has already received input for, awaiting the
+   * segment's single assistant message. A model turn that announces several
+   * calls before any result must land them all in ONE message — the chat node
+   * keys by `${turn}:${step}` and replaces blocks on every message, so a second
+   * message would overwrite the first one's reasoning/text (and tool-call head).
+   * The list is flushed once, when the segment closes (its first settled result).
+   */
+  private segmentCalls: { callId: string; name: string; arguments: string }[] = []
   /** Latest content snapshot per logged tool call (see {@link applyUpdate}). */
   private toolContent = new Map<string, string>()
   /** The live attempt framing the assistant message being assembled right now. */
@@ -681,13 +694,24 @@ export class KimiAgent implements Agent {
         // still reaches the transcript.
         if (args === undefined && !settled) return
         this.pendingCalls.delete(callId)
-        this.logToolCall(phase, callId, pending.name, args ?? '{}', pending.content)
+        // A call whose input arrived after a prior result is the next segment,
+        // so rotate the step before accumulating it (see {@link beginSegment}).
+        this.beginSegment(phase)
+        this.segmentCalls.push({ callId, name: pending.name, arguments: args ?? '{}' })
+        this.toolContent.set(callId, pending.content ?? '')
       } else if (!this.toolContent.has(callId)) {
         return
       } else if (snapshot !== undefined) {
         this.toolContent.set(callId, snapshot)
       }
       if (settled) {
+        // The first settled result closes the segment: flush its ONE assistant
+        // message carrying every accumulated tool-call block, then each
+        // `tool/call`, so the durable order stays assistant/message → tool/call
+        // → tool/result. That order is load-bearing for result pairing, and a
+        // single message per step is what the chat view renders (it keys an
+        // assistant node by `${turn}:${step}` and replaces blocks per message).
+        this.flushSegment(phase)
         // The branch guards above guarantee the entry exists, so a bare get() is
         // defined and needs no `?? ''` fallback.
         const message = toolResult(callId, this.toolContent.get(callId)!, isToolErrorStatus(status))
@@ -717,22 +741,22 @@ export class KimiAgent implements Agent {
   }
 
   /**
-   * Log one tool call: first the assistant message that requested it — closing
-   * the open segment and carrying the call's `tool-call` block — then the keyed
-   * `tool/call`. The order is load-bearing: the assistant message must precede
-   * the call it owns, or the transcript pairs the call's result with the wrong
-   * assistant turn.
-   * @param phase - the open step the call belongs to.
-   * @param callId - the call's id as the wire carries it.
-   * @param name - the call's name (the ACP `title`).
-   * @param args - the call's JSON arguments string.
-   * @param content - the latest content snapshot already observed for the call,
-   *   so a frame that reported output before input keeps its result text.
+   * Flush the open segment's single assistant message and every `tool/call` it
+   * accumulated, in the load-bearing order assistant/message → tool/call. One
+   * segment produces exactly ONE message even when the model announced several
+   * calls before any result, because the chat view keys an assistant node by
+   * `${turn}:${step}` and replaces its blocks on every message — a second
+   * message in the same step would overwrite the first one's reasoning/text and
+   * leave only the last bare tool-call head visible.
+   * @param phase - the open step the segment belongs to.
    */
-  private logToolCall(phase: RunningPhase, callId: string, name: string, args: string, content = ''): void {
-    this.flushAssistant(phase, [{ callId, name, arguments: args }])
-    this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(callId), name, arguments: args })
-    this.toolContent.set(callId, content)
+  private flushSegment(phase: RunningPhase): void {
+    const calls = this.segmentCalls
+    this.segmentCalls = []
+    this.flushAssistant(phase, calls)
+    for (const call of calls) {
+      this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments })
+    }
   }
 
   /**

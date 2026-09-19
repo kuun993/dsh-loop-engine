@@ -304,6 +304,33 @@ describe('KimiAgent turn mapping (streamed)', () => {
     }
   })
 
+  it('settles a call that carried no input and no content at all', async () => {
+    // A call can settle on the single terminal frame with neither rawInput nor
+    // a content card: the stored content snapshot is then empty, so the result
+    // text falls back to `(no content)`.
+    mock.updates.mockReturnValue([
+      toolCall('0:call_bare', 'Bash'),
+      { sessionUpdate: 'tool_call_update', toolCallId: '0:call_bare', status: 'completed' },
+    ])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('tool-bare'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events
+        .filter(event => event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'tool/result')
+        .map(event => event.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
+      expect(events.find(event => event.type === 'tool/call')).toMatchObject({ data: { arguments: '{}' } })
+      expect(events.find(event => event.type === 'tool/result')).toMatchObject({
+        data: { message: { content: [{ content: [{ type: 'text', text: '(no content)' }] }] } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('interleaves each tool call with the assistant message that requested it', async () => {
     // One ACP prompt runs kimi's whole internal loop, so a single dsh step
     // routinely holds several tool calls. Each must be individually bracketed
@@ -376,8 +403,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
 
       expect(stepStructure(agent.session)).toEqual([
         'step/start@1',
-        'assistant/message@1', 'tool/call@1',
-        'assistant/message@1', 'tool/call@1',
+        'assistant/message@1', 'tool/call@1', 'tool/call@1',
         'tool/result@1', 'tool/result@1',
         'step/end@1',
       ])
@@ -700,7 +726,12 @@ describe('KimiAgent tool and chunk edges', () => {
       const events = agent.session.snapshotEvents()
       expect(events
         .filter(event => event.type === 'assistant/message' || event.type === 'tool/call')
-        .map(event => event.type)).toEqual(['assistant/message', 'assistant/message', 'tool/call'])
+        .map(event => event.type)).toEqual(['assistant/message', 'tool/call'])
+      // The orphan call folds into the trailing text's single message, so the
+      // chat view still renders the reasoning/text beside its tool row.
+      expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
+        data: { message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool-call', id: '0:call_orphan', name: 'Bash', arguments: '{}' }] } },
+      })
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({
         data: { callId: '0:call_orphan', name: 'Bash', arguments: '{}' },
       })
