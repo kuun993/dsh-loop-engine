@@ -97,15 +97,15 @@ pnpm install
 
 ## 版本兼容
 
-`dsh-loop-engine` 与它针对的 harness **同版本对齐**:版本号即 harness 版本加插件发布序号(`0.1.5-rc1` 针对 harness `0.1.5-rc.1`),它消费的每个 harness 包都在 `peerDependencies` 里精确钉住。两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
+`dsh-loop-engine` 与它针对的 harness **同版本对齐**:版本号即 harness 版本加插件发布序号(`0.1.5-rc1`、`0.1.5-rc2` 针对 harness `0.1.5-rc.1`),它消费的每个 harness 包都在 `peerDependencies` 里精确钉住。两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
 
 | dsh-loop-engine | 需要 harness |
 |---|---|
-| 0.1.5-rc1 | **0.1.5-rc.1** |
+| 0.1.5-rc1、0.1.5-rc2 | **0.1.5-rc.1** |
 | 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 及更早 | 0.1.1-rc.2 |
 
-- **0.1.5-rc1 需要 harness 0.1.5-rc.1。** 它使用 0.1.5 的 assistant-stream 契约(`assistant/message` 内嵌精确计时的 `stream`,并禁止 `sourceEventSeqs`)、由 driver 自己实现的 `Inbox` 接口、双参数 `AgentSetup`,以及 `SessionPersistence.create` / `open` 句柄 seam。
+- **0.1.5-rcN 系列需要 harness 0.1.5-rc.1。** 它们使用 0.1.5 的 assistant-stream 契约(`assistant/message` 内嵌精确计时的 `stream`,并禁止 `sourceEventSeqs`)、由 driver 自己实现的 `Inbox` 接口、双参数 `AgentSetup`,以及 `SessionPersistence.create` / `open` 句柄 seam。
 - `1.0.0-rc15` 及以前的版本沿用插件自己的版本序列,针对 harness `0.1.2-rc.1`,与 harness `0.1.5-rc.1` 不兼容。
 - 要在更老的 harness 上使用本插件,请安装与之匹配的版本(例如 harness 0.1.2-rc.1 用 `npm i dsh-loop-engine@1.0.0-rc15`)。
 - 每个 tag 的 GitHub Release 正文会写明它针对的 harness 版本。
@@ -116,10 +116,15 @@ pnpm install
 2. 要切回默认,选 **In-process** 再重启即可。
 3. 卸载插件:`dsh plugin --profile web remove dsh-loop-engine`,然后重启 `dsh web`。
 
+### 托管引擎接管什么
+
+选中托管引擎后,它接管该会话的命令与技能面:插件禁用 dsh 自己的 `/goal`,并把新会话指向一个受管理的 `loop-engine` agent 预设——它是 `standard` 的副本,去掉了外部引擎无法履行的 dsh 原生 `/compact`、`/plan`、goal 工具与 skill 行——于是斜杠菜单只显示引擎桥接过来的命令与它自己的技能目录。与引擎无关的 dsh 命令(`/export`、`/feedback`、`/permission`)照常可用、保留在菜单里。切回 `in-process` 会恢复之前的预设默认值;已经在跑的会话始终保留它创建时的预设。
+
 ### 引擎说明
 
-- Codex 驱动运行 `codex app-server`,没有交互式工具审批——权限来自会话的 `sandboxMode` + `approvalPolicy`。
-- Pi 驱动运行 `pi --mode rpc`;Pi 没有权限系统,所以整个子进程经 dsh subprocess 服务做沙箱化(默认 `read-only`)。
+- Claude Code 驱动每步跑一次 SDK query;它的斜杠命令桥接进 web 菜单(内置命令加上用户级 `~/.claude/commands/`),再转发给引擎由它原生展开。项目级 `.claude/commands/` 留在引擎侧,直接手敲同样可用。
+- Codex 驱动运行 `codex app-server`;线程以会话的 `sandboxMode` + `approvalPolicy` 姿态启动,模型运行时的工具审批请求(command、file-change、permissions)经 dsh 审批 seam 应答——用户提问走 user-questions seam,MCP elicitation 一律拒绝,seam 缺席时均失败关闭。其 `AGENTS.md` 指令文件经 dsh 技能注入接缝暴露:从会话 cwd 逐级到 git 根,外加 `~/.codex/AGENTS.md`。
+- Pi 驱动运行 `pi --mode rpc`;Pi 没有权限系统,所以整个子进程经 dsh subprocess 服务做沙箱化(默认 `read-only`)。它的上下文文件(`AGENTS.md`/`CLAUDE.md`,优先 `AGENTS.override.md`,外加 pi 配置目录下的用户级文件)与 `skills/` 目录(`~/.pi/agent/skills/` 和 `.pi/skills/`)经 dsh 技能注入接缝暴露。
 - Kimi Code 驱动运行一个常驻的 `kimi acp` 子进程(Agent Client Protocol over stdio),每步一次无状态的 `session/new` + `session/prompt`;durable 会话日志是唯一模型上下文。它把助手文本(`agent_message_chunk`)与**思考**(`agent_thought_chunk`)**增量**写入日志,并把工具调用/流(`tool_call` / `tool_call_update`)映射为 `tool/call` + `tool/result`。ACP 通过 `session/request_permission` 暴露工具审批,驱动根据会话的 dsh 审批旋钮应答(ask 策略拒绝,失败关闭)。子进程经 dsh subprocess seam 拉起——唯一权限边界(默认只读沙箱)。其项目 `AGENTS.md` 链(cwd→git 根)与 `.kimi-code/skills/` 目录(用户与项目)通过 dsh 技能注入接口暴露,其斜杠命令也已桥接(内置命令把原始 `/name` 行转发回引擎展开)。prompt 是 ACP 请求体而非 argv 位置参数,因此**不存在命令行长度上限**。注意 Kimi 剩余的斜杠命令面是纯 TUI(`/login`、`/provider`、`/settings`、`/sessions`…),这些不桥接(ACP prompt 面不扩展它们);`skill:` 命令由技能接口与 kimi 自身的 shorthand 承载。
 
 ## License
