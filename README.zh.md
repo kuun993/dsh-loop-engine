@@ -121,6 +121,8 @@ pnpm install
 
 选中托管引擎后,它接管该会话的命令与技能面:插件禁用 dsh 自己的 `/goal`,并把新会话指向一个受管理的 `loop-engine` agent 预设——它是 `standard` 的副本,去掉了外部引擎无法履行的 dsh 原生 `/compact`、`/plan`、goal 工具与 skill 行——于是斜杠菜单只显示引擎桥接过来的命令与它自己的技能目录。与引擎无关的 dsh 命令(`/export`、`/feedback`、`/permission`)照常可用、保留在菜单里。切回 `in-process` 会恢复之前的预设默认值;已经在跑的会话始终保留它创建时的预设。
 
+同一层投影也覆盖工具面:托管引擎的调用在 durable `tool/call` 事件里被投影到 dsh 的工具词汇,于是 Web GUI 用原生行渲染它们——Claude 的 `Write`/`Edit`、Codex 的 `command_execution`、Kimi 的 `Bash` 会变成 dsh 的 `write`/`edit`/`bash`,同时喂给该回合成品区的「Files changed」行与正文行内文件链接;Claude 的 `TodoWrite` 还会驱动 dsh 的待办面板。引擎自己的 assistant 消息保留原拼写,所以下一步的 prompt 不受影响;没有无损 dsh 等价物的调用——Codex 的多文件 `apply_patch`——保持通用行,而不是误渲染。
+
 ### 引擎说明
 
 - Claude Code 驱动每步跑一次 SDK query;它的斜杠命令桥接进 web 菜单(内置命令加上用户级 `~/.claude/commands/`),再转发给引擎由它原生展开。项目级 `.claude/commands/` 留在引擎侧,直接手敲同样可用。

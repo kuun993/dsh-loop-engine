@@ -639,7 +639,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
       const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({
-        data: { callId: 'toolu_999', name: 'Read', arguments: '{"file_path":"x.txt"}' },
+        data: { callId: 'toolu_999', name: 'read', arguments: '{"file_path":"x.txt"}' },
       })
       const result = events.find(event => event.type === 'tool/result')
       expect(result).toMatchObject({
@@ -654,6 +654,85 @@ describe('ClaudeCodeAgent turn mapping', () => {
           },
         },
         surfaceOp: 'append',
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('projects a plan tool call to todo_write and appends its list as todo/write', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        {
+          type: 'assistant',
+          parent_tool_use_id: null,
+          uuid: 'u-todo',
+          session_id: 's-todo',
+          message: {
+            id: 'msg-todo',
+            container: null,
+            context_management: null,
+            role: 'assistant',
+            type: 'message',
+            content: [{
+              type: 'tool_use',
+              id: 'toolu_todo',
+              name: 'TodoWrite',
+              input: {
+                todos: [
+                  { content: 'first', status: 'pending', activeForm: 'First' },
+                  { content: 'second', status: 'completed' },
+                ],
+              },
+            }],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            stop_details: null,
+            model: 'claude-sonnet-4-5',
+            usage: {
+              cache_creation: null,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+              inference_geo: null,
+              input_tokens: 9,
+              iterations: null,
+              output_tokens: 4,
+              server_tool_use: null,
+            },
+          },
+        } as unknown as SDKMessage,
+        {
+          type: 'user',
+          parent_tool_use_id: 'toolu_todo',
+          uuid: 'u-todo-tr',
+          session_id: 's-todo-tr',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_todo', content: 'ok', is_error: false }],
+          },
+        } as unknown as SDKMessage,
+        assistantText('planned'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('todo-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'plan it' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events.find(event => event.type === 'tool/call')).toMatchObject({
+        data: { callId: 'toolu_todo', name: 'todo_write' },
+      })
+      expect(events.find(event => event.type === 'todo/write')).toMatchObject({
+        data: { todos: [{ content: 'first', status: 'pending' }, { content: 'second', status: 'completed' }] },
+      })
+      // The engine's own assistant block keeps its spelling: only the tool/call
+      // event is projected onto dsh's vocabulary.
+      expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
+        data: { message: { content: [{ type: 'tool-call', id: 'toolu_todo', name: 'TodoWrite' }] } },
       })
     } finally {
       await ctx.fiber.dispose()

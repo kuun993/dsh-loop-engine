@@ -21,6 +21,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 | `hosted-loop-factory.ts` | 把上面的原语编排成 create/resume 的 prepare→setup→publish **事务**（四个引擎共用一份；引擎差异只剩 `buildAgent` 一个抽象方法） |
 | `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
 | `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
+| `hosted-tool-vocabulary.ts` | 把托管引擎的工具名与参数归一化到 dsh 词汇（只改 `tool/call` 事件），并抽出计划工具的 `todo/write` 列表 |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
 | `agents-md-skill-provider.ts` | "逐目录指令文件 + 技能目录"这套发现的**算法**，由各引擎用一份数据 spec 参数化 |
@@ -263,6 +264,46 @@ kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `Comm
 
 所有 provider 与命令都在 `src/index.ts` 按引擎挂载：claude 命令 + provider（`src/index.ts:536-557`）、codex provider（`:567-569`）、pi provider（`:580-582`）、kimi 命令 + provider（`:593-614`）。宿主 `commands` / `skills` 服务都以最小形状结构取（`ctx.get`），缺失时静默跳过。
 
+## 7.5 hosted-tool-vocabulary.ts：工具名与计划的归一化
+
+### 解决什么问题
+
+Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definition）、产出文件行与正文行内文件链接（`@deepseek-ai/dsh-client-ui-deliverables` 的 `mutationPath`）、轨迹视图，都只认 dsh 自己的工具名与参数形状；todo 面板则只由 `todo/write` 事件驱动。托管引擎的工具是另一套词汇：Claude 的 `Write`/`Edit`/`Read`/`Bash`，Codex 的 `apply_patch`/`command_execution`，Kimi 用人类可读的 `title` 当名字，Pi 用 `path` 而非 `file_path`。不归一化时这些界面全部落空——文件改动行不出现、diff 行退化成通用卡片、dsh 待办面板永远为空。
+
+### 契约
+
+- `normalizeHostedToolCall(engine, name, argumentsJson)`（`src/driver-core/hosted-tool-vocabulary.ts`）返回 `{ name, arguments }`，只做**无损**投影：
+  - claude-code：`Write→write`、`Edit→edit`、`Read→read`、`Bash→bash`、`TodoWrite→todo_write`（参数已是 dsh 形状，逐字透传）；
+  - codex：`command_execution→bash`；`apply_patch` 是多文件补丁，没有单文件 dsh 等价物，**刻意保留原名**；
+  - kimi：`title` 级映射 `Bash/Read/Write/Edit → bash/read/write/edit`；
+  - pi：名字本就是 dsh 拼写，只重塑参数——`path→file_path`（保留 `offset`/`limit` 等未知字段），单条 `edits[0]` 的 `{oldText,newText}` 摊平成 `old_string/new_string`；多条 edit 无单条等价物，保留原参数。
+- 归一化**只落在 driver 新 append 的 `tool/call` 事件上**，durable `assistant/message` 的 tool-call block 保持引擎原拼写。会话按 callId 配对（`../../../deepseek-harness/packages/core/session/src/invariant.ts:122-140`、`repair.ts`），所以两种拼写共存合法；下一次查询的 prompt（`prompt.ts` 从 assistant 消息序列化）因此仍是引擎自己的词汇，不会让模型看到陌生的工具名。
+- 参数 JSON 解析失败、或不是对象时，名字照常投影、参数原样保留——宁可退化成通用行，也不误渲染。
+- `planTodosOfHostedTool(engine, name, argumentsJson)` 读出计划工具的整表快照，形状对齐 `todo/write` 的 `TodoItem`。目前只有 Claude 的 `TodoWrite` 有明确映射（其 `status` 枚举与 dsh 完全相同）；未知状态与畸形条目被丢弃而不是抛错。
+- 因为插件只是 append 这个事件、从不 import `@deepseek-ai/dsh-tool-todo` 包，`todo/write` 的 `SessionEventMap` 成员在本模块用 `declare module '@deepseek-ai/dsh-session/types'` 镜像了一份；profile 总会装载真实包，两份同形声明合并为同一接口。
+
+### 哪些引擎怎么用
+
+四个 agent 在自己的 `tool/call` append 处调用归一化：
+
+| 引擎 | 调用点 |
+|---|---|
+| claude | `src/engine-claude/agent.ts` 的 `mapped.toolCalls` 循环（同时为 `TodoWrite` append `todo/write`） |
+| codex | `src/engine-codex/agent.ts` 的 `commandExecution`/`fileChange`/`mcpToolCall` 三个 `item-completed` 分支 |
+| pi | `src/engine-pi/agent.ts` 的 `callsToLog` 循环 |
+| kimi | `src/engine-kimi/agent.ts` 的 `flushSegment` |
+
+### 未接入的部分（已知缺口）
+
+- **Codex `apply_patch`** 不产生产出文件行（多文件补丁无 dsh 单文件等价物）。
+- **托管引擎的压缩（compaction）** 没有映射到 dsh 的 `compaction/*` 事件：pi 已发 `compaction_start`/`compaction_end` 但被 `case` 直接忽略（`src/engine-pi/agent.ts`），claude/kimi 也没有对应处理，所以转录里看不到检查点。这需要新增 `@deepseek-ai/dsh-compaction` 的事件类型并遵守其 start/end 配对不变量，留待后续。
+- **模型选择**：claude/codex/kimi 不消费 `session.selectModel`，UI 选择器空转；这是主仓改动（`docs/proposals/model-selection-disable.md`）。
+- **显式交付（`present`）**：托管引擎无法调用 dsh 工具，故不会产生 `deliverables/presented`。
+
+### 改它会波及谁
+
+改映射表会同时改变四个引擎的 UI 呈现与产出文件行，但不改变引擎侧 prompt 与会话配对。测试上：`tests/driver-core/hosted-tool-vocabulary.spec.ts` 覆盖全部投影分支；每个引擎的 `tests/engine-*/agent.spec.ts` 断言归一化后的 `tool/call` 事件（注意：assistant 消息内容断言仍是引擎原拼写）。
+
 ## 8. 改动影响矩阵
 
 | 改动点 | 直接受影响 | 必须跑的测试 |
@@ -274,6 +315,7 @@ kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `Comm
 | `assistant-stream.ts` 帧与分段压缩 | 四条流式路径的 live 帧与内嵌 stream | `tests/driver-core/assistant-stream.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
 | `agents-md-skill-provider.ts` 算法/候选构造 | codex、pi、kimi 三个 provider 的全部发现行为 | 三个 `tests/engine-*/skills.spec.ts`（**缺一不可**：分支散布在三份 spec 里，见 §9） |
+| `hosted-tool-vocabulary.ts` 映射/重塑/计划 | 四个引擎的 UI 工具行与产出文件呈现；claude 的待办面板 | `tests/driver-core/hosted-tool-vocabulary.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
 | `skills.ts` `parseSkillFile` | claude provider + 共享 provider（codex/pi/kimi）的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |
@@ -281,7 +323,7 @@ kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `Comm
 
 ## 9. 测试覆盖要点
 
-- **driver-core 的直接 spec** 有三个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。
+- **driver-core 的直接 spec** 有四个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。`tests/driver-core/hosted-tool-vocabulary.spec.ts`：四个引擎的改名表、Pi 的参数重塑（含保留 `offset`/`limit`、多条 edit 与非对象条目回退）、Claude 计划抽取（含未知状态与畸形条目丢弃），以及非法 JSON 的透传。
 - `prompt.ts` 由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；没有独立的 prompt spec，新增序列化分支时应在这里补用例。
 - `permission-knobs.ts` 没有独立 spec，靠四个 permission spec 的行为断言间接覆盖；改折叠逻辑时四个 spec 都要看。
 - `ownership.ts` 由 kimi/pi 的 loop spec 与 claude/codex 的 index spec 的卸载/竞速场景覆盖，源码里大量 `v8 ignore` 注释标出了理论上不可达的兜底分支——改动时不要用"删分支"来凑覆盖率，这些注释本身就是设计文档。

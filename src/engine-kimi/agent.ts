@@ -33,6 +33,7 @@ import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import type { KimiSpawnCapability, KimiSpawnSpec } from './process.ts'
 import { kimiAcpArgv } from './process.ts'
 import { AcpClient } from './acp/client.ts'
@@ -755,7 +756,8 @@ export class KimiAgent implements Agent {
     this.segmentCalls = []
     this.flushAssistant(phase, calls)
     for (const call of calls) {
-      this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments })
+      const normalized = normalizeHostedToolCall('kimi', call.name, call.arguments)
+      this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: normalized.name, arguments: normalized.arguments })
     }
   }
 

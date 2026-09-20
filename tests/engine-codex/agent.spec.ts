@@ -1045,7 +1045,7 @@ describe('CodexAgent turn mapping', () => {
       const events = agent.session.snapshotEvents()
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({
-        data: { callId: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+        data: { callId: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' },
       })
       const result = events.find(event => event.type === 'tool/result')
       expect(result).toMatchObject({
@@ -1082,7 +1082,7 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
-      expect(call).toMatchObject({ data: { callId: 'cmd-1', name: 'command_execution' } })
+      expect(call).toMatchObject({ data: { callId: 'cmd-1', name: 'bash' } })
       const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]).toMatchObject({ isError: true })
     } finally {

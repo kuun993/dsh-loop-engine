@@ -173,6 +173,16 @@ skill catalog. Engine-agnostic dsh commands (`/export`, `/feedback`,
 the previous preset default; already-running sessions always keep the preset
 they were created with.
 
+The same takeover covers the tool surface: a hosted engine's calls are projected
+onto dsh's tool vocabulary in the durable `tool/call` event, so the Web GUI
+renders them with the native rows — a Claude `Write`/`Edit`, a Codex
+`command_execution`, or a Kimi `Bash` becomes dsh's `write`/`edit`/`bash`, which
+also feeds the finished turn's "Files changed" row and its inline file links.
+Claude's `TodoWrite` additionally drives dsh's todo panel. The engine's own
+assistant message keeps its spelling, so the next step's prompt is unaffected;
+a call with no lossless dsh equivalent — Codex's multi-file `apply_patch` —
+stays generic rather than mis-rendering.
+
 ### Engine notes
 
 - The Claude Code driver runs one SDK query per step; its slash commands are

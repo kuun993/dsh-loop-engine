@@ -448,7 +448,7 @@ describe('PiAgent turn mapping', () => {
       await agent.whenIdle()
 
       const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
-      expect(call).toMatchObject({ data: { callId: 'call-2', name: 'read', arguments: '{"path":"x"}' } })
+      expect(call).toMatchObject({ data: { callId: 'call-2', name: 'read', arguments: '{"file_path":"x"}' } })
       const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       expect(result?.data.message.content[0]).toMatchObject({ isError: true })
     } finally {

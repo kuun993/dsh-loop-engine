@@ -225,7 +225,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       await agent.whenIdle()
 
       const toolCall_ = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
-      expect(toolCall_).toMatchObject({ data: { callId: '0:call_1', name: 'Bash' } })
+      expect(toolCall_).toMatchObject({ data: { callId: '0:call_1', name: 'bash' } })
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       // Each update carries the call's whole content, so the settled one wins.
       expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'b' }] }] } } })
@@ -273,7 +273,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
         },
       })
       const call = events.find(event => event.type === 'tool/call')
-      expect(call).toMatchObject({ data: { callId: '0:call_1', name: 'Bash', arguments: '{"command":"ls"}' } })
+      expect(call).toMatchObject({ data: { callId: '0:call_1', name: 'bash', arguments: '{"command":"ls"}' } })
       expect(call!.seq).toBeGreaterThan(assistant!.seq)
     } finally {
       await ctx.fiber.dispose()
@@ -733,7 +733,7 @@ describe('KimiAgent tool and chunk edges', () => {
         data: { message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool-call', id: '0:call_orphan', name: 'Bash', arguments: '{}' }] } },
       })
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({
-        data: { callId: '0:call_orphan', name: 'Bash', arguments: '{}' },
+        data: { callId: '0:call_orphan', name: 'bash', arguments: '{}' },
       })
       // Nothing ran, so there is no result to pair it with.
       expect(events.some(event => event.type === 'tool/result')).toBe(false)

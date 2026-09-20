@@ -37,6 +37,7 @@ import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import {
   approvalReason,
   approvalToolName,
@@ -845,8 +846,9 @@ export class CodexAgent implements Agent {
                 const activity = mapCommandExecution(item as { id: string; command?: string; aggregatedOutput?: string | null; exitCode?: number | null; status?: string })
                 foldToolCall(activity.call)
                 flushHeld()
+                const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 this.session.append('tool/call', {
-                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
                 this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
                 this.stepSettledTools += 1
@@ -855,8 +857,9 @@ export class CodexAgent implements Agent {
                 const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
                 foldToolCall(activity.call)
                 flushHeld()
+                const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 this.session.append('tool/call', {
-                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
                 this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
                 this.stepSettledTools += 1
@@ -865,8 +868,9 @@ export class CodexAgent implements Agent {
                 const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
                 foldToolCall(activity.call)
                 flushHeld()
+                const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 this.session.append('tool/call', {
-                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: activity.call.name, arguments: activity.call.arguments,
+                  turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
                 this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
                 this.stepSettledTools += 1

@@ -44,6 +44,7 @@ import {
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
 import {
@@ -669,9 +670,19 @@ export class ClaudeCodeAgent implements Agent {
               }
             }
             for (const call of mapped.toolCalls) {
+              const normalized = normalizeHostedToolCall('claude-code', call.name, call.arguments)
               this.session.append('tool/call', {
-                turn: phase.turn, step: phase.step, callId: call.callId, name: call.name, arguments: call.arguments,
+                turn: phase.turn,
+                step: phase.step,
+                callId: call.callId,
+                name: normalized.name,
+                arguments: normalized.arguments,
               })
+              // `TodoWrite` is a plan, not a tool row: the dsh todo panel reads
+              // the `todo/write` event, which the in-process tool handler would
+              // have appended. The assistant message keeps the engine spelling.
+              const todos = planTodosOfHostedTool('claude-code', call.name, call.arguments)
+              if (todos !== undefined) this.session.append('todo/write', { todos: [...todos] })
             }
             break
           }
