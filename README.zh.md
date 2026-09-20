@@ -97,15 +97,16 @@ pnpm install
 
 ## 版本兼容
 
-`dsh-loop-engine` 与它针对的 harness **同版本对齐**:版本号即 harness 版本加插件发布序号(`0.1.5-rc1`、`0.1.5-rc2` 针对 harness `0.1.5-rc.1`),它消费的每个 harness 包都在 `peerDependencies` 里精确钉住。两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
+`dsh-loop-engine` 与它针对的 harness **同版本对齐**:版本号即 harness 版本加插件发布序号(`0.1.5-rc1`、`0.1.5-rc2` 针对 harness `0.1.5-rc.1`,`0.1.5-rc3` 针对 harness `0.1.5-rc.2`),它消费的每个 harness 包都在 `peerDependencies` 里精确钉住。两者必须匹配——不匹配会在启动或会话恢复时响亮地失败:
 
 | dsh-loop-engine | 需要 harness |
 |---|---|
-| 0.1.5-rc1、0.1.5-rc2 | **0.1.5-rc.1** |
+| 0.1.5-rc3 | **0.1.5-rc.2** |
+| 0.1.5-rc1、0.1.5-rc2 | 0.1.5-rc.1 |
 | 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 及更早 | 0.1.1-rc.2 |
 
-- **0.1.5-rcN 系列需要 harness 0.1.5-rc.1。** 它们使用 0.1.5 的 assistant-stream 契约(`assistant/message` 内嵌精确计时的 `stream`,并禁止 `sourceEventSeqs`)、由 driver 自己实现的 `Inbox` 接口、双参数 `AgentSetup`,以及 `SessionPersistence.create` / `open` 句柄 seam。
+- **每个 0.1.5-rcN 版本需要它为之构建的那个 0.1.5 补丁。** `0.1.5-rc1`/`0.1.5-rc2` 需要 harness `0.1.5-rc.1`;`0.1.5-rc3` 需要 harness `0.1.5-rc.2`。三者都使用 0.1.5 的 assistant-stream 契约(`assistant/message` 内嵌精确计时的 `stream`,并禁止 `sourceEventSeqs`)、由 driver 自己实现的 `Inbox` 接口、双参数 `AgentSetup`,以及 `SessionPersistence.create` / `open` 句柄 seam。`0.1.5-rc.2` 是一次客户端 UI/文档 backport,没有触碰这些 seam,因此 driver 代码在 `0.1.5-rc.1` 与 `0.1.5-rc.2` 之间完全一致。
 - `1.0.0-rc15` 及以前的版本沿用插件自己的版本序列,针对 harness `0.1.2-rc.1`,与 harness `0.1.5-rc.1` 不兼容。
 - 要在更老的 harness 上使用本插件,请安装与之匹配的版本(例如 harness 0.1.2-rc.1 用 `npm i dsh-loop-engine@1.0.0-rc15`)。
 - 每个 tag 的 GitHub Release 正文会写明它针对的 harness 版本。

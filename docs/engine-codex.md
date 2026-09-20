@@ -255,7 +255,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 1. **`loop.ts:1-11` 模块注释过时**：称驱动"through the OpenAI Codex SDK"、"The Codex SDK spawns its own CLI binary (no spawn injection seam)"。实际代码没有任何 Codex SDK 依赖——驱动自己用 `node:child_process.spawn` 拉起 `codex app-server`（`appserver/client.ts:9, 89`），走的是手写 JSON-RPC。注释大概沿袭自早期 SDK 方案，"不经 subprocess 接缝"的结论仍然成立，但措辞误导。
 2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:52-53`），`codexConfig` 也转发它（`src/index.ts:226`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:89-91`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
-3. **`clientInfo.version` 是硬编码字面量**：initialize 报 `'1.0.0-rc13'`（`appserver/client.ts:118`）——它没有随 `package.json`（0.1.5-rc1）一起更新，只是历史遗留字符串，改协议握手时要留意别把它当成真实包版本（kimi 的 `src/engine-kimi/acp/client.ts:131` 同样硬编码 `'1.0.0'`）。
+3. **`clientInfo.version` 是硬编码字面量**：initialize 报 `'1.0.0-rc13'`（`appserver/client.ts:118`）——它没有随 `package.json`（0.1.5-rc3）一起更新，只是历史遗留字符串，改协议握手时要留意别把它当成真实包版本（kimi 的 `src/engine-kimi/acp/client.ts:131` 同样硬编码 `'1.0.0'`）。
 4. **`threadResume` 无调用方**（`appserver/client.ts:131-133`）：保留的协议面，dsh resume 不走 codex thread/resume。改 resume 语义时注意别误以为它在用。
 5. `turn()` 的 `token-usage` 事件与 `ErrorNotification.willRetry` 被产生/携带但无人消费；若将来要中途展示 token 用量或区分可重试错误，这两个钩子已经现成。
 
