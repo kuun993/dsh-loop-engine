@@ -113,21 +113,27 @@ subpath, also give that shim an `invariant.mjs` (`export * from
 
 dsh-loop-engine is versioned **in lockstep with the harness it targets**: the
 version is the harness version plus a plugin release counter (`0.1.5-rc1` and
-`0.1.5-rc2` target harness `0.1.5-rc.1`), and every harness package it consumes
-is pinned exactly in `peerDependencies`. The two must be matched — a mismatch
-fails loudly at boot or session resume:
+`0.1.5-rc2` target harness `0.1.5-rc.1`; `0.1.5-rc3` targets harness
+`0.1.5-rc.2`), and every harness package it consumes is pinned exactly in
+`peerDependencies`. The two must be matched — a mismatch fails loudly at boot
+or session resume:
 
 | dsh-loop-engine | Requires harness |
 |---|---|
-| 0.1.5-rc1, 0.1.5-rc2 | **0.1.5-rc.1** |
+| 0.1.5-rc3 | **0.1.5-rc.2** |
+| 0.1.5-rc1, 0.1.5-rc2 | 0.1.5-rc.1 |
 | 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 and earlier | 0.1.1-rc.2 |
 
-- **The 0.1.5-rcN releases require harness 0.1.5-rc.1.** They use the 0.1.5
+- **Each 0.1.5-rcN release requires the 0.1.5 patch it was built for.**
+  `0.1.5-rc1`/`0.1.5-rc2` require harness `0.1.5-rc.1`; `0.1.5-rc3` requires
+  harness `0.1.5-rc.2`. All three use the 0.1.5
   assistant-stream contract (`assistant/message` embeds its exact timed
   `stream` and rejects `sourceEventSeqs`), the driver-owned `Inbox` interface,
   the two-argument `AgentSetup`, and the `SessionPersistence.create` / `open`
-  handle seam.
+  handle seam. `0.1.5-rc.2` is a client-UI/docs backport that leaves those
+  seams untouched, so the driver code is identical across `0.1.5-rc.1` and
+  `0.1.5-rc.2`.
 - Releases up to `1.0.0-rc15` used the plugin's own version series and target
   harness `0.1.2-rc.1`; they are not compatible with harness `0.1.5-rc.1`.
 - To use the plugin with an older harness, install the release matching it
