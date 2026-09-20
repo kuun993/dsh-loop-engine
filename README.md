@@ -112,21 +112,22 @@ subpath, also give that shim an `invariant.mjs` (`export * from
 ## Version compatibility
 
 dsh-loop-engine is versioned **in lockstep with the harness it targets**: the
-version is the harness version plus a plugin release counter (`0.1.5-rc1`
-targets harness `0.1.5-rc.1`), and every harness package it consumes is pinned
-exactly in `peerDependencies`. The two must be matched — a mismatch fails
-loudly at boot or session resume:
+version is the harness version plus a plugin release counter (`0.1.5-rc1` and
+`0.1.5-rc2` target harness `0.1.5-rc.1`), and every harness package it consumes
+is pinned exactly in `peerDependencies`. The two must be matched — a mismatch
+fails loudly at boot or session resume:
 
 | dsh-loop-engine | Requires harness |
 |---|---|
-| 0.1.5-rc1 | **0.1.5-rc.1** |
+| 0.1.5-rc1, 0.1.5-rc2 | **0.1.5-rc.1** |
 | 1.0.0-rc8 … 1.0.0-rc15 | 0.1.2-rc.1 |
 | 1.0.0-rc7 and earlier | 0.1.1-rc.2 |
 
-- **0.1.5-rc1 requires harness 0.1.5-rc.1.** It uses the 0.1.5 assistant-stream
-  contract (`assistant/message` embeds its exact timed `stream` and rejects
-  `sourceEventSeqs`), the driver-owned `Inbox` interface, the two-argument
-  `AgentSetup`, and the `SessionPersistence.create` / `open` handle seam.
+- **The 0.1.5-rcN releases require harness 0.1.5-rc.1.** They use the 0.1.5
+  assistant-stream contract (`assistant/message` embeds its exact timed
+  `stream` and rejects `sourceEventSeqs`), the driver-owned `Inbox` interface,
+  the two-argument `AgentSetup`, and the `SessionPersistence.create` / `open`
+  handle seam.
 - Releases up to `1.0.0-rc15` used the plugin's own version series and target
   harness `0.1.2-rc.1`; they are not compatible with harness `0.1.5-rc.1`.
 - To use the plugin with an older harness, install the release matching it
@@ -172,11 +173,14 @@ they were created with.
   bridged into the web menu (built-ins plus user-level `~/.claude/commands/`)
   and forwarded to the engine, which expands them natively. Project-level
   `.claude/commands/` files stay engine-side and also work typed directly.
-- The Codex driver runs `codex app-server` and has no interactive tool
-  approval — permissions come from the session's `sandboxMode` +
-  `approvalPolicy`. Its `AGENTS.md` instruction files are surfaced through the
-  dsh skill-injection seam across every directory from the session cwd up to
-  the git root, plus `~/.codex/AGENTS.md`.
+- The Codex driver runs `codex app-server`; the thread starts with the
+  session's `sandboxMode` + `approvalPolicy` stance, and the model's runtime
+  approval requests (command, file-change, permissions) are answered through
+  the dsh approval seam — `request_user_input` questions go to the
+  user-questions seam and MCP elicitations are declined, all fail-closed when
+  their seam is absent. Its `AGENTS.md` instruction files are surfaced through
+  the dsh skill-injection seam across every directory from the session cwd up
+  to the git root, plus `~/.codex/AGENTS.md`.
 - The Pi driver runs `pi --mode rpc`; Pi has no permission system, so the whole
   child is sandboxed through the dsh subprocess service (default `read-only`).
   Its context files (`AGENTS.md`/`CLAUDE.md` with `AGENTS.override.md`
