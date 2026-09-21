@@ -1049,9 +1049,11 @@ describe('apply kimi engine', () => {
     const { ctx, fiber } = await boot({ [NS]: { engine: 'kimi' } })
     const commands = fakeCommandsService()
     const skills = fakeSkillsService()
+    // The first registration (compact) collides with an existing dsh-native
+    // command; the mount must skip it with a warning, not fail the engine.
     const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     commands.register.mockImplementationOnce(() => {
-      throw new Error('command "help" is already registered')
+      throw new Error('command "compact" is already registered')
     })
     ctx.provide('commands', commands)
     ctx.provide('skills', skills)
@@ -1059,7 +1061,7 @@ describe('apply kimi engine', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
 
     expect(commands.registered).toHaveLength(KIMI_COMMANDS.length - 1)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip kimi command /help'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip kimi command /compact'))
 
     await fiber.dispose()
   })

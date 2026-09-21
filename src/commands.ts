@@ -17,6 +17,14 @@
  * are cwd-dependent, and a global dsh registration would collide across
  * projects.
  *
+ * The built-in list is limited to commands the CLI actually recognizes in SDK
+ * mode (verified against Claude Code 2.1.220 by driving real SDK queries):
+ * unknown ones are not forwarded to the model at all — the CLI answers
+ * `Unknown command: /name` — but registering one would still advertise a
+ * command that does not exist. Note that some recognized commands report
+ * `isn't available in this environment` outside the interactive TUI; that
+ * report is the engine's own answer and travels back as an assistant message.
+ *
  * @module dsh-loop-engine/commands
  */
 
@@ -82,9 +90,6 @@ export const CLAUDE_CODE_COMMANDS: readonly CommandDefinition[] = [
   builtin('compact', 'Compact the conversation to reduce context usage'),
   builtin('clear', 'Clear the conversation and start fresh'),
   builtin('review', 'Review recent changes (git diff)'),
-  builtin('explain', 'Explain the selected code'),
-  builtin('fix', 'Fix issues in the code'),
-  builtin('tests', 'Add tests for the selected code'),
 ]
 
 /**

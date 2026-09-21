@@ -41,7 +41,7 @@ import {
   meaningfulUsage,
   type StreamToolCall,
 } from './mapping.ts'
-import { serializeHistory } from '../driver-core/prompt.ts'
+import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
@@ -525,7 +525,10 @@ export class ClaudeCodeAgent implements Agent {
       throw new Error(`agent "${this.id}": no working directory — start the session with cwd metadata`)
     }
     const history: Message[] = this.session.deriveMessages()
-    const prompt = serializeHistory(history)
+    // A live slash command is the engine's own control line: send it verbatim
+    // (the transcript framing would hide it from Claude Code's local-command
+    // dispatch, which only inspects the head of the prompt).
+    const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)

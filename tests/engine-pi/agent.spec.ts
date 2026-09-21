@@ -206,6 +206,31 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
+  it('sends a live slash command verbatim, bypassing the transcript framing', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('pi reports back'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('slash-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // Pi expands commands, skills, and prompt templates only when the prompt
+      // OPENS with `/`; the framed transcript would hand the line to the model.
+      agent.followup(message('/review-pr'))
+      await agent.whenIdle()
+
+      expect(mock.client.prompt.mock.calls[0]?.[0]).toBe('/review-pr')
+
+      // The bypass is per step: the next ordinary message replays the full
+      // transcript again.
+      agent.followup(message('and now?'))
+      await agent.whenIdle()
+      expect(String(mock.client.prompt.mock.calls[1]?.[0])).toContain('<user>\n/review-pr\n</user>')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('streams text deltas and embeds the attempt stream in the durable message', async () => {
     const ctx = await harness()
     try {

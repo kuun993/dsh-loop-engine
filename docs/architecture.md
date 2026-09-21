@@ -73,11 +73,11 @@ managed block 本身是**根级 block sequence**，这带来两个真实踩过�
 1. `resolvePatchPath` 解析 patch 文件路径：`patchPath` 显式指定优先，否则 `$DSH_HOME/profiles/<profile>/<patchFilename>`，默认 `web/cordis.patch.yml`。空字符串 `patchPath` 视为未指定。
 2. **同步**读文件，`currentEngineOf` 得出 `fileEngine`。读失败（非 ENOENT）直接抛出，不让插件带着未知状态启动（`tests/index.spec.ts:306-315`）。
 3. **修复无法识别的引擎块**：若文件里有 managed block 但 `managedBlockEngineOf` 返回 `undefined`（块写的引擎 id 本版本不认识，比如新版写、旧版读），就**同步**把块摘掉改写为 in-process 并 loud 记日志。详见 §7 的对应条目——不修的话这个 profile 会完全没有 AgentFactory。
-3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:620-627`）。
+3. `mountEngine(fileEngine)`：非默认引擎立即托管对应工厂 fiber 并注册其 provider 路由占位（见 §3.6）；`in-process` 什么都不挂（`src/index.ts:706-712`）。
 4. `steerPresetDefault(fileEngine)`：把会话的命令/技能面导向匹配当前引擎的 preset（见 §3.5）。
-5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:653`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
+5. `ctx.inject(['settings'], …)` 内用 provider 方法 `settings.installSection` 注册 `agent-loop-engine` 段，**composition base 用 `{ engine: fileEngine, showInComposer: true }`**（`src/index.ts:755`）——settings 段从文件种子出发，UI 因此镜像文件而非反向。
 
-`installSection` 的契约（主仓 `packages/settings/settings/src/index.ts:472-496` 的 provider 方法）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:649-650` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:657`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
+`installSection` 的契约（主仓 `packages/settings/settings/src/index.ts:472-496` 的 provider 方法）：注册 scope 后**先 `setSource` 再立刻 `onChange`**，之后每次已提交的变更触发 watcher 再调 `onChange`；全部同步。`src/index.ts:751-752` 的注释指出，因为 setSource 保证先于首次 onChange，`source!` 的非空断言是契约守卫而非侥幸。首次 attach 的 onChange 读到与 `fileEngine` 相同的值，自然短路成 no-op（`src/index.ts:758-760`）——这就是"文件已匹配则 attach 不写盘"（`tests/index.spec.ts:242-254`）。
 
 ### 3.2 运行时切换：onChange 管线
 
@@ -106,12 +106,16 @@ settings 提交后的 `onChange`：
 
 | 引擎 | 斜杠命令 | 技能 Provider |
 |---|---|---|
-| claude-code | 内置 7 个 + 发现 `~/.claude/commands/*.md`（`src/index.ts:530-561`，注册循环 `:543`） | `ClaudeCodeSkillProvider`（`.claude/skills/`、`CLAUDE.md`，`src/skills.ts:219`） |
-| codex | 无 | `CodexSkillProvider`（AGENTS.md，`src/index.ts:564-573`） |
-| pi | 无 | `PiSkillProvider`（`src/index.ts:576-589`） |
-| kimi | `KIMI_COMMANDS`（`src/index.ts:592-618`，注册循环 `:600`） | `KimiSkillProvider` |
+| claude-code | 内置 4 个 + 发现 `~/.claude/commands/*.md`（`src/index.ts:615-647`，注册循环 `:628`） | `ClaudeCodeSkillProvider`（`.claude/skills/`、`CLAUDE.md`，`src/skills.ts:219`） |
+| codex | 无 | `CodexSkillProvider`（AGENTS.md，`src/index.ts:649-658`） |
+| pi | 无 | `PiSkillProvider`（`src/index.ts:661-674`） |
+| kimi | `KIMI_COMMANDS`（`src/index.ts:677-703`，注册循环 `:685`） | `KimiSkillProvider` |
 
-命令 handler 的语义是**转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎 CLI，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:64-72`）。注册的意义是让命令出现在 web 斜杠菜单里。与 dsh 原生命令撞名时记 warn 跳过，不让挂载失败（`src/index.ts:544-548`）。项目级 `.claude/commands/` 有意不注册——它按 cwd 生效，全局注册会跨项目冲突（`src/commands.ts:16-18`）。
+命令 handler 的语义是**转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎 CLI，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:72-80`）。注册的意义是让命令出现在 web 斜杠菜单里。
+
+转发本身不足以让命令生效：外部引擎只在 prompt **以 `/` 开头**时才走自己的命令面，所以驱动侧还有一步——本步最后一条消息若是裸命令行，`engineSlashPrompt` 让它不带 `<user>` 框架发出（`src/driver-core/prompt.ts:122`，claude/pi/kimi；codex 无此面，见 `docs/engine-codex.md`）。两份内置清单也都已按**实测**收敛到引擎真正实现的集合（kimi 6 条、claude 4 条），清单与实测的对应关系见各引擎文档。
+
+与 dsh 原生命令撞名时记 warn 跳过，不让挂载失败（`src/index.ts:626-634`）。项目级 `.claude/commands/` 有意不注册——它按 cwd 生效，全局注册会跨项目冲突（`src/commands.ts:16-24`）。
 
 **命令注册的命名禁区**：web 客户端自带 `/model` 等 client 侧贡献，host 侧同名命令会让 `ui-commands` 直接把整个 command 菜单源判死（主仓 `packages/client/ui-commands/src/client/service.ts:214-215` 抛错，`ui-input-trigger` 降为 source-failed）——表现是斜杠菜单里命令全消失、只剩技能。Kimi 的 `/model` 因此刻意不桥接（`src/engine-kimi/commands.ts` 模块注释）。
 

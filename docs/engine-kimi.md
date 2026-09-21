@@ -8,7 +8,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 核心模型：
 
-- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:538,551`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:93-127`），保证 "Model-visible ⟺ logged"。
+- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:541,554`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:150`），保证 "Model-visible ⟺ logged"；唯一例外是本步的最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`，见 §7.1）。
 - **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13`、`:83`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
 - **方向辨析**：主仓自带 `@deepseek-ai/dsh-acp`（`../deepseek-harness/packages/acp/acp`）是 **ACP server**（把 dsh agent 暴露给外部 ACP 客户端）；本驱动是 **ACP client**（dsh 作客户端驱动 kimi CLI 这个 agent）。两者方向相反，不要混淆。
 - **kimiBin 解析**：`kimiBinResolver`（`src/engine-kimi/process.ts:59-64`）三级回退——① 配置钉死的路径（`kimiBin` 配置项，空字符串视为未配置）；② 探测标准安装位 `<kimi home>/bin/kimi[.exe]`，其中 kimi home = `KIMI_CODE_HOME` 环境变量或 `~/.kimi-code`（`kimiHomeDir`，`process.ts:47-50`）；③ 回退裸命令 `'kimi'`，由 spawner 经 PATH 解析。
@@ -28,7 +28,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 | `src/engine-kimi/commands.ts` | `KIMI_COMMANDS`：Kimi 内建斜杠命令的转发桥 |
 | `src/engine-kimi/types.ts` | `ResolvedConfig`（仅类型，无运行时代码） |
 
-共享基础设施（`src/driver-core/`）被引用的部分：`ownership.ts`（`FactoryOwnership`、`raceAbort`、`raceAbortCall`）、`prompt.ts`（`serializeHistory`）、`permission-knobs.ts`（`sessionApprovalPolicy`）、`skill-inject.ts`（手势扫描与 `<skill_content>` 渲染）、`context-files.ts`（cwd→git root 的目录链与文件读取）、`inbox.ts`（`DriverInbox`）、`assistant-stream.ts`（`DriverAssistantStream`）。
+共享基础设施（`src/driver-core/`）被引用的部分：`ownership.ts`（`FactoryOwnership`、`raceAbort`、`raceAbortCall`）、`prompt.ts`（`serializeHistory`、`engineSlashPrompt`）、`permission-knobs.ts`（`sessionApprovalPolicy`）、`skill-inject.ts`（手势扫描与 `<skill_content>` 渲染）、`context-files.ts`（cwd→git root 的目录链与文件读取）、`inbox.ts`（`DriverInbox`）、`assistant-stream.ts`（`DriverAssistantStream`）。
 
 插件入口侧：`src/index.ts` 的 `mountKimi`（index.ts:592-618）注册斜杠命令与技能 provider 后以子 fiber 挂载 `KimiLoop`；`kimiConfig`（index.ts:243-249）把组合条目的 `model`/`env`/`kimiBin` 透传为 `KimiLoop` 的 `model`/`env`/`bin`。
 
@@ -59,7 +59,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 - **入口**：`followup`（next-turn + 唤醒）、`steer`（next-step + 唤醒）、`inject`（next-step 不唤醒）、`cancel`（agent.ts:160-197）。`send` 里有一个关键分类：abort 后再唤醒的消息会被重分类到 `next-turn`（agent.ts:161-162）。
 - **驱动循环**：`wakeDriver` → `kick` → `while (await this.turn())`（agent.ts:234-287）。`kick` 的 finally 负责把 running 相位收回 idle 并按 latch 的 wake 重放。
 - **turn**：`turn/start` → 循环 `preStep`（inbox claim + `agent/pre-step` waterfall + 技能注入）→ `step/start` → 落 `user/message` → `step()` → `step/end` → … → `turn/end`（agent.ts:350-431）。每个退出路径都保证写 `turn/end`（completed / blocked / aborted / error）。
-- **step**：每个 step 重置块/工具累积器与产出台账（agent.ts:513-518）→ 校验 cwd（无 cwd 直接抛错，519-521）→ `deriveMessages` + `serializeHistory` 造 prompt（524-525）→ 写一次 request/header（agent.ts:531，见下）→ 取/建 ACP 客户端 → 注册权限回调（535）→ `session/new`（538）→ 挂 `onUpdate`（546）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（548-553）→ 收尾：`flushSegment`（753-764）把尾段块与「公告了但从未给出输入」的调用合成一条消息并落 `tool/call`（555-564）→ 无产出则抛 `KIMI_NO_RESULT`（565-570）。
+- **step**：每个 step 重置块/工具累积器与产出台账（agent.ts:513-518）→ 校验 cwd（无 cwd 直接抛错，519-521）→ `deriveMessages`，再 `engineSlashPrompt(history) ?? serializeHistory(history)` 造 prompt（525-528，见 §7.1）→ 写一次 request/header（agent.ts:534，见下）→ 取/建 ACP 客户端 → 注册权限回调（540）→ `session/new`（541）→ 挂 `onUpdate`（549）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（553-556）→ 收尾：`flushSegment`（756）把尾段块与「公告了但从未给出输入」的调用合成一条消息并落 `tool/call`（567-571）→ 无产出则抛 `KIMI_NO_RESULT`（571）。
 - **一次 prompt ≠ 一个 step**：`session/prompt` 跑完 Kimi 的整个内部 loop（实测一次 prompt 内可以连续 60+ 次工具调用），但 dsh 的 **step 是在流处理中途轮转的**——每个助手片段各自一个 step，见 §5「一段一步」。`beginSegment`（agent.ts:636-642）在片段边界补 `step/end` + `step/start` 并就地 `phase.step += 1`；`turn()` 的 finally 关的是 `phase.step`（当前真正打开的那个），不是本次迭代开头开的那个（agent.ts:400-406）。
   因此 `phase` 被当作「当前打开的 step」的载体：轮转就地改它，`agent/error` 上报和 `turn()` 的兜底关闭都读到正确的编号（`RunningPhase`，agent.ts:92）。
 - **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:59-70,446-448）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:459）。provider 标签 `'kimi'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
@@ -130,14 +130,16 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 
 dsh `commands` 运行时本地执行注册命令，命令行不会到达模型；真实处理在 Kimi 引擎内的命令必须**转发原文行**给 agent：`forwardKimiCommand` 把 `/<name><rawInput>` 作为普通 user 消息 `followup` 给接收 agent（commands.ts:40-48）。
 
-`KIMI_COMMANDS`（commands.ts:56-65）注册了 9 个对 ACP prompt 面有意义的内建命令：`help`、`status`、`compact`、`clear`、`plan`、`auto`、`usage`、`version`、`goal`。纯 TUI 控制类命令（`/login`、`/settings`、`/sessions` 等）不注册——ACP prompt 面不会像交互 TUI 那样展开它们（commands.ts:13-15）。`skill:` 类命令已由 dsh 技能注入接缝承载，不重复注册。
+转发只是把行送回给自己——**真正让它生效的是驱动侧的斜杠命令步**：该 user 消息成为本步最后一条消息时，`engineSlashPrompt` 让它以裸行形式发出（`src/driver-core/prompt.ts:122`、`src/engine-kimi/agent.ts:528`）。若仍走 `<user>...</user>` 框架，ACP 适配器的 `detectLeadingSlashIntent` 只看首个 block 的首字符，`/status` 会被当散文交给模型（实测：模型开始猜"用户是不是打了斜杠命令"）。所以"注册"负责菜单可见与本地消费，"裸行"负责引擎真正展开，两者缺一不可。
 
-两个刻意的缺席/保留（commands.ts:17-24 模块注释）：
+`KIMI_COMMANDS`（commands.ts:59-66）注册的正是 **`kimi acp` 命令面实测实现的那 6 条**：`compact`、`status`、`usage`、`mcp`、`tasks`、`help`（实测方式：直连 `kimi acp` 逐条发 `session/prompt`，0.28.1；子进程自己发布的 `available_commands_update` 也给出同一份内建列表 + Kimi 自己的技能）。其余 TUI 控制类命令（`/login`、`/provider`、`/settings`、`/sessions`、`/clear`、`/plan`、`/auto`、`/version`、`/goal`）ACP 面一律回 `Unknown ACP command: /name. Use /help to see available commands.`，因此都不注册——注册一条不存在的命令只会让菜单骗人。`skill:` 类命令已由 dsh 技能注入接缝承载（用户打 `/skill:xxx` 时手势扫描不命中，裸行会落到 ACP 的技能解析），不重复注册。
+
+两个刻意的缺席（commands.ts:14-24 模块注释）：
 
 - **`/model` 不桥接**：web 客户端自己占着 `/model` 贡献（`ui-model-selection`），host 侧同名命令会让 `ui-commands` 把整个 command 菜单源判死——表现为菜单里所有命令消失、只剩技能。这是真实踩过的坑，不是未雨绸缪。
-- **`/goal` 保留**：managed block 对托管引擎禁用了 dsh 的 `command-goal` 行（见 architecture.md §3.5），槽位空出，Kimi 自己的 goal 模式接管。注意运行时（不重启）从 in-process 切过来时 `command-goal` 仍在，本次 `/goal` 会被撞名跳过，重启后归位。
+- **`/goal` 不桥接**：managed block 对托管引擎禁用了 dsh 的 `command-goal` 行（见 architecture.md §3.5），槽位是空出来了，但 ACP 面没有 `/goal` 来接管（`write-goal` 只是个技能名），注册它只会换来一句 unknown-command。
 
-`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:592-608）。
+`mountKimi` 注册这些命令时与 dsh 原生命令撞名则告警跳过，不让挂载失败（index.ts:683-693）。
 
 ### 7.2 技能 provider（skills.ts）
 

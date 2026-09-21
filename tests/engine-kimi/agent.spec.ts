@@ -195,6 +195,32 @@ describe('KimiAgent turn mapping (streamed)', () => {
     }
   })
 
+  it('sends a live slash command verbatim, bypassing the transcript framing', async () => {
+    mock.updates.mockReturnValue([text('Session status:\n- Model: kimi-native')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('slash-s'), meta: { cwd: process.cwd() } })
+      // A command line is the engine's own control surface: Kimi's ACP adapter
+      // only expands a command that OPENS the prompt, so the framed transcript
+      // would deliver `/status` to the model as prose instead.
+      agent.followup(message('/status'))
+      await agent.whenIdle()
+      expect(mock.client.prompt).toHaveBeenLastCalledWith('sess_1', '/status')
+      // The engine's local report is the step's assistant message.
+      expect(agent.session.snapshotEvents().find(event => event.type === 'assistant/message')).toMatchObject({
+        data: { message: { content: [{ type: 'text', text: 'Session status:\n- Model: kimi-native' }] } },
+      })
+
+      // The bypass is per step: the next ordinary message replays the
+      // transcript (now including the command and its report) as usual.
+      agent.followup(message('and now?'))
+      await agent.whenIdle()
+      expect(mock.client.prompt).toHaveBeenLastCalledWith('sess_1', expect.stringContaining('<user>\n/status\n</user>'))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('streams thinking before text into reasoning + text content blocks', async () => {
     mock.updates.mockReturnValue([thought('think '), thought('hard'), text('answer')])
     const ctx = await harness()

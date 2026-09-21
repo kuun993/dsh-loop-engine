@@ -5,6 +5,12 @@
  * exact projection, so a later replay of the same log derives the identical
  * prompt (Model-visible ⟺ logged bridge).
  *
+ * A step whose live request is an engine slash command is the one exception to
+ * the transcript framing: {@link engineSlashPrompt} sends that command line
+ * verbatim, because the engines only recognize their own commands at the head
+ * of the prompt. It is still derived from the log alone, so the guarantee
+ * holds.
+ *
  * @module dsh-loop-engine/driver-core/prompt
  */
 
@@ -79,6 +85,57 @@ function renderToolResult(message: ToolResultMessage): string {
   }).filter(section => section !== '').join('\n\n')
   const tag = block.isError === true ? 'tool-result-error' : 'tool-result'
   return frame(tag, body || '(no content)')
+}
+
+/**
+ * An engine slash-command line: `/name` with an optional single-line argument
+ * tail. The name may hold neither whitespace nor `/`, so a path-like lead
+ * (`/etc/hosts`, `//server/share`) is never mistaken for a command.
+ */
+const ENGINE_SLASH_LINE = /^\/[^\s/]+(?:[ \t]+.*)?$/
+
+/**
+ * The engine's own slash-command line to send as this step's entire prompt, or
+ * `undefined` when the step is an ordinary conversational step.
+ *
+ * Every hosted engine expands a slash command only when the text handed to it
+ * *starts* with `/` — Kimi's ACP adapter parses the first prompt block, Claude
+ * Code's local-command dispatch and Pi's input expansion both test the leading
+ * character of the message string. The serialized transcript never satisfies
+ * that (it opens with `<user>`), so a forwarded `/status` reaches the model as
+ * prose instead of the engine's own command surface. This helper lets a driver
+ * recognize the case and send the command line verbatim, with no transcript
+ * framing and no replay history: a slash command is a control line for the
+ * engine, not conversation for the model.
+ *
+ * The live request is the last derived message, so a step whose trailing
+ * message is a bare command line is a command step. A trailing skill-injection
+ * message (the `/name` skill gesture the drivers materialize as its own user
+ * message) displaces it and keeps the step on the transcript path.
+ *
+ * The returned line is a pure function of the log prefix, so the step stays
+ * replayable: the same log derives the same prompt.
+ * @param messages - derived history, oldest first, as returned by
+ *   `Session.deriveMessages()` at step time.
+ * @returns the raw command line, or `undefined` for an ordinary step.
+ */
+export function engineSlashPrompt(messages: readonly Message[]): string | undefined {
+  const last = messages.at(-1)
+  if (last === undefined || last.role !== 'user') return undefined
+  const user = last as UserMessage
+  // Only a direct user message is a command line: a tool result or an injected
+  // skill body is driver material, never something the user typed.
+  if (user.source.kind !== 'user') return undefined
+  // A command line is the whole message; a multi-block message carries
+  // attachments (or is a multi-part prompt) and stays on the transcript path.
+  if (user.content.length !== 1) return undefined
+  const block = user.content[0]
+  if (block?.type !== 'text') return undefined
+  const text = block.text
+  // The engines parse a single line: a newline makes the tail an argument of
+  // nothing, and multi-line prose that merely opens with `/` is a user message.
+  if (text.includes('\n')) return undefined
+  return ENGINE_SLASH_LINE.test(text) ? text : undefined
 }
 
 /**

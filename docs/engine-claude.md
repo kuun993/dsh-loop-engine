@@ -7,7 +7,7 @@
 claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-sdk`）驱动 dsh 会话。核心模型是：
 
 - **每个 dsh step 一次无状态 query**（`src/engine-claude/loop.ts:2-6` 模块注释）。SDK 进程不保留任何会话状态：`persistSession: false`（`src/engine-claude/sdk.ts:97`），dsh 的持久化 session log 是模型上下文的唯一来源。注意**反方向不成立**：一次 query 里模型会跑很多个内部轮次，driver 会在片段边界把 dsh step 轮转开（§4.1），所以一个 query ≠ 一个 step。
-- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:472-473`、`src/driver-core/prompt.ts:93-127`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。
+- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:527-531`、`src/driver-core/prompt.ts:150`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。**例外**是本步最后一条消息就是一条斜杠命令：那时改发裸行（`engineSlashPrompt(history) ?? serializeHistory(history)`，`src/driver-core/prompt.ts:122`，见 §7.1），否则 CLI 的本地命令派发看不到它。
 - **Claude Code 拥有自己的 prompt、工具和权限**。SDK 子进程是真正的 agent 运行时（自带系统提示、内置工具、技能展开）；dsh 侧只做收件箱、turn/step 边界、事件落盘和审批转发（`src/engine-claude/agent.ts:1-8`）。
 - **进程模型**：SDK 的 `query()` 内部 spawn 一个 `claude` CLI 子进程。引擎通过 SDK 的 `spawnClaudeCodeProcess` 钩子把 spawn 请求转交给 dsh 的 subprocess seam（`src/engine-claude/sdk.ts:145-148`），子进程树的生命周期（终止升级阶梯、grace）由 harness 统一管理，而不是 SDK 直接 `child_process.spawn`。
 
@@ -148,10 +148,12 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 
 dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。但 Claude Code 命令的真正处理在 CLI 内部，所以所有注册的 claude 命令 handler 只做一件事：把原始 `/<name> [args]` 行以普通用户消息 `followup` 回给 agent，由 CLI 原生展开（`src/commands.ts:64-72`）。注册的意义是让这些命令出现在 web 斜杠菜单里。
 
-- 内置 7 个：`help` / `compact` / `clear` / `review` / `explain` / `fix` / `tests`（`src/commands.ts:80-88`）。
-- **用户级自定义命令**（`~/.claude/commands/*.md`）由 `discoverUserSlashCommands` 同步扫描注册：只收 `.md`、名字须过 dsh 命令名语法、与内置重名跳过；描述取 frontmatter `description`，否则取正文首个非空非标题行（>120 字符截断），都没有则跳过（`src/commands.ts:98-163`）。同步扫描是有意的——挂载路径必须在引擎切换 commit 返回前完成注册。
-- **项目级 `.claude/commands/` 故意不注册**：它们依赖 cwd，全局注册会跨项目冲突；未注册的 `/行` 本来就会当用户文本透传给 CLI（`src/commands.ts:16-18`）。
-- 注册时与 dsh 原生命令撞名：警告并跳过，不让挂载失败（`src/index.ts:543-549`）。
+转发回来的行之所以能被 CLI 展开，靠的是驱动侧的斜杠命令步：`engineSlashPrompt` 让本步的 prompt 就是那一行（`src/engine-claude/agent.ts:531`）。CLI 的派发条件是 `T.startsWith("/")`（`rCb` 里 `F !== null && !G && F.startsWith("/")` → `processSlashCommand`），带 `<user>` 框架的转录永远不满足，`/status` 就成了给模型的散文。
+
+- 内置 4 个：`help` / `compact` / `clear` / `review`（`src/commands.ts:88-93`）。这份清单是**实测**出来的：逐条真跑一次 SDK query，`/help`、`/compact`、`/clear`（回一条 `conversation_reset`）、`/review`（真跑一次 review 流程）都被 CLI 当命令处理，而 `/explain`、`/fix`、`/tests` 回 `Unknown command: /xxx`——所以后者已从清单删除。（注意 `/status` 在 SDK 环境回 `isn't available in this environment.`：多数本地命令只在交互 TUI 可用，这是**引擎自己的答复**，会作为 assistant 消息（`model: "<synthetic>"`）落进会话，驱动无需特判。）
+- **用户级自定义命令**（`~/.claude/commands/*.md`）由 `discoverUserSlashCommands` 同步扫描注册：只收 `.md`、名字须过 dsh 命令名语法、与内置重名跳过；描述取 frontmatter `description`，否则取正文首个非空非标题行（>120 字符截断），都没有则跳过（`src/commands.ts:103-129`）。同步扫描是有意的——挂载路径必须在引擎切换 commit 返回前完成注册。
+- **项目级 `.claude/commands/` 故意不注册**：它们依赖 cwd，全局注册会跨项目冲突；未注册的 `/行` 本来就会当用户文本透传给 CLI，命中命令步后照常裸发。
+- 注册时与 dsh 原生命令撞名：警告并跳过，不让挂载失败（`src/index.ts:628-634`）。
 
 ### 7.2 技能 provider（`src/skills.ts`）
 

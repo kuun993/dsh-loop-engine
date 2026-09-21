@@ -34,33 +34,51 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 
 ### 解决什么问题
 
-托管引擎每次查询都是**无状态**的：外部 CLI 看不到 dsh 的会话历史，必须把历史塞进当次 prompt。同时 dsh 有一条硬约束——"模型可见 ⟺ 已落日志"（Model-visible ⟺ logged），所以 prompt 必须是会话日志的**精确投影**：同一份日志重放必须得到逐字节相同的 prompt（`src/driver-core/prompt.ts:1-9` 的模块头注，`serializeHistory` 是"日志前缀的纯函数"，`src/driver-core/prompt.ts:84-92`）。
+托管引擎每次查询都是**无状态**的：外部 CLI 看不到 dsh 的会话历史，必须把历史塞进当次 prompt。同时 dsh 有一条硬约束——"模型可见 ⟺ 已落日志"（Model-visible ⟺ logged），所以 prompt 必须是会话日志的**精确投影**：同一份日志重放必须得到逐字节相同的 prompt（`src/driver-core/prompt.ts:1-15` 的模块头注，`serializeHistory` 是"日志前缀的纯函数"，`src/driver-core/prompt.ts:140-149`）。
 
 ### 契约
 
-`serializeHistory(messages)`（`src/driver-core/prompt.ts:93`）接收 `Session.deriveMessages()` 在步进时刻派生的消息序列（最旧在前，最后一条是触发本步的用户请求），返回纯文本。序列化规则：
+`serializeHistory(messages)`（`src/driver-core/prompt.ts:150`）接收 `Session.deriveMessages()` 在步进时刻派生的消息序列（最旧在前，最后一条是触发本步的用户请求），返回纯文本。序列化规则：
 
-- 每条消息用 `<role>...</role>` 框架包裹（`frame`，`src/driver-core/prompt.ts:29`），段落间以 `\n\n` 连接；
-- **assistant**：text 块逐字输出；tool-call 块压缩成一行 `[tool call: name(args)]`（`src/driver-core/prompt.ts:49`）；image 块替换为占位文本 `OMITTED_IMAGE_TEXT`（`src/driver-core/prompt.ts:20-21`）；**reasoning 块不转写**——每个引擎在每次全新查询里自己重新推导思考（`src/driver-core/prompt.ts:54-56`）；
-- **user（source.kind 为 'tool'）**：走 `renderToolResult`（`src/driver-core/prompt.ts:68`），失败调用标为 `<tool-result-error>`，成功为 `<tool-result>`（`src/driver-core/prompt.ts:80`）；正文为空时输出 `(no content)`（`src/driver-core/prompt.ts:81`）；
-- **user（其他 source）**：text 逐字、image 替换占位文本，空正文同样兜底 `(no content)`（`src/driver-core/prompt.ts:107-118`）；
-- **system 角色**：不进派生会话面，直接跳过（`src/driver-core/prompt.ts:121-123`）；
-- assistant 正文为空的整条消息不进 transcript（`src/driver-core/prompt.ts:99`）。
+- 每条消息用 `<role>...</role>` 框架包裹（`frame`，`src/driver-core/prompt.ts:35`），段落间以 `\n\n` 连接；
+- **assistant**：text 块逐字输出；tool-call 块压缩成一行 `[tool call: name(args)]`（`src/driver-core/prompt.ts:55`）；image 块替换为占位文本 `OMITTED_IMAGE_TEXT`（`src/driver-core/prompt.ts:26-27`）；**reasoning 块不转写**——每个引擎在每次全新查询里自己重新推导思考（`src/driver-core/prompt.ts:60-62`）；
+- **user（source.kind 为 'tool'）**：走 `renderToolResult`（`src/driver-core/prompt.ts:74`），失败调用标为 `<tool-result-error>`，成功为 `<tool-result>`（`src/driver-core/prompt.ts:86`）；正文为空时输出 `(no content)`（`src/driver-core/prompt.ts:87`）；
+- **user（其他 source）**：text 逐字、image 替换占位文本，空正文同样兜底 `(no content)`（`src/driver-core/prompt.ts:164-175`）；
+- **system 角色**：不进派生会话面，直接跳过（`src/driver-core/prompt.ts:178-180`）；
+- assistant 正文为空的整条消息不进 transcript（`src/driver-core/prompt.ts:156`）。
+
+### 斜杠命令步：`engineSlashPrompt`
+
+框架本身会吃掉引擎自己的命令面：四家的 slash 展开都只看**开头**——Kimi 的 ACP 适配器只看首个 prompt block 是否 `startsWith('/')`，Claude Code 的本地命令派发（`rCb` 里 `F.startsWith("/")` → `processSlashCommand`）与 Pi 的输入展开（`text.startsWith("/")` / `startsWith("/skill:")` / prompt template）同理。而转录文本以 `<user>` 开头，于是转发回来的 `/status` 会被当成散文交给模型（实测：Kimi 侧模型开始猜"用户是不是打了斜杠命令"）。
+
+`engineSlashPrompt(messages)`（`src/driver-core/prompt.ts:122`）就是把这一步认出来：**最后一条消息**是 `source.kind === 'user'` 的直接用户消息、只含一个 text 块、无换行、且整条匹配 `ENGINE_SLASH_LINE`（`/name` 加可选同行参数，名字里不含空白与 `/`，所以 `/etc/hosts`、`//server/share`、单独的 `/` 都不算）时，返回该行原文；否则返回 `undefined`。三个 driver 的取值方式一致：
+
+```ts
+const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
+```
+
+- `src/engine-claude/agent.ts:531`
+- `src/engine-pi/agent.ts:587`
+- `src/engine-kimi/agent.ts:528`
+
+命中时本步的 prompt 就是那一行：**不带 `<user>` 框架、也不回放历史**——斜杠命令是引擎的控制行，不是给模型的对话。它仍然只由日志前缀决定，所以投影约束不破。被注入的技能内容（`skill-inject.ts` 落成一条 `skill-invocation` 用户消息）会顶掉"最后一条"，于是那一步照常走转录路径——用户显式调用的技能优先。
+
+codex **不使用**这条路径：app-server 协议没有文本斜杠面（`turn/start` 的 `UserInput` 只有 text/image/localAudio/skill/mention，压缩是独立 RPC `thread/compact/start`），传裸行只会平白丢掉上下文。见 `docs/engine-codex.md`。
 
 ### 哪些引擎怎么用
 
-四个 agent 的调用方式逐字一致——先取 `this.session.deriveMessages()`，再 `serializeHistory(history)`，空 prompt 抛错（v8-ignore 的兜底分支）：
+四个 agent 都先取 `this.session.deriveMessages()`，再组装 prompt，空 prompt 抛错（v8-ignore 的兜底分支）。claude/pi/kimi 走 `engineSlashPrompt(history) ?? serializeHistory(history)`（见上一节），codex 仍只用 `serializeHistory(history)`：
 
-- `src/engine-claude/agent.ts:472-477`
-- `src/engine-codex/agent.ts:496`
-- `src/engine-pi/agent.ts:545-546`
-- `src/engine-kimi/agent.ts:508-513`
+- `src/engine-claude/agent.ts:527-531`
+- `src/engine-codex/agent.ts:601-602`
+- `src/engine-pi/agent.ts:584-587`
+- `src/engine-kimi/agent.ts:525-528`
 
 kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:554`），因为 ACP prompt 是一个需要等响应帧的 RPC。
 
 ### 改它会波及谁
 
-这是共享层里**爆炸半径最大**的模块：序列化格式的任何改动（标签名、tool-call 行格式、占位文本、空正文兜底）都会同时改变四个引擎发给模型的每一段 prompt。修改前必须先想清楚：外部 CLI 对同一份历史是否有自己的展开逻辑（例如 Claude Code CLI 对 `/name` 的原生展开与这里的 skill 注入文本是否会叠加）。测试上它由 `tests/engine-claude/mapping.spec.ts` 直接 import（`tests/engine-claude/mapping.spec.ts:17`），并间接被四个 `tests/engine-*/agent.spec.ts` 的步进路径覆盖。
+这是共享层里**爆炸半径最大**的模块：序列化格式的任何改动（标签名、tool-call 行格式、占位文本、空正文兜底）都会同时改变四个引擎发给模型的每一段 prompt。修改前必须先想清楚：外部 CLI 对同一份历史是否有自己的展开逻辑（例如 Claude Code CLI 对 `/name` 的原生展开与这里的 skill 注入文本是否会叠加）——`engineSlashPrompt` 就是这条边界上补的一刀。测试上 `serializeHistory` 由 `tests/engine-claude/mapping.spec.ts` 直接 import（`tests/engine-claude/mapping.spec.ts:17`）并间接被四个 `tests/engine-*/agent.spec.ts` 的步进路径覆盖；`engineSlashPrompt` 由 `tests/driver-core/prompt.spec.ts` 覆盖，三个引擎各有一步"命令行走裸行、下一步回到转录"的步进用例。
 
 ## 3. permission-knobs.ts：会话权限旋钮的统一读取
 
@@ -254,11 +272,13 @@ ClaudeCodeSkillProvider 的发现规则：项目侧锚定 git root（`findProjec
 
 ### 7.3 commands.ts：斜杠命令转发桥
 
-dsh 的 `commands` 运行时**本地执行**已注册命令——这一行被消费、永远到不了模型（`src/commands.ts:1-13` 头注）。而 Claude Code 的命令真正展开发生在 CLI 内部，所以桥的语义是**转发**：handler 把原始行 `/<name> [args]` 作为普通 user 消息 `followup` 回给接收 agent，CLI 再原生展开（`forwardClaudeCodeCommand`，`src/commands.ts:64-72`）。注册内建命令（`CLAUDE_CODE_COMMANDS` 七条，`:80-88`）的意义是让 dsh web 斜杠菜单看得见命令面；未注册的 `/行` 也能透传为普通文本，但菜单会隐藏引擎的命令能力。
+dsh 的 `commands` 运行时**本地执行**已注册命令——这一行被消费、永远到不了模型（`src/commands.ts:1-22` 头注）。而 Claude Code 的命令真正展开发生在 CLI 内部，所以桥的语义是**转发**：handler 把原始行 `/<name> [args]` 作为普通 user 消息 `followup` 回给接收 agent，CLI 再原生展开（`forwardClaudeCodeCommand`，`src/commands.ts:72-80`）。注册内建命令（`CLAUDE_CODE_COMMANDS` 四条，`:88-93`）的意义是让 dsh web 斜杠菜单看得见命令面；未注册的 `/行` 也能透传为普通文本，但菜单会隐藏引擎的命令能力。
 
-`discoverUserSlashCommands()`（`:98-124`）同步扫描 `~/.claude/commands/*.md`：名字须过 dsh 命令文法（`COMMAND_NAME`，`:54`）、不得与内建重名、必须能产出描述——描述取 frontmatter `description` 字段，否则取正文首个非空非标题行，超 120 字符截断（`commandDescription`，`:138-162`）。同步扫描是为了在引擎选择 commit 返回前完成注册。**项目级 `.claude/commands/` 刻意不注册**：它随 cwd 变化，全局注册会跨项目串扰（`:16-18`）。
+转发只解决「行回到 agent」，真正让它生效的是驱动侧的斜杠命令步（`engineSlashPrompt`，见 §2 与 `docs/architecture.md` §3.4）：引擎只在 prompt 以 `/` 开头时才走自己的命令面。内建清单按实测收敛（claude 4 条：`help`/`compact`/`clear`/`review`，`/explain`/`/fix`/`/tests` 实测回 `Unknown command`；kimi 6 条见 `docs/engine-kimi.md` §7.1）。
 
-kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `CommandDefinition` / `CommandInvocation` / `CommandResult` 类型（`src/engine-kimi/commands.ts:30`），转发模式相同（`forwardKimiCommand`，`:40-48`），但只注册 ACP prompt 面有意义的子集（TUI 控制类命令不注册，`skill:` 已由技能缝承载——`:12-17` 头注）。
+`discoverUserSlashCommands()`（`:103-129`）同步扫描 `~/.claude/commands/*.md`：名字须过 dsh 命令文法（`COMMAND_NAME`，`:54`）、不得与内建重名、必须能产出描述——描述取 frontmatter `description` 字段，否则取正文首个非空非标题行，超 120 字符截断（`commandDescription`，`:143-167`）。同步扫描是为了在引擎选择 commit 返回前完成注册。**项目级 `.claude/commands/` 刻意不注册**：它随 cwd 变化，全局注册会跨项目串扰（`:16-18`）。
+
+kimi 有自己的命令桥 `src/engine-kimi/commands.ts`，复用这里的 `CommandDefinition` / `CommandInvocation` / `CommandResult` 类型（`src/engine-kimi/commands.ts:30`），转发模式相同（`forwardKimiCommand`，`:40-48`），但只注册 ACP 面**实测实现**的 6 条内建（`compact`/`status`/`usage`/`mcp`/`tasks`/`help`，`:59-66`）；其余 TUI 控制类命令 ACP 面只会回 `Unknown ACP command`，因此不注册（`:2-24` 头注），`skill:` 已由技能缝承载。
 
 ### 7.4 注册点
 
@@ -308,7 +328,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 
 | 改动点 | 直接受影响 | 必须跑的测试 |
 |---|---|---|
-| `prompt.ts` 序列化格式 | 四个引擎的全部 prompt | `tests/engine-claude/mapping.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
+| `prompt.ts` 序列化格式 / 斜杠命令步 | 四个引擎的全部 prompt；claude/pi/kimi 的命令步 | `tests/engine-claude/mapping.spec.ts` + `tests/driver-core/prompt.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `permission-knobs.ts` 读取/枚举 | 四个引擎每次查询的权限立场 | 四个 `tests/engine-*/permission.spec.ts`（claude 侧直接 import 读者，`tests/engine-claude/permission.spec.ts:8`） |
 | `ownership.ts` 生命周期/竞速 | 四个 loop 的创建/卸载正确性 | kimi/pi 的 `tests/engine-*/loop.spec.ts` + claude/codex 的 `tests/engine-*/index.spec.ts` |
 | `inbox.ts` 折叠与落盘 | 四个引擎的收件箱语义与 `agent/inbox/spliced` 持久流 | `tests/driver-core/inbox.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
@@ -323,8 +343,8 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 
 ## 9. 测试覆盖要点
 
-- **driver-core 的直接 spec** 有四个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。`tests/driver-core/hosted-tool-vocabulary.spec.ts`：四个引擎的改名表、Pi 的参数重塑（含保留 `offset`/`limit`、多条 edit 与非对象条目回退）、Claude 计划抽取（含未知状态与畸形条目丢弃），以及非法 JSON 的透传。
-- `prompt.ts` 由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；没有独立的 prompt spec，新增序列化分支时应在这里补用例。
+- **driver-core 的直接 spec** 有五个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。`tests/driver-core/hosted-tool-vocabulary.spec.ts`：四个引擎的改名表、Pi 的参数重塑（含保留 `offset`/`limit`、多条 edit 与非对象条目回退）、Claude 计划抽取（含未知状态与畸形条目丢弃），以及非法 JSON 的透传。`tests/driver-core/prompt.spec.ts`：`engineSlashPrompt` 的每个拒绝臂（空历史、非 user 收尾、tool 结果、技能注入顶位、多块消息、非 text 块、多行、路径状开头）与命中臂，外加 `serializeHistory` 的框架拼接。
+- `serializeHistory` 另由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；claude/pi/kimi 各有一条"命令行走裸行、下一步回到转录"的步进用例，新增分支时两边都要看。
 - `permission-knobs.ts` 没有独立 spec，靠四个 permission spec 的行为断言间接覆盖；改折叠逻辑时四个 spec 都要看。
 - `ownership.ts` 由 kimi/pi 的 loop spec 与 claude/codex 的 index spec 的卸载/竞速场景覆盖，源码里大量 `v8 ignore` 注释标出了理论上不可达的兜底分支——改动时不要用"删分支"来凑覆盖率，这些注释本身就是设计文档。
 - `skill-inject.ts` 由四个 agent spec 的 `/name` 步进场景覆盖。

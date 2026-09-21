@@ -31,7 +31,7 @@ import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './types.ts'
 import type { PiModelEntry } from './probe.ts'
-import { serializeHistory } from '../driver-core/prompt.ts'
+import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
@@ -582,7 +582,9 @@ export class PiAgent implements Agent {
       throw new Error(`agent "${this.id}": no working directory — start the session with cwd metadata`)
     }
     const history: Message[] = this.session.deriveMessages()
-    const prompt = serializeHistory(history)
+    // A live slash command is the engine's own control line: send it verbatim
+    // (Pi expands commands/templates only when the prompt opens with `/`).
+    const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)

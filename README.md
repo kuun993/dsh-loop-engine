@@ -187,7 +187,9 @@ stays generic rather than mis-rendering.
 
 - The Claude Code driver runs one SDK query per step; its slash commands are
   bridged into the web menu (built-ins plus user-level `~/.claude/commands/`)
-  and forwarded to the engine, which expands them natively. Project-level
+  and forwarded to the engine, which expands them natively — the CLI dispatches
+  a local command only when the prompt opens with `/`, so a bridged line is sent
+  as the step's whole prompt instead of the framed transcript. Project-level
   `.claude/commands/` files stay engine-side and also work typed directly.
 - The Codex driver runs `codex app-server`; the thread starts with the
   session's `sandboxMode` + `approvalPolicy` stance, and the model's runtime
@@ -216,12 +218,15 @@ stays generic rather than mis-rendering.
   (default read-only sandbox). Its project `AGENTS.md` chain (cwd→git root) and
   `.kimi-code/skills/` catalogs (user and project) are surfaced through the dsh
   skill-injection seam, and its slash commands are bridged (built-ins forward the
-  raw `/name` line back to the engine, which expands it). The prompt is an ACP
+  raw `/name` line back to the engine, which expands it; the line is sent as the
+  step's whole prompt, since Kimi's ACP adapter only parses a command that opens
+  the prompt). Bridged built-ins are the six the ACP surface actually implements
+  (`compact`, `status`, `usage`, `mcp`, `tasks`, `help`). The prompt is an ACP
   request body — not an argv positional — so there is no command-line length
   ceiling. Note Kimi's remaining slash-command surface is TUI-only
   (`/login`, `/provider`, `/settings`, `/sessions`, …); those are not bridged
-  because the ACP prompt surface does not expand them, but `skill:` commands are
-  carried by the skill seam and Kimi's own shorthand.
+  because the ACP prompt surface answers `Unknown ACP command` for them, but
+  `skill:` commands are carried by the skill seam and Kimi's own shorthand.
 
 ## License
 

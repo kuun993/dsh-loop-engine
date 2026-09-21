@@ -285,6 +285,36 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+  it('sends a live slash command verbatim, bypassing the transcript framing', async () => {
+    const ctx = await harness()
+    try {
+      // The CLI answers a recognized command with a synthetic assistant message
+      // (no model turn), which the driver maps like any other assistant message.
+      queryMock.mockImplementation(() => stream([assistantText('/help isn\'t available in this environment.'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('slash-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // Claude Code dispatches a local command only when the prompt OPENS with
+      // `/`, so the framed transcript would hand `/help` to the model instead.
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: '/help' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect(queryMock.mock.calls[0]?.[0].prompt).toBe('/help')
+      expect(agent.session.snapshotEvents().find(event => event.type === 'assistant/message')).toMatchObject({
+        data: { message: { content: [{ type: 'text', text: '/help isn\'t available in this environment.' }] } },
+      })
+
+      // The bypass is per step: a following ordinary message replays the
+      // transcript, command line and all.
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'and now?' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryMock.mock.calls[1]?.[0].prompt).toContain('<user>\n/help\n</user>')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('streams assistant chunks and embeds the attempt stream in the final message', async () => {
     const ctx = await harness()
     try {

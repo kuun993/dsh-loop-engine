@@ -8,7 +8,7 @@ Codex 引擎让 dsh 会话由 OpenAI Codex CLI 驱动：每个 dsh step 通过 J
 
 核心设计约束（与 claude-code 引擎同源）：
 
-- **"Model-visible ⟺ logged"**：发给 codex 的 prompt 是 `Session.deriveMessages()` 的纯序列化（`src/engine-codex/agent.ts:495-496` + `src/driver-core/prompt.ts:93-127`），会话日志是模型上下文的唯一事实源。
+- **"Model-visible ⟺ logged"**：发给 codex 的 prompt 是 `Session.deriveMessages()` 的纯序列化（`src/engine-codex/agent.ts:601-602` + `src/driver-core/prompt.ts:150`），会话日志是模型上下文的唯一事实源。**codex 是四个引擎里唯一不走斜杠命令步的**（`src/driver-core/prompt.ts:122` 的 `engineSlashPrompt`，见 `docs/driver-core.md` §2）：app-server 协议没有文本斜杠面——`turn/start` 的 `UserInput` 只有 text/image/localImage/audio/localAudio/skill/mention，压缩是独立 RPC `thread/compact/start`（核自 codex 0.149.1 的 app-server 协议 schema）——把裸行原样发过去只会平白丢掉上下文，而换不来任何本地展开。要让引擎的命令面在 codex 下可用，得另找协议项（`SkillUserInput` 之类），不是 prompt 形状的事。
 - **审批请求经 dsh 审批 seam 应答**：app-server 把审批实现为 server→client 的 JSON-RPC request（`item/commandExecution|fileChange|permissions/requestApproval`），客户端注册 handler 写回应答（`src/engine-codex/appserver/client.ts`），agent 侧转 `ctx.approval`（§6.4）；线程启动参数仍按声明式折叠 `sandboxMode`/`approvalPolicy`。
 - **不走 dsh subprocess 接缝**：与 pi 引擎不同，codex 子进程由驱动自己用 `node:child_process.spawn` 拉起（`src/engine-codex/appserver/client.ts:89`），不经 `dsh-subprocess` 服务，因此没有 harness 沙箱包装——整个子进程的权限边界就是 codex CLI 自己的 sandbox。
 - **CLI 二进制来自 pinned 依赖**：入口解析自本包锁死的 `@openai/codex` 依赖（`package.json` 中 `@openai/codex: 0.149.1`），用当前 Node 解释器执行其 `bin/codex.js app-server`（`src/engine-codex/appserver/client.ts:46-48, 89-91`）。

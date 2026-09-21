@@ -9,7 +9,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 两个核心设计动机：
 
 - **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:166`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
-- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:558-559`、`src/driver-core/prompt.ts:93-127`）。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:829-834`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
+- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:584-587`、`src/driver-core/prompt.ts:150`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:829-834`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
 
@@ -25,7 +25,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 | `src/engine-pi/rpc/types.ts` | `pi --mode rpc` 协议的最小子集类型（纯类型） |
 | `src/engine-pi/rpc/mapping.ts` | usage / tool result / tool call → dsh 会话事件的映射函数 |
 
-共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`prompt.ts`（serializeHistory）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
+共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`prompt.ts`（serializeHistory、engineSlashPrompt）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
 
 ## 3. Loop 工厂与 Agent 生命周期
 
