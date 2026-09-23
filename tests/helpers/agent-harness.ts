@@ -16,6 +16,7 @@
 
 import { vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import type { AgentFactory } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -23,7 +24,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 
 /** A loop class as the specs construct it: `new Loop(ctx, config)`. */
-type LoopCtor = new (ctx: Context, config: never) => unknown
+type LoopCtor = new (ctx: Context, config: never) => AgentFactory
 
 /** How the booted context obtains a subprocess runtime, when its engine needs one. */
 export type SubprocessStrategy =
@@ -34,12 +35,29 @@ export type SubprocessStrategy =
   /** Provide nothing: the engine never touches subprocess (Codex). */
   | 'none'
 
-/** Wrap one engine's loop class as the Cordis plugin a spec mounts. */
+/**
+ * Wrap one engine's driver as the Cordis plugin a spec mounts.
+ *
+ * An engine runtime is not itself a plugin: in production the router owns the
+ * single AgentFactory slot and delegates to it ({@link RouterLoop}). A
+ * per-engine spec wants the engine driven directly, so the wrapper does what
+ * the router does for one engine — construct it, hand it the slot, and publish
+ * the three prompt variables the harness loop normally contributes. The engine
+ * registers its own ctx key, so `ctx.agentLoopKimi` and friends still resolve
+ * exactly as they did when each engine was a service.
+ */
 export function loopPluginFor(ctor: LoopCtor, inject: readonly string[]) {
   return {
     inject: [...inject],
     apply: (ctx: Context, config: Record<string, unknown>): void => {
-      void new (ctor as new (ctx: Context, config: unknown) => unknown)(ctx, config)
+      const engine = new (ctor as new (ctx: Context, config: unknown) => AgentFactory)(ctx, config)
+      // Nested under this wrapper's fiber on purpose: unloading the wrapper must
+      // release the single factory slot, which is the behavior the per-engine
+      // lifecycle specs assert.
+      ctx.effect(() => ctx.agents.setFactory(engine), 'test-loop.setFactory()')
+      ctx.systemPrompt.variable('provider', context => context.agent?.options.provider)
+      ctx.systemPrompt.variable('model', context => context.agent?.options.model)
+      ctx.systemPrompt.variable('cwd', context => context.agent?.session.header.cwd)
     },
   }
 }

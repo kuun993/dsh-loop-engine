@@ -17,13 +17,10 @@ import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
 
-/** Local plugin wrapper: mount constructs the Pi loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new PiLoop(ctx, config as Parameters<typeof PiLoop>[1])
-  },
-}
+import { loopPluginFor } from '../helpers/agent-harness.ts'
+
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 async function harness(): Promise<Context> {
   const ctx = new Context()

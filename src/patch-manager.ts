@@ -2,34 +2,41 @@
  * Managed-block editing for a profile's `cordis.patch.yml`.
  *
  * The plugin owns one contiguous block inside the user's patch file, delimited
- * by a begin/end marker pair, and rewrites only that span on engine switches
- * — everything else the user wrote (other patches, their comments) survives
- * byte for byte. The block's content is the loader patch that takes the loop
- * engine over: it disables the base bundle's `agent-loop` row so this plugin's
- * factory (hosted by dsh-loop-engine) can register without colliding, because
- * the harness admits exactly one AgentFactory:
+ * by a begin/end marker pair, and rewrites only that span — everything else the
+ * user wrote (other patches, their comments) survives byte for byte. The block
+ * is what hands the process-wide AgentFactory slot to this plugin's router: it
+ * disables the base bundle's `agent-loop` row, because the harness admits
+ * exactly one AgentFactory and the router (which extends the harness loop, and
+ * therefore serves `in-process` sessions too) registers itself as that one.
  *
- *   # -- dsh-loop-engine managed block: claude-code --
+ *   # -- dsh-loop-engine managed block --
  *   - id: agent-loop
  *     disabled: true
  *   - id: command-goal
  *     disabled: true
  *   # -- /dsh-loop-engine managed block --
  *
- * The `command-goal` row goes down with the loop: a hosted engine owns the
- * session's command surface, and dsh's `/goal` would otherwise collide with
- * an engine's own goal command (Kimi) or dangle over a goal service nothing
- * drives (the other engines). The remaining dsh-native commands (`/export`,
- * `/feedback`, `/permission`) are engine-agnostic session/settings controls
- * that keep working under a hosted engine, so they stay.
+ * The block names no engine. Which engine a session runs is a PER-SESSION
+ * decision carried by its agent preset, so it cannot live in a process-wide
+ * configuration file; the block's only job is to free the slot for the router.
+ * The `command-goal` row goes down with the loop: it is the host-plane copy of
+ * dsh's goal command, and a goal service nothing drives has no business being
+ * mounted for a profile whose loop is decided per session. The remaining
+ * dsh-native commands (`/export`, `/feedback`, `/permission`) are
+ * engine-agnostic session and settings controls that keep working under every
+ * engine. Per-session command surfaces are the preset's business — a hosted
+ * session joins an engine preset that strips `command-goal` itself, which is the
+ * only place that reaches the preset-layer registration.
  *
- * `in-process` renders an absent block (the base bundle's `agent-loop` row
- * stays active and supplies the factory), so switching back removes the span
- * entirely. Any other engine renders the same disable block, and the begin
- * marker carries the specific engine id (`# -- dsh-loop-engine managed block:
- * claude-code --`) so `currentEngineOf` can read which non-default engine owns
- * the slot from the file alone. All functions here are pure string transforms —
- * file I/O and durability live in the plugin's apply.
+ * Blocks written before the plugin routed per session carried the single
+ * engine's id in the begin marker (`# -- dsh-loop-engine managed block:
+ * claude-code --`). {@link legacyBlockEngineOf} reads that form so an upgrade
+ * can carry the pinned engine into the settings seed before the block is
+ * rewritten to the engine-agnostic form; a legacy block is otherwise treated as
+ * a present block by {@link hasManagedBlock}.
+ *
+ * All functions here are pure string transforms — file I/O and durability live
+ * in the plugin's apply.
  *
  * @module dsh-loop-engine/patch-manager
  */
@@ -38,7 +45,13 @@ import type { LoopEngineId } from './settings.ts'
 import { LOOP_ENGINE_IDS } from './settings.ts'
 
 /** Begin marker of the plugin-managed span inside a profile patch file. */
-export const MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block: '
+export const MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block --'
+
+/**
+ * Begin-marker prefix of the pre-routing block form, which named the one engine
+ * the profile was pinned to.
+ */
+export const LEGACY_MANAGED_BLOCK_BEGIN = '# -- dsh-loop-engine managed block: '
 
 /** End marker of the plugin-managed span inside a profile patch file. */
 export const MANAGED_BLOCK_END = '# -- /dsh-loop-engine managed block --'
@@ -46,11 +59,10 @@ export const MANAGED_BLOCK_END = '# -- /dsh-loop-engine managed block --'
 /** The block's trailing newline convention (one blank line before the end marker). */
 const END_MARKER_LINE = `${MANAGED_BLOCK_END}\n`
 
-/** Render the managed block for one engine; `in-process` returns the empty span. */
-export function renderManagedBlock(engine: LoopEngineId): string {
-  if (engine === 'in-process') return ''
+/** The loader patch that frees the single AgentFactory slot for the router. */
+export function renderManagedBlock(): string {
   return [
-    `${MANAGED_BLOCK_BEGIN}${engine} --`,
+    MANAGED_BLOCK_BEGIN,
     '- id: agent-loop',
     '  disabled: true',
     '- id: command-goal',
@@ -59,39 +71,47 @@ export function renderManagedBlock(engine: LoopEngineId): string {
   ].join('\n')
 }
 
-/** Whether a patch-file text contains the managed block span. */
-export function hasManagedBlock(text: string): boolean {
-  return text.includes(MANAGED_BLOCK_BEGIN)
+/**
+ * Whether a patch-file text contains the LEGACY managed block span, which
+ * named the single engine the profile used to be pinned to.
+ */
+export function hasLegacyManagedBlock(text: string): boolean {
+  return text.includes(LEGACY_MANAGED_BLOCK_BEGIN)
 }
 
-/** Begin-marker line pattern carrying the engine name (`<name>` is the engine id). */
-const BEGIN_MARKER_RE = /^# -- dsh-loop-engine managed block: (\S+) --$/m
+/**
+ * Whether a patch-file text contains the managed block span, in either the
+ * current or the legacy form.
+ */
+export function hasManagedBlock(text: string): boolean {
+  return text.includes('# -- dsh-loop-engine managed block')
+}
+
+/** Legacy begin-marker line pattern carrying the engine name. */
+const LEGACY_BEGIN_MARKER_RE = /^# -- dsh-loop-engine managed block: (\S+) --$/m
 
 /**
- * The engine id the managed block's begin marker names, when this build knows
- * it. `undefined` covers both "no managed block" and "the block names an engine
- * this build does not recognize" — the second being the state where the block
- * still disables the base `agent-loop` row while no factory can take the slot.
+ * The engine a LEGACY managed block pinned the profile to, when the block has
+ * that form and names an engine this build knows. `undefined` covers the
+ * current engine-agnostic block, no block at all, and a legacy block naming an
+ * engine this build does not recognize.
  */
-export function managedBlockEngineOf(text: string): LoopEngineId | undefined {
-  const engine = BEGIN_MARKER_RE.exec(text)?.[1]
+export function legacyBlockEngineOf(text: string): LoopEngineId | undefined {
+  const engine = LEGACY_BEGIN_MARKER_RE.exec(text)?.[1]
   return (LOOP_ENGINE_IDS as readonly string[]).includes(engine ?? '')
     ? engine as LoopEngineId
     : undefined
-}
-
-/** Derive the current engine from a patch-file text by the managed block's begin marker. */
-export function currentEngineOf(text: string): LoopEngineId {
-  return managedBlockEngineOf(text) ?? 'in-process'
 }
 
 /** Split a patch-file text at the managed span; absent span means it appends. */
 function managedSpan(
   text: string,
 ): { head: string; tail: string; present: boolean; blankBefore: boolean } {
-  const begin = text.indexOf(MANAGED_BLOCK_BEGIN)
+  const begin = text.indexOf('# -- dsh-loop-engine managed block')
   if (begin === -1) return { head: text, tail: '', present: false, blankBefore: false }
-  const afterBegin = begin + MANAGED_BLOCK_BEGIN.length
+  const afterBegin = begin + LEGACY_MANAGED_BLOCK_BEGIN.length
+  // The end marker is what actually closes the span; a legacy begin marker is
+  // just a longer first line.
   const endAt = text.indexOf(MANAGED_BLOCK_END, afterBegin)
   const spanEnd = endAt === -1 ? text.length : endAt + END_MARKER_LINE.length
   // The plugin writes one blank line before its begin marker; preserve it when
@@ -112,26 +132,15 @@ function ensureTrailingNewline(text: string): string {
 }
 
 /**
- * A root-level entry: a column-0 block-sequence item (`- id: …`) or flow array
- * (`[ … ]`). Used to decide whether a patch-file text already carries a
- * top-level collection, so the plugin never leaves a file that the harness
- * rejects (a comment- or whitespace-only file parses to `null`, and the loader
- * demands a top-level array).
- */
-function hasRootEntry(text: string): boolean {
-  return /^(?:- |\[)/m.test(text)
-}
-
-/**
  * The profile seed template (`cordis.patch.yml` on a fresh profile) is a lone
  * root-level empty flow sequence `[]`. The plugin's managed block is itself a
  * root-level block sequence of loader entries, so a block coexisting with a
  * surviving `[]` is TWO root collections in one document — YAML the harness
  * rejects with "end of the stream or a document separator is expected", and the
- * web app then fails to boot whenever a non-default engine is selected.
- * Remove a whole-line root `[]` placeholder so the managed block is the sole
- * top-level collection. Anchored to column 0 so an indented `[]` that is a real
- * value inside an entry's nested config is never touched.
+ * web app then fails to boot. Remove a whole-line root `[]` placeholder so the
+ * managed block is the sole top-level collection. Anchored to column 0 so an
+ * indented `[]` that is a real value inside an entry's nested config is never
+ * touched.
  */
 function dropSeedPlaceholder(text: string): string {
   // Drop only the `[]` line itself; a following blank separator (the one the
@@ -140,49 +149,23 @@ function dropSeedPlaceholder(text: string): string {
 }
 
 /**
- * Re-seed a patch file that a removal left with no entries at all: the harness
- * loads a top-level array, and a bare or comment-only text is `null` to it.
- * Preserve any comments and append an empty root array on its own line.
- */
-function seedEmptyArray(text: string): string {
-  const head = text.replace(/\n+$/, '')
-  return head === '' ? '[]\n' : `${head}\n[]\n`
-}
-
-/**
- * Produce the next patch-file text for a target engine, preserving every byte
- * outside the managed span. Appends the span when absent; replaces or removes
- * it when present. The managed block is a root-level collection, so a leftover
- * seed `[]` is dropped when adding it, and a removal that leaves no entries is
- * re-seeded back to `[]` — either way the file stays a single valid top-level
- * array the harness can boot.
+ * Produce the next patch-file text carrying the managed block, preserving every
+ * byte outside the managed span. Appends the span when absent and replaces it
+ * when present — including a legacy span, which is rewritten to the current
+ * form. The managed block is a root-level collection, so a leftover seed `[]`
+ * is dropped with it, leaving the file a single valid top-level array the
+ * harness can boot: the block's own `- id: agent-loop` is a column-0 entry, so
+ * a file carrying it never needs a re-seed.
  * @param text - current patch-file text.
- * @param engine - target engine.
  * @returns the rewritten patch-file text.
  */
-export function applyManagedBlock(text: string, engine: LoopEngineId): string {
-  const block = renderManagedBlock(engine)
+export function applyManagedBlock(text: string): string {
+  const block = renderManagedBlock()
   const span = managedSpan(text)
-  let result: string
   if (!span.present) {
-    if (block === '') {
-      result = text
-    } else {
-      const base = ensureTrailingNewline(text)
-      result = `${base}\n${block}`
-    }
-  } else if (block === '') {
-    // Collapse the blank separator that preceded the removed span so repeated
-    // switches do not accumulate blank lines; the head already shed one blank
-    // in managedSpan, and the tail's leading blank is the span's own newline.
-    result = span.tail.startsWith('\n') ? `${span.head}${span.tail.slice(1)}` : `${span.head}${span.tail}`
-  } else {
-    result = `${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`
+    // A missing or empty layer gains the block alone, with no leading filler.
+    if (text === '') return block
+    return dropSeedPlaceholder(`${ensureTrailingNewline(text)}\n${block}`)
   }
-  if (block !== '') return dropSeedPlaceholder(result)
-  // An empty/whitespace input is "no layer" and stays bare; anything else —
-  // a comment-only file, or a removal that left no entries — is a present file
-  // the harness must still load as a top-level array, so re-seed `[]`.
-  if (text.trim() === '') return result
-  return hasRootEntry(result) ? result : seedEmptyArray(result)
+  return dropSeedPlaceholder(`${span.head}${span.blankBefore ? '\n' : ''}${block}${span.tail}`)
 }

@@ -17,13 +17,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES } from '../../src/engine-claude/loop.ts'
-/** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
-  },
-}
+import { loopPluginFor } from '../helpers/agent-harness.ts'
+
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
 

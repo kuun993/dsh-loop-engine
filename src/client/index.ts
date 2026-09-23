@@ -20,6 +20,8 @@ import type { LoopEngineBadgeInjected } from './LoopEngineBadge.tsx'
 import { LoopEngineComposerSelect } from './LoopEngineComposerSelect.tsx'
 import type { LoopEngineComposerSelectInjected } from './LoopEngineComposerSelect.tsx'
 import { LoopEngineStore, decodeLoopEngine } from './store.ts'
+import { createSessionEngineCache, sessionEngineSwitcher } from './session-engine.ts'
+import { installReloadReturn } from './reload.ts'
 import { installTurnStatusStyles } from './turn-status.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
@@ -62,10 +64,31 @@ export function apply(ctx: ClientContext): void {
     return () => { controller.dispose() }
   }, 'loop-engine: store lifecycle')
 
-  // Paint the chat turn-status row in the selected engine's colors and glyph.
-  // The harness owns that row's text and offers no slot for it, so this is a
-  // stylesheet keyed on the engine, not a component.
-  installTurnStatusStyles(ctx, controller.store)
+  // Paint the chat turn-status row in the colors and glyph of the engine the
+  // session ON SCREEN runs. The harness owns that row's text and offers no slot
+  // for it, so this is a stylesheet keyed on a document-level attribute; the
+  // attribute itself is written by the session surfaces through the hook they
+  // share (`./use-session-engine.ts`) — never by the cache below, which answers
+  // for sessions that are not on screen — and that hook reflects the same
+  // authoritative answer the header chip and the composer render from, under the
+  // focus guard a document-level attribute needs.
+  installTurnStatusStyles(ctx)
+
+  // The authoritative per-session engine read: the plugin's own Remote namespace
+  // (`remote.loopEngine.engine`), mounted here and cached per session. Both the
+  // header chip and the composer render from it, and the composer's switch
+  // invalidates it — the client session list's `agentPreset` hint is deliberately
+  // NOT read anywhere any more: it is a partial cache and it lags the durable log
+  // on exactly the sessions (engine switched while blank) users noticed it on.
+  const sessionEngines = createSessionEngineCache(ctx)
+
+  // Switch a session's engine onto the harness loop and the host releases that
+  // session's agent, which leaves THIS page holding a session the controller
+  // marked as gone. The switcher reloads the page for that reason, and this
+  // installation is the other half: the page that comes back reads the session id
+  // the switcher stashed and opens that session again, so the host rebuilds it on
+  // the engine its record names (`./reload.ts`).
+  installReloadReturn(ctx)
 
   const t = ctx.locale.bind(NS) as LoopEngineSectionInjected['t']
   const injected = (): LoopEngineSectionInjected => ({
@@ -82,15 +105,14 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
   }, LoopEngineSection))
 
-  // The conversation header badge shares the same controller: the engine is a
-  // deployment choice, so one snapshot feeds the settings picker and the
-  // per-session chip. Registered in the conversation scope so it exists only
-  // where a session header is rendered.
+  // The conversation header badge reads the session's own engine through the
+  // plugin's Remote, so it needs only this plugin's copy plus that cache — not
+  // the settings store: the settings engine is the default for sessions created
+  // later, while the chip names what the session on screen actually runs.
+  // Registered in the conversation scope so it exists only where a session header
+  // is rendered.
   ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
-    const badgeInjected = (): LoopEngineBadgeInjected => ({
-      hooks: { snapshot: controller.store },
-      t,
-    })
+    const badgeInjected = (): LoopEngineBadgeInjected => ({ sessionEngines, t })
     scope.effect(() => {
       return scope.slots.register({
         name: 'conversation.session.header.actions',
@@ -106,13 +128,30 @@ export function apply(ctx: ClientContext): void {
 
   // The composer's loop-engine picker: registered at the tool-row seat beside
   // the model select so the engine is switchable in the chat page, not only in
-  // settings. Same controller/store, so all three surfaces stay in sync. The
-  // dependency on `conversation` (like the header badge) ensures ui-conversation
-  // has declared the `conversation.input.right` seat before this entry lands.
+  // settings. A pick moves that session over this plugin's own `loopEngine/select`
+  // endpoint and reads the session's engine back from the same Remote's `engine`
+  // endpoint; the settings default stays this plugin's own fallback for a seat
+  // without a session. The dependency on `conversation` (like the header badge)
+  // ensures ui-conversation has declared the `conversation.input.right` seat
+  // before this entry lands.
+  //
+  // A successful switch drops the session's cached answer, so the picker, the
+  // header chip, and the chat turn-status row immediately report what the
+  // session now runs rather than the engine it ran a moment ago: the row follows
+  // the surface's own reflection, which re-runs when the re-read lands.
+  //
+  // A switch the host had to make by releasing the session's agent goes further:
+  // the switcher reloads the page, which is what clears the client state that
+  // release leaves behind, and it stashes the session for the page that comes
+  // back — that is how the reload lands on the same session instead of the
+  // client's own startup fallback.
+  const switchEngine = sessionEngineSwitcher(ctx, (sessionId) => { sessionEngines.invalidate(sessionId) })
   ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
     const composerInjected = (): LoopEngineComposerSelectInjected => ({
       controller,
       hooks: { snapshot: controller.store },
+      sessionEngines,
+      switchEngine,
       t,
     })
     scope.effect(() => {

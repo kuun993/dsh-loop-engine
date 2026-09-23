@@ -1,8 +1,9 @@
 /**
- * Loop engine settings section component: one dropdown choosing the agent
- * loop engine, backed by the duplicated settings scope through the inject face.
- * Changing the engine asks for confirmation first, because the switch
- * interrupts sessions still running on the previous engine.
+ * Loop engine settings section component: one dropdown choosing the DEFAULT
+ * agent loop engine for new sessions, backed by the duplicated settings scope
+ * through the inject face. The commit is confirmed first because it changes
+ * what every future session runs; sessions that already exist keep the engine
+ * they run, so nothing is interrupted and nothing reloads.
  *
  * Styling is token-driven like the rest of the settings shell (`--dsw-*`
  * aliases), with the picker rendered through the shared `Menu` primitive and
@@ -22,7 +23,7 @@ import {
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
-import type { LoopEngineId } from '../settings.ts'
+import type { LoopEngineId } from '../agent-preset-ids.ts'
 import type { en } from './locales.ts'
 
 /** Injected dependencies of {@link LoopEngineSection} (slot `inject`). */
@@ -171,12 +172,10 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
     const value = pending
     setPending(null)
     if (value !== null) {
-      void controller.setEngine(value).then((landed) => {
-        // Session views established under the previous engine's factory do
-        // not migrate: a committed switch reloads the page so every session
-        // re-attaches against the new composition.
-        if (landed) window.location.reload()
-      })
+      // The default engine decides what new sessions run; sessions already
+      // created keep the engine they run, so nothing on screen changes on commit
+      // and no reload is needed.
+      void controller.setEngine(value)
     }
   }
   const cancelSwitch = (): void => { setPending(null) }

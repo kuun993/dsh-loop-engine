@@ -1,10 +1,9 @@
 /**
- * Pi loop engine module: hosts the AgentFactory that drives every session
- * through the Pi CLI (`@earendil-works/pi-coding-agent`) over its JSONL RPC
- * mode, one stateless session per dsh step, with the durable session log as the
- * sole source of model context. dsh-loop-engine constructs this factory when
- * the Pi engine is selected; this module is a library, not a Cordis plugin
- * entry. Pi has no permission system, so the entire `pi --mode rpc` child is
+ * Pi loop engine module: drives every session it is handed through the Pi CLI
+ * (`@earendil-works/pi-coding-agent`) over its JSONL RPC mode, one stateless
+ * session per dsh step, with the durable session log as the sole source of
+ * model context. The router routes a session here on the plugin's own engine
+ * record, else its agent preset; this module is a library, not a Cordis plugin entry. Pi has no permission system, so the entire `pi --mode rpc` child is
  * spawned through the dsh subprocess seam — the only available privilege
  * boundary — and its `--tools` are pruned to the resolved sandbox stance.
  *
@@ -24,7 +23,7 @@ import { probePiModels } from './probe.ts'
 import type { PiModelEntry } from './probe.ts'
 import type { PiProcess, PiSpawnSpec } from './rpc/client.ts'
 import type { PiSandboxMode, ResolvedConfig } from './types.ts'
-import { HostedLoopFactory } from '../driver-core/hosted-loop-factory.ts'
+import { HostedEngineRuntime } from '../driver-core/hosted-engine-runtime.ts'
 
 /** Pi CLI sandbox modes a deployment may pin. */
 export const PI_SANDBOX_MODES: readonly PiSandboxMode[] = [
@@ -132,7 +131,9 @@ function fromSubprocess(handle: SubprocessHandle): PiProcess {
   }
 }
 
-/** Host-face ctx key for the Pi loop service. */
+/** Host-face ctx key this engine's runtime is registered under. */
+export const PI_ENGINE_LABEL = 'agentLoopPi'
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     agentLoopPi: PiLoop
@@ -140,15 +141,11 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
- * Concrete AgentFactory and driver service of the Pi loop. Creation and resume
- * follow the registry factory contract and the shared publication transaction:
- * prepare, run setup, then publish through both registries, announce, and emit
- * `agent/session-start`.
+ * Creation/resume machinery for the Pi engine. The process-wide AgentFactory
+ * slot belongs to the router, which delegates each session to the engine its
+ * preset names; this class is that engine's driver, not a plugin.
  */
-export class PiLoop extends HostedLoopFactory<ResolvedConfig, PiAgent> {
-  /** Services the loop resolves through its own fiber; blessed identically to the package-level entry inject. */
-  static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
-
+export class PiLoop extends HostedEngineRuntime<ResolvedConfig, PiAgent> {
   /** Process-tree spawn capability handed to every agent, sandboxed by the subprocess seam. */
   readonly spawn: (spec: PiSpawnSpec) => PiProcess
   /** Resolved Pi CLI entrypoint; `argv[0]` of every Pi RPC child. */
@@ -160,13 +157,21 @@ export class PiLoop extends HostedLoopFactory<ResolvedConfig, PiAgent> {
     ctx: Context,
     config: Config,
   ) {
-    super(ctx, 'agentLoopPi', resolveConfig(config))
+    super(ctx, PI_ENGINE_LABEL, resolveConfig(config))
+    // Resolved lazily rather than injected: this engine is built only when a
+    // session actually selects it, so a profile without the subprocess service
+    // fails that session loud instead of stalling the whole plugin.
+    const subprocess = ctx.get('subprocess')
+    if (subprocess === undefined) {
+      throw new Error('loop-engine: the pi engine needs the dsh subprocess service on this context')
+    }
     this.bin = piCliEntrypoint()
     this.catalog = config.piCatalogHolder ?? { entries: [] }
-    this.spawn = (spec) => fromSubprocess(this.runtime.ctx.subprocess.spawn(piSubprocessSpec(spec, PI_DISPOSE_GRACE_MS)))
-    // Probe discoverable Pi models once per mount and publish into the shared
-    // holder so the route adapter /model directory reflects the catalog. Failure
-    // leaves the holder empty (advisory): /model shows "no models", engine runs.
+    this.spawn = (spec) => fromSubprocess(subprocess.spawn(piSubprocessSpec(spec, PI_DISPOSE_GRACE_MS)))
+    // Probe discoverable Pi models once per engine instance and publish into the
+    // shared holder so the route adapter /model directory reflects the catalog.
+    // Failure leaves the holder empty (advisory): /model shows "no models", the
+    // engine still runs.
     const holder = config.piCatalogHolder
     if (holder !== undefined) {
       void probePiModels(this.bin, (spec) => this.spawn(spec))

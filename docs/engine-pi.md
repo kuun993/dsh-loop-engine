@@ -8,14 +8,14 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 
 两个核心设计动机：
 
-- **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:166`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
+- **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:164-170`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
 - **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:584-587`、`src/driver-core/prompt.ts:150`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:829-834`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
 
 | 文件 | 职责 |
 |---|---|
-| `src/engine-pi/loop.ts` | `PiLoop`：Cordis Service + AgentFactory。配置 schema、Pi CLI 入口解析、subprocess 投影、create/resume 发布事务 |
+| `src/engine-pi/loop.ts` | `PiLoop`：`HostedEngineRuntime` 子类（普通类，不是 Cordis Service；实例仍挂在 ctx key `agentLoopPi` 上）。配置 schema、Pi CLI 入口解析、`subprocess` 服务的惰性解析、create/resume 发布事务 |
 | `src/engine-pi/agent.ts` | `PiAgent`：相位机（idle/maintenance/running）、inbox、每 step 的 RPC 查询与事件→会话日志映射 |
 | `src/engine-pi/permission.ts` | 把会话的 `sandbox/mode` / `approval/policy` 事件折叠成 Pi 运行时姿态（sandboxMode + `--tools`） |
 | `src/engine-pi/skills.ts` | `PiSkillProvider`：把 pi 的上下文文件与 skills 目录暴露为 dsh 技能 |
@@ -25,22 +25,24 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 | `src/engine-pi/rpc/types.ts` | `pi --mode rpc` 协议的最小子集类型（纯类型） |
 | `src/engine-pi/rpc/mapping.ts` | usage / tool result / tool call → dsh 会话事件的映射函数 |
 
-共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`prompt.ts`（serializeHistory、engineSlashPrompt）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
+共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`hosted-engine-runtime.ts`（`HostedEngineRuntime`：四个引擎共用的 create/resume 事务，§3.1/3.2）、`prompt.ts`（serializeHistory、engineSlashPrompt）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
 
-## 3. Loop 工厂与 Agent 生命周期
+## 3. 引擎运行时与 Agent 生命周期
 
-### 3.1 PiLoop（工厂）
+### 3.1 PiLoop（引擎运行时）
 
-`PiLoop extends HostedLoopFactory<ResolvedConfig, PiAgent>`（`src/engine-pi/loop.ts:148`），`inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（`loop.ts:150`）。构造函数做四件事（`loop.ts:158-177`）：
+`PiLoop extends HostedEngineRuntime<ResolvedConfig, PiAgent>`（`src/engine-pi/loop.ts:148`）——一个**普通类**，不是 Cordis Service，也不自己抢 AgentFactory 槽位。进程内唯一的 AgentFactory 是路由器 `RouterLoop`（`src/router-loop.ts:114`）：它按插件自己的每会话引擎记录分发（无记录时回退到会话记录的 agent preset），并在某个会话第一次选中 pi 时构造 `PiLoop`（`src/index.ts:562-563` 的 `buildEngine`，实例缓存于 `RouterLoop.runtimeOf`，`src/router-loop.ts:158-164`）。构造函数做四件事（`loop.ts:156-181`）：
 
-1. `resolveConfig` 在插件配置边界定稿配置（`loop.ts:72-81`）；
-2. `piCliEntrypoint()` 解析 Pi CLI 的 bin 路径——包是 ESM-only，所以用 `import.meta.resolve` 拿到入口、回退两级到包根、读 `package.json` 的 `bin` 字段（`loop.ts:83-98`）；
-3. `spawn` 投影：`piSubprocessSpec` 把 `PiSpawnSpec` 包成 `SubprocessSpawnSpec`，在 argv 前加 `process.execPath`（即用当前 node 跑 pi 的 JS 入口），stdio 全 pipe，`graceMs = 3000`（`PI_DISPOSE_GRACE_MS`，`loop.ts:37、100-109`）；`fromSubprocess` 再把 dsh 的 `SubprocessHandle` 投影回协议传输所需的 `PiProcess`（`loop.ts:112-133`）；
-4. 唯一的重写 `buildAgent`（`loop.ts:179-184`）：`new PiAgent(..., this.config, this.spawn, this.bin, this.catalog)`——引擎特有的 spawn/bin/模型目录都在这三行里交给驱动。所有权跟踪、`ctx.agents.setFactory(this)`（占用 harness 唯一 AgentFactory 槽位）、三个 systemPrompt 变量由**基类**在构造时完成（`src/driver-core/hosted-loop-factory.ts:109-116`）。
+1. `resolveConfig` 在插件配置边界定稿配置（`loop.ts:71-79`）；
+2. `piCliEntrypoint()` 解析 Pi CLI 的 bin 路径——包是 ESM-only，所以用 `import.meta.resolve` 拿到入口、回退两级到包根、读 `package.json` 的 `bin` 字段（`loop.ts:82-96`）；
+3. `spawn` 投影：`piSubprocessSpec` 把 `PiSpawnSpec` 包成 `SubprocessSpawnSpec`，在 argv 前加 `process.execPath`（即用当前 node 跑 pi 的 JS 入口），stdio 全 pipe，`graceMs = 3000`（`PI_DISPOSE_GRACE_MS`，`loop.ts:36、99-108`）；`fromSubprocess` 再把 dsh 的 `SubprocessHandle` 投影回协议传输所需的 `PiProcess`（`loop.ts:111-132`）；
+4. 唯一的重写 `buildAgent`（`loop.ts:184-189`）：`new PiAgent(..., this.config, this.spawn, this.bin, this.catalog)`——引擎特有的 spawn/bin/模型目录都在这三行里交给驱动。
 
-> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。
+`subprocess` 服务不再靠 `static inject` 保证——引擎是 `new` 出来的普通类，没有 Cordis 的注入列表可声明：构造函数用 `ctx.get('subprocess')` **惰性**取，取不到直接抛（`loop.ts:164-167`）。晚构造的引擎只让选中它的那个会话大声失败，而不是让整个插件启动失败。基类在构造时只做两件事：`ctx.reflect.provide(label, this)` 把实例挂到 `ctx.agentLoopPi`（`hosted-engine-runtime.ts:109`，**这是内省面，不是 setFactory**）与注册工厂所有权 effect（`hosted-engine-runtime.ts:115`）。**AgentFactory 槽位与 `provider`/`model`/`cwd` 三个 systemPrompt 变量都不在这一层**：槽位归路由器，三个变量与 `agent-loop` settings section 由路由器继承的 harness `AgentLoop` 提供（`src/router-loop.ts:114-141`）。
 
-create/resume 走同一套"准备 → setup → 发布"事务（`hosted-loop-factory.ts:133-248`、`:250-281`、`:368-456`）：`prepare` 在发布**之前**把一次性 memoized 反向拆除注册进 `FactoryOwnership` 和 owner fiber，setup 中途卸载会整体回滚；中止信号融合三方（调用方 signal、owner fiber 卸载、工厂拆除）（`hosted-loop-factory.ts:149-155`）。`publish` 依次进入两个注册表、announce、发 `agent/session-start`（`hosted-loop-factory.ts:223-238`）。`resume` 要求 `sessionPersistence` 服务存在，否则直接抛错（`hosted-loop-factory.ts:377-380`）。
+> **这套事务已抽到 `src/driver-core/hosted-engine-runtime.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。
+
+路由器对每个会话调用的两个入口就是这套事务（`src/router-loop.ts:203-212`、`:226-235`）：`createAgent`/`resume` 走同一套"准备 → setup → 发布"（`hosted-engine-runtime.ts:132-246`、`:249-282`、`:384-456`）：`prepare` 在发布**之前**把一次性 memoized 反向拆除注册进 `FactoryOwnership` 和 owner fiber，setup 中途卸载会整体回滚；中止信号融合三方（调用方 signal、owner fiber 卸载、工厂拆除）（`hosted-engine-runtime.ts:148-156`）。`publish` 依次进入两个注册表、announce、发 `agent/session-start`（`hosted-engine-runtime.ts:225-236`）。`resume` 要求 `sessionPersistence` 服务存在，否则直接抛错（`hosted-engine-runtime.ts:377-378`）。
 
 ### 3.2 PiAgent（驱动）
 
@@ -115,7 +117,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ### 6.2 "沙箱"的实际边界（重要）
 
-源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5`；`permission.ts` 的模块头与 `PiPermission.sandboxMode` 已在修复幽灵工具名时一并改正）。**经核实主仓 `packages/subprocess/` 全部源码不含任何 sandbox 机制**（全目录 grep `sandbox` 无匹配），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-106`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:100-109`）。
+源码多处注释称整个子进程"wrapped in the dsh subprocess sandbox"（`types.ts:7-8`、`loop.ts:6-8、43-44`、`agent.ts:8`、`rpc/client.ts:5`；`permission.ts` 的模块头与 `PiPermission.sandboxMode` 已在修复幽灵工具名时一并改正）。**经核实本仓引擎实际走的那条接缝不含任何 sandbox 机制**——主仓 `packages/subprocess/subprocess/src` 与 provider `packages/subprocess/subprocess-local/src` 里 `grep -ri sandbox` 零命中，唯一命中 `sandbox` 字样的是同组的 `win32-process` 受限令牌辅助库与 README 措辞（`sandbox` 是另一个接缝：主仓里由 shell 工具族 `bash-sandbox` / `pwsh-sandbox` 注入消费，见 `packages/shell/bash-sandbox/src/index.ts:46` 的 `inject = ['subprocess', 'sandbox', 'sandboxPolicy']`；`ctx.subprocess.spawn` 这条路径不经过它），`SubprocessSpawnSpec` 也没有沙箱字段（`../deepseek-harness/packages/subprocess/subprocess/src/types.ts:75-106`），`piSubprocessSpec` 自然也不传任何沙箱参数（`loop.ts:99-108`）。
 
 实际生效的边界是三层，**没有 OS 级文件系统/网络隔离**：
 
@@ -131,7 +133,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 两条互补路径：
 
-**Provider 侧**——`PiSkillProvider extends AgentsMdSkillProvider`（`skills.ts:83-87`，算法在 `src/driver-core/agents-md-skill-provider.ts`，见 `docs/driver-core.md` §7.2.1）由 `mountPi` 注册到宿主 `skills` 服务（`src/index.ts:576-582`），发现两类候选：
+**Provider 侧**——`PiSkillProvider extends AgentsMdSkillProvider`（`skills.ts:83-87`，算法在 `src/driver-core/agents-md-skill-provider.ts`，见 `docs/driver-core.md` §7.2.1）由 `registerEngineSurface` 在 **agent 创建时**注册进该 agent 自己的 scope（pi 条目 `src/engine-surface.ts:55-57`，注册逻辑 `:93-96`；调用点 `src/router-loop.ts:171`），发现两类候选：
 
 - `agents-md`（合并技能）：会话 cwd 到 git root 的每目录上下文文件，策略是 `AGENTS.override.md` 优先、否则 `AGENTS.md` → `CLAUDE.md`（`PI_CONTEXT_POLICY`，`skills.ts:43-46`；收集逻辑在 `src/driver-core/context-files.ts:52-72`），外加用户级 `<piAgentDir>/AGENTS.md`（spec 的 `userContext`，`skills.ts:66`）。`piAgentDir()` 读 `PI_CODING_AGENT_DIR`，缺省 `~/.pi/agent`（`skills.ts:53-58`）。项目集 rank 140，用户集 rank 160——项目文件赢同名冲突（`skills.ts:35-41`）。
 - `SKILL.md` 目录项：项目各级 `.pi/skills/`（rank 150）与用户 `~/.pi/agent/skills/`（rank 170），支持 `<name>/SKILL.md` 目录型与 `<name>.md` 扁平型两种布局；用 `stat` 而非 Dirent 判定类型，因为 Windows 的 junction 两者都不是（`skills.ts:162-191`）。解析复用 `src/skills.ts` 的 `parseSkillFile`。
@@ -142,14 +144,14 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 8. 配置项一览
 
-组合入口（`src/index.ts` 的 `Config`）里的 pi 字段经 `piConfig` 透传（`src/index.ts:232-240`）：
+组合入口（`src/index.ts` 的 `Config`）里的 pi 字段经 `piConfig` 透传（`src/index.ts:238-246`）：
 
 | 组合入口字段 | PiLoop Config | 去向 |
 |---|---|---|
 | `piProvider` | `provider` | `--provider <值>`（`agent.ts:516`） |
 | `model`（与 claude/codex 共用） | `model` | `--model`，见下 |
 | `piThinking` | `thinkingLevel` | 拼进 `--model`，见下 |
-| `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:56、106`） |
+| `env`（共用） | `env` | 显式叠加到子进程环境（`loop.ts:55、106`） |
 | `sandboxMode`（与 codex 共用同一键） | `sandboxMode` | 钉死姿态，见第 6 节 |
 
 > 注：`config.model` 在 `spawnSpec` 里是**回退值**——它优先读会话日志最新 `model/selection` 事件的 `model`（用户经 `/model` 选择），仅在无该事件时回退到部署配置（见下）。Pi 模型目录（`pi --list-models` 探针结果）经内部 `piCatalogHolder` 注入，而非本表所列的用户配置项，详见 §8.1。
@@ -164,19 +166,19 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 固定 argv 前缀：`[bin, '--mode', 'rpc', '--no-session', ...]`（`agent.ts:527-532`）——`--no-session` 让 Pi 会话不落盘，与无状态 step 模型配套。
 
-模型标签：部署钉了 `model` 则用该值记入 `request/header` 与 assistant message 的 `source.model`；未钉则记 `'pi-native'`——web 会话的建议性模型选择**故意不**镜像进 header，因为它从不驱动查询（`agent.ts:55-60、456-458`）。provider 标签恒为 `'pi'`（`agent.ts:54`），在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+模型标签：部署钉了 `model` 则用该值记入 `request/header` 与 assistant message 的 `source.model`；未钉则记 `'pi-native'`——web 会话的建议性模型选择**故意不**镜像进 header，因为它从不驱动查询（`agent.ts:55-60、456-458`）。provider 标签恒为 `'pi'`（`agent.ts:54`），由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ## 8.1 模型探针（pi --list-models）
 
-PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:172`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层：条目的 `id` 是 `provider/model` 全名（即选择后提交、并回灌子进程 `--model` 的值），`name` 是**裸模型名**，所以选择器里顶层显示的就是模型本身；`provider` 字段为 `'pi'`。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
+PiLoop **构造时**（也就是第一个选中 pi 的会话被创建时）用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用点 `src/engine-pi/loop.ts:175-180`）spawn 一次 `pi --mode rpc --list-models`（无会话），并把 stdout 与 **stderr** 一起收集——pi 把模型表打在 STDERR 上、stdout 留给 JSONL RPC 协议（`probe.ts:20-51` 的 `collectOutput` 注释）——再解析列对齐表格前两列（`provider` / `model`，`parsePiModelList`，`probe.ts:60`）得到模型清单，写入插件 `apply` 作用域共享的 `piCatalogHolder.entries`（经 `Config.piCatalogHolder` 传入）。provider 路由占位 adapter 的 `listModels` 据此把模型目录暴露给 dsh 的 `/model` 弹层：条目的 `id` 是 `provider/model` 全名（即选择后提交、并回灌子进程 `--model` 的值），`name` 是**裸模型名**，所以选择器里顶层显示的就是模型本身；`provider` 字段为 `'pi'`。探针失败：目录为空、引擎照常工作。`ResolvedConfig` 不承载模型目录（PiLoop 从不读取它），如此避免死字段。
 
 ## 9. 错误处理与已知边界
 
 - **子进程意外退出**：所有 pending 命令 reject `'pi RPC process exited unexpectedly'`，事件流唤醒后结束（`client.ts:107-113`）；step 侧表现为 `PI_NO_RESULT` 或命令错误。
 - **取消**：phase signal 触发时向子进程发 `abort` 命令——fire-and-forget，rejection 被吞掉（子进程可能已在拆除，`PiRpcClient.dispose()` 会 reject 在途的 `abort`；不吞会以 "pi RPC client is disposed" 未处理拒绝打崩进程）（`agent.ts:568-582`）。
-- **配置校验失败大声报错**：`Config` schema（`loop.ts:62-69`）在组合边界验证；`sandboxMode` 非法值直接组合失败。
+- **配置校验失败大声报错**：`Config` schema（`loop.ts:61-68`）在组合边界验证；`sandboxMode` 非法值直接组合失败。
 - **cwd 缺失**：会话无 cwd 元数据时 step 抛错，要求带 cwd 启动会话（`agent.ts:554-557`）。
-- **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`hosted-loop-factory.ts:377-380`）。
+- **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`hosted-engine-runtime.ts:375-381`）。
 - **静默降级**：非 JSON 行忽略（`client.ts:234-236`）；技能加载失败静默跳过（`agent.ts:346-348`）；skills 目录不可读当空处理（`agents-md-skill-provider.ts:174-176`）。
 - **已知功能边界**：
   - 图片不转写，统一替换为占位文本（`prompt.ts:20-21`）；
@@ -186,23 +188,23 @@ PiLoop 挂载时用 `probePiModels`（`src/engine-pi/probe.ts:84-104`，调用�
 
 ## 10. 测试覆盖要点
 
-`tests/engine-pi/` 下 9 个 spec、169 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`，3.6s）：
+`tests/engine-pi/` 下 9 个 spec、178 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`）：
 
 - `rpc/client.spec.ts`（24）：响应 id 关联、严格 LF 分帧（含 `\r` 容忍、多字节跨 chunk）、生命周期/dispose 幂等、send/缓冲、默认 spawn 与 `fromChildProcess`；
 - `rpc/mapping.spec.ts`（13）：`mapUsage` 缺省/零值规则、`mapToolResult` 错误标记与 `(no content)` 兜底、`resultText` 各 payload 形态、`mapToolCall` 序列化；
 - `permission.spec.ts`（5）：`resolveSessionPermission` 四种折叠路径 + `toolsForSandbox`；
 - `skills.spec.ts`（20）：`piAgentDir` 环境覆盖、上下文文件/技能目录列举（含 junction、两种布局）、`get` 的 locator 双分支；
-- `loop.spec.ts`（6）：spawn 投影（`process.execPath` 前缀、stdio、graceMs）；
-- `agent.spec.ts`（48）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
+- `loop.spec.ts`（8）：spawn 投影（`process.execPath` 前缀、stdio、graceMs），以及**构造时 ctx 上没有 `subprocess` 服务就大声失败**（`/needs the dsh subprocess service/`）；
+- `agent.spec.ts`（49）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
 - `controls.spec.ts`（22）：steer/inject、maintenance、turn 中取消、commit veto、空 step 完成、turn 中输入链接、配置校验；
-- `index.spec.ts`（26）：经 `src/index.ts` 的挂载/HMR 安全拆除、createAgent 选项、resume；
-- `probe.spec.ts`（10）：`pi --list-models` 探针——`parsePiModelList` 的 `provider`/`model` 两列解析（跳表头、空行与缺两空格分隔的行）、`probePiModels` 从 STDERR/stdout 收集并合并、非零退出/空输出/`spawn` 抛错时降级为空目录。
+- `index.spec.ts`（26）：经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 挂载引擎（helper 做路由器在生产里做的事：构造引擎、交出 AgentFactory 槽位、发布三个 systemPrompt 变量）后的 HMR 安全拆除、createAgent 选项、resume；
+- `probe.spec.ts`（11）：`pi --list-models` 探针——`parsePiModelList` 的 `provider`/`model` 两列解析（跳表头、空行与缺两空格分隔的行）、`probePiModels` 从 STDERR/stdout 收集并合并、非零退出/空输出/`spawn` 抛错时降级为空目录。
 
 注意 `agent.ts` / `loop.ts` 大量分支带 `/* v8 ignore */` 注释（防御性 backstop），覆盖率门槛是 `src/**` 逐文件 100%（`src/client` 除外）——改动这两个文件时新增分支要么测到、要么按既有惯例标注 ignore 理由。
 
 ## 附：代码与注释不一致之处
 
-1. **"subprocess sandbox" 措辞**：`permission.ts:6-11`、`types.ts:7-8`、`loop.ts:7-10`、`agent.ts:8`、`rpc/client.ts:5` 均称子进程被 subprocess seam "沙箱化/包裹"，但主仓 seam 无任何 OS 级沙箱机制（见第 6.2 节）。实际边界 = 进程树隔离 + 环境清洗 + `--tools` 裁剪。
+1. **"subprocess sandbox" 措辞**：`types.ts:7-8`、`loop.ts:6-8、43-44`、`agent.ts:8`、`rpc/client.ts:5` 均称子进程被 subprocess seam "沙箱化/包裹"，但主仓 seam 无任何 OS 级沙箱机制（见第 6.2 节）。实际边界 = 进程树隔离 + 环境清洗 + `--tools` 裁剪。（`permission.ts` 的模块头与 `PiPermission.sandboxMode` 已在修幽灵工具名时改正，不再是反例。）
 2. **`agents-md` 可调用性**：`skills.ts:10-11` 头注释称 agents-md 是 "user-invocable" 技能，而 `agentsCandidate` 实际设 `{ modelInvocable: true, userInvocable: true }`（`agents-md-skill-provider.ts:159`）。措辞含糊（"user-invocable" 不排斥 model-invocable），但与 §7 的"斜杠菜单可见性"叙述并列时容易误读。
 3. **`mapToolCall` 死导出**：`rpc/mapping.ts:1-9` 的模块注释说本模块投影 tool call，但驱动并不调用它（`agent.ts` 只 import `mapToolResult`/`mapUsage`，`agent.ts:43`），仅测试使用。
 4. **容器级 AGENTS.md 与代码一致**："每 step 一个无状态 new_session + prompt"、"严格 LF JSONL"、"无权限系统→整体沙箱"三条背景陈述均在代码中核实成立（第 3、4 条中的"沙箱"按第 1 条修正理解）。

@@ -95,9 +95,9 @@ export const CLAUDE_CODE_COMMANDS: readonly CommandDefinition[] = [
 /**
  * Discover the user-level custom slash commands from `~/.claude/commands/*.md`
  * and build forwarding definitions for them. The scan is synchronous so the
- * mount path can register the commands before the engine-selection commit
- * returns; files without a usable name or description, and names already taken
- * by the built-ins, are skipped.
+ * agent-creation path can register the commands before the agent is published;
+ * files without a usable name or description, and names already taken by the
+ * built-ins, are skipped.
  * @returns forwarding definitions, sorted by file name.
  */
 export function discoverUserSlashCommands(): CommandDefinition[] {

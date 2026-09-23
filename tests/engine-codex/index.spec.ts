@@ -16,14 +16,10 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
+import { loopPluginFor } from '../helpers/agent-harness.ts'
 
-/** Local plugin wrapper: mount constructs the Codex loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new CodexLoop(ctx, config as Parameters<typeof CodexLoop>[1])
-  },
-}
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
 
 type RunStreamed = (input: string, turnOptions?: { signal?: AbortSignal }) => AsyncGenerator<AppServerEvent>
 

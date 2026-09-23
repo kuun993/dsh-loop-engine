@@ -2,30 +2,38 @@
  * Shared AgentFactory transaction machinery for the hosted loop engines.
  *
  * All four engines (Claude Code, Codex, Pi, Kimi Code) implement the harness's
- * single AgentFactory slot the same way: prepare a driver, scope, and one
- * memoized reverse teardown for a session; run the caller's setup under a fused
- * abort signal; publish through both registries and announce; and on resume,
- * own a session's write handle across the cold read, crash repair, and
+ * AgentFactory contract the same way: prepare a driver, scope, and one memoized
+ * reverse teardown for a session; run the caller's setup under a fused abort
+ * signal; publish through both registries and announce; and on resume, own a
+ * session's write handle across the cold read, crash repair, and
  * re-publication. None of that touches an engine protocol — the whole
- * engine-specific surface is one call, {@link HostedLoopFactory.buildAgent}.
+ * engine-specific surface is one call, {@link HostedEngineRuntime.buildAgent}.
  *
- * This body mirrors the default in-process `agent-loop` factory; depending on
- * the `dsh-agent-loop` package is forbidden (it would claim the slot this
- * plugin exists to hand over), so the machinery is replicated here once instead
- * of four times.
+ * One move has no counterpart in the harness's own factory contract and is what
+ * makes an in-place engine swap possible: a LIVE session changes drivers without
+ * being released. {@link HostedAgentHandle.retire} stops the outgoing machine
+ * while leaving the session entered, and {@link HostedEngineRuntime.swap} builds
+ * the incoming engine's machine onto that same Session. The session's store
+ * entry and write handle travel across the handover in a
+ * {@link SessionLifetime} — the one object that owns them.
+ *
+ * This body mirrors the default in-process `agent-loop` factory. It is a plain
+ * class, not a Cordis plugin: the process-wide AgentFactory slot is owned by
+ * the router (`router-loop.ts`, which subclasses the harness `AgentLoop`), and
+ * every hosted engine is one runtime instance the router delegates to. That is
+ * what lets several engines serve different sessions concurrently — the
+ * harness admits exactly one factory, so the factory itself must dispatch.
  *
  * Subclasses supply:
- *   - the cordis service label, which is also the prefix of every effect label
- *     (`<label>.transactions()`, `<label>.setFactory()`, `<label>.lifecycle(id)`,
- *     `<label>.resume-load(id)`) — the lifecycle label is asserted by tests, so
- *     it must stay `<label>.lifecycle(...)`;
- *   - their own `static inject` (Codex needs no `subprocess`);
- *   - {@link HostedLoopFactory.buildAgent}.
+ *   - the effect label prefix (`<label>.transactions()`,
+ *     `<label>.lifecycle(id)`, `<label>.resume-load(id)`) — the lifecycle label
+ *     is asserted by tests, so it must stay `<label>.lifecycle(...)`;
+ *   - their own configuration resolution;
+ *   - {@link HostedEngineRuntime.buildAgent}.
  *
- * @module dsh-loop-engine/driver-core/hosted-loop-factory
+ * @module dsh-loop-engine/driver-core/hosted-engine-runtime
  */
 
-import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type {
@@ -43,6 +51,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { FactoryOwnership, raceAbort, raceAbortCall } from './ownership.ts'
+import { SessionLifetime } from './session-lifetime.ts'
 
 /**
  * What the transaction machinery needs of a driver beyond the harness `Agent`
@@ -59,14 +68,49 @@ export interface HostedAgent extends Agent {
   readonly scope: Scope
 }
 
+/**
+ * The plugin's own handle for one published hosted agent: the harness contract
+ * plus the two facts an in-place engine swap needs.
+ *
+ * A swap is two moves by two different runtimes: the outgoing engine retires its
+ * machine and hands the session over, and the incoming engine builds onto that
+ * session. The router is the only caller and it tracks the handle already, so
+ * the harness's own `AgentHandle` — which carries neither fact — is widened
+ * here rather than reaching back into a transaction that has ended.
+ */
+export interface HostedAgentHandle extends AgentHandle {
+  /** The live session's lifetime resources, owned by this agent until it is disposed. */
+  readonly lifetime: SessionLifetime
+  /**
+   * Retire this machine for good while LEAVING the session alive: stop it,
+   * unwind its scope, and leave the agent registry — the session's entry and
+   * write handle pass to {@link SessionLifetime}'s next owner instead of being
+   * released here. Only valid while this agent still owns the session: the
+   * router calls it for the session's live, idle agent only.
+   */
+  retire(): Promise<void>
+}
+
+/** Options for {@link HostedEngineRuntime.swap}. */
+export interface SwapAgentOptions {
+  /** The live session's lifetime resources, handed over by the outgoing engine. */
+  readonly lifetime: SessionLifetime
+  /** Loop options for the successor; the router replays the outgoing agent's own. */
+  readonly agentOptions?: AgentOptions | undefined
+  /** The composition callback the session was built with, replayed onto the successor. */
+  readonly setup?: AgentSetup | undefined
+  /** The outgoing agent's runtime owner, for a child session's inherited ownership. */
+  readonly parentAgent?: Agent | undefined
+}
+
 /** Prepared-but-unpublished agent resources sharing one memoized teardown. */
 interface PreparedAgent<TAgent extends HostedAgent> {
   agent: TAgent
   /** Aborts when the factory unloads, the caller cancels, or teardown begins — ends any setup await. */
   signal: AbortSignal
   /** Enter registries, announce, notify session-start, and start the machine. */
-  publish(source: SessionStartSource): AgentHandle
-  /** Reverse teardown: stop the machine, unregister, unwind the scope. Memoized. */
+  publish(source: SessionStartSource): HostedAgentHandle
+  /** Reverse teardown: stop the machine, release the session, unwind the scope. Memoized. */
   dispose(): Promise<void>
 }
 
@@ -77,48 +121,49 @@ interface StoredSession {
 }
 
 /**
- * Concrete AgentFactory base for one hosted engine. Creation and resume follow
- * the registry factory contract and the shared publication transaction:
- * prepare, run setup, then publish through both registries, announce, and emit
- * `agent/session-start`.
+ * Concrete creation/resume machinery for one hosted engine.
+ *
+ * Creation and resume follow the registry factory contract and the shared
+ * publication transaction: prepare, run setup, then publish through both
+ * registries, announce, and emit `agent/session-start`. {@link swap} follows the
+ * same transaction onto a session another agent entered, which is the only
+ * difference between taking a session over and owning it from birth.
  */
-export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> extends Service implements AgentFactory {
-  /** Validated configuration owned by the loop plugin. */
+export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> implements AgentFactory {
+  /** Validated configuration owned by this engine instance. */
   readonly config: TConfig
-  private readonly ownership: FactoryOwnership
+  /** Effect-label prefix; also identifies the engine in diagnostics. */
+  readonly label: string
   /** Plain holder prevents Cordis from re-tracing the factory's dependency context through a caller shadow. */
   protected readonly runtime: { ctx: Context }
-  /** Cordis service name, also the prefix of every effect label. */
-  private readonly label: string
+  private readonly ownership: FactoryOwnership
 
-  constructor(
-    ctx: Context,
-    label: string,
-    config: TConfig,
-  ) {
-    super(ctx, label)
+  /**
+   * @param ctx - the owning context; its fiber's unload tears every live agent down.
+   * @param label - effect-label prefix, e.g. `agentLoopKimi`.
+   * @param config - already-resolved engine configuration.
+   */
+  constructor(ctx: Context, label: string, config: TConfig) {
     this.label = label
     this.config = config
     this.ownership = new FactoryOwnership(ctx.fiber)
     this.runtime = { ctx }
+    // Expose the engine under its conventional ctx key. This is not an
+    // AgentFactory registration (the router owns the single slot) — it is the
+    // introspection surface the per-engine specs and `--dump-config` readers
+    // use to see which drivers a process actually built.
+    ctx.reflect.provide(label, this)
     // Registration precedes a subclass's own field initializers (they run after
     // `super` returns). That is safe: this constructor and those initializers
-    // complete in one synchronous run, and nothing inside `setFactory` can
-    // reach `buildAgent` — which subclasses are free to implement against
-    // fields they assign afterwards.
+    // complete in one synchronous run, and nothing inside the ownership
+    // registration can reach `buildAgent` — which subclasses are free to
+    // implement against fields they assign afterwards.
     ctx.effect(() => () => this.ownership.dispose(), `${label}.transactions()`)
-    ctx.effect(() => ctx.agents.setFactory(this), `${label}.setFactory()`)
-    // The engine owns its prompt natively, so these variables feed only
-    // downstream consumers of the (unused) dsh system prompt assembly,
-    // mirroring the default loop's registrations.
-    ctx.systemPrompt.variable('provider', context => context.agent?.options.provider)
-    ctx.systemPrompt.variable('model', context => context.agent?.options.model)
-    ctx.systemPrompt.variable('cwd', context => context.agent?.session.header.cwd)
   }
 
   /**
    * Construct this engine's driver for one prepared session. Called once per
-   * create or resume, after the session exists and before setup runs; the
+   * create, resume, or swap, after the session exists and before setup runs; the
    * hook is the engine's entire protocol surface.
    */
   protected abstract buildAgent(loopCtx: Context, id: SessionId, options: AgentOptions, session: Session): TAgent
@@ -128,9 +173,14 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
    * agent. The teardown is registered with the factory and the owner fiber
    * BEFORE publication, so a mid-setup unload rolls everything back; `signal`
    * fuses caller cancellation with lifecycle teardown for setup awaits.
+   *
+   * `lifetime` carries the session's store entry and write handle rather than
+   * this body owning them: a fresh transaction binds them when it publishes,
+   * while a swap publishes a session whose entry another machine already bound
+   * and whose write handle another machine already opened.
    */
-  /* jscpd:ignore-start -- ownership/transaction machinery mirrors the default agent-loop factory; depending on agent-loop is forbidden. */
-  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal, handle?: SessionHandle, parentAgent?: Agent): PreparedAgent<TAgent> {
+  /* jscpd:ignore-start -- ownership/transaction machinery mirrors the default agent-loop factory: the harness exports the loop as a plugin, not as reusable transaction helpers, so the body is replicated rather than delegated to. */
+  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal: AbortSignal | undefined, lifetime: SessionLifetime, parentAgent?: Agent): PreparedAgent<TAgent> {
     ownerCtx.fiber.assertActive()
     /* v8 ignore start -- unreachable backstop, see above */
     /* v8 ignore next -- unreachable backstop, see above */
@@ -157,9 +207,10 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
     this.ownership.signal.addEventListener('abort', onFactoryTeardown, { once: true })
 
     let machine: TAgent | undefined
-    let detachSession: (() => void) | undefined
     let detachAgent: (() => void) | undefined
     let disposing: Promise<void> | undefined
+    /** Set by {@link PreparedAgent.retire}: the successor owns the session's lifetime from then on. */
+    let handedOver = false
     const machineReady = Promise.withResolvers<void>()
     const dispose = (ownerTriggered = false): Promise<void> => (disposing ??= (async () => {
       abort.abort(new Error(`agent "${id}" lifecycle disposed`))
@@ -178,16 +229,21 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
       } finally {
         // The machine committed its closing events synchronously into the
         // session; closing the write handle drains them durably before the
-        // store attachment (the live-event write path) is released.
+        // store attachment (the live-event write path) is released. A RETIRED
+        // machine holds neither: both moved to the session's successor, which
+        // releases them in this machine's place.
         try {
-          await handle?.close()
+          if (!handedOver) await lifetime.closeHandle()
         } finally {
           try {
             detachAgent?.()
-            detachSession?.()
           } finally {
-            untrack()
-            if (!ownerTriggered) await unfollowOwner()
+            try {
+              if (!handedOver) lifetime.leaveStore()
+            } finally {
+              untrack()
+              if (!ownerTriggered) await unfollowOwner()
+            }
           }
         }
       }
@@ -212,8 +268,14 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
     const assertLive = (): void => {
       if (!abort.signal.aborted) return
       /* v8 ignore start -- unreachable String() arm, see above */
-      /* v8 ignore next -- unreachable String() arm, see above */
+      /* v8 ignore next -- see above */
       throw abort.signal.reason instanceof Error ? abort.signal.reason : new Error(String(abort.signal.reason))      /* v8 ignore stop */
+    }
+    const retire = async (): Promise<void> => {
+      // Hand the session over BEFORE the teardown runs: releasing it is the
+      // teardown's own last step, and the successor owns it from here.
+      handedOver = true
+      await dispose()
     }
     try {
       const agent = machine = this.buildAgent(loopCtx, id, options, session)
@@ -225,15 +287,20 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
         signal: abort.signal,
         publish: (source) => {
           assertLive()
-          detachSession = agent.ctx.sessions.enter(session)
+          // A swap JOINS a session another machine already entered and
+          // announced, so it owes only the agent half of the publication:
+          // `sessions.enter` refuses a live id and `sessions.announce` refuses a
+          // second announcement, and the entry travels in the lifetime instead.
+          const joining = lifetime.entered
+          if (!joining) lifetime.bind(agent.ctx.sessions.enter(session))
           detachAgent = loopCtx.agents.enter(agent, parentAgent)
-          agent.ctx.sessions.announce(session)
+          if (!joining) agent.ctx.sessions.announce(session)
           assertLive()
           loopCtx.agents.announce(agent)
           assertLive()
           emitAgentEvent(loopCtx, agent, 'agent/session-start', { source })
           assertLive()
-          return { agent, dispose }
+          return { agent, dispose, retire, lifetime }
         },
         dispose,
       }
@@ -250,19 +317,18 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
   private async setupAndPublish(
     ownerCtx: Context,
     id: SessionId,
-    preparation: SessionPreparation,
+    session: Session,
     agentOptions: AgentOptions,
     setup: AgentSetup | undefined,
     signal: AbortSignal | undefined,
     source: SessionStartSource,
-    stored?: StoredSession,
+    lifetime: SessionLifetime,
     parentAgent?: Agent,
-  ): Promise<AgentHandle> {
-    using ownedPreparation = preparation
-    const session = ownedPreparation.session
+    stored?: StoredSession,
+  ): Promise<HostedAgentHandle> {
     let prepared: PreparedAgent<TAgent>
     try {
-      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, stored?.handle, parentAgent)
+      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, lifetime, parentAgent)
     } catch (error: unknown) {
       // A rejected prepare never took the handle: close it so write ownership
       // is released instead of leaking with the process.
@@ -290,7 +356,7 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
    * @param options - identities, optional live parent, session seed/metadata, loop options, setup, and cancellation.
    * @returns the published handle.
    */
-  async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
+  async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<HostedAgentHandle> {
     const preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(options.sessionId, {
       ...options.seed === undefined ? {} : { seed: options.seed },
       ...options.meta === undefined ? {} : { meta: options.meta },
@@ -309,21 +375,24 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
             options.sessionId,
             (abandoned) => { void abandoned?.handle.close().catch(() => {}) },
           )
-      } catch (error: unknown) {
+        return await this.setupAndPublish(
+          ownerCtx,
+          options.sessionId,
+          preparation.session,
+          options.agentOptions ?? {},
+          options.setup,
+          options.signal,
+          'startup',
+          new SessionLifetime(preparation.session, stored?.handle),
+          options.parentAgent,
+          stored,
+        )
+      } finally {
+        // The preparation's provider state is needed until the session is
+        // entered, and released on every outcome after that — including the
+        // create-stored-session failure above, which never reaches publication.
         preparation[Symbol.dispose]()
-        throw error
       }
-      return this.setupAndPublish(
-        ownerCtx,
-        options.sessionId,
-        preparation,
-        options.agentOptions ?? {},
-        options.setup,
-        options.signal,
-        'startup',
-        stored,
-        options.parentAgent,
-      )
     })()
     this.ownership.trackWrapper(published)
     return published
@@ -373,7 +442,7 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
    * @param options - persisted identity, optional live parent, loop options, setup, and cancellation.
    * @returns the published handle.
    */
-  async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
+  async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<HostedAgentHandle> {
     const persistence = this.runtime.ctx.get('sessionPersistence')
     if (persistence === undefined) {
       throw new Error('cannot resume: session persistence is not configured (load a dsh-session-persistence backend)')
@@ -381,12 +450,44 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
     return this.resumeWith(ownerCtx, persistence, options)
   }
 
+  /**
+   * Build this engine's agent onto a LIVE session another engine's agent left,
+   * taking the session's lifetime over.
+   *
+   * The counterpart of {@link HostedAgentHandle.retire}: together they are an
+   * in-place engine swap, and the harness's own factory contract has neither.
+   * Nothing is read from persistence and nothing is created in the store — the
+   * successor drives the Session object that is already live and already
+   * entered, so a browser half attached to that session sees no lifecycle edge
+   * at all. The lifetime carries the still-open write handle, so the session
+   * keeps being stored through the same channel it was already using.
+   * @param ownerCtx - caller context that structurally owns the lifecycle.
+   * @param options - the live session's lifetime, loop options, setup, and parent.
+   * @returns the published handle, which owns the session from here on.
+   */
+  async swap(ownerCtx: Context, options: SwapAgentOptions): Promise<HostedAgentHandle> {
+    const session = options.lifetime.session
+    const published = (async () => await this.setupAndPublish(
+      ownerCtx,
+      session.id,
+      session,
+      options.agentOptions ?? {},
+      options.setup,
+      undefined,
+      'resume',
+      options.lifetime,
+      options.parentAgent,
+    ))()
+    this.ownership.trackWrapper(published)
+    return published
+  }
+
   /** Resume through an explicit persistence service. */
   private resumeWith(
     ownerCtx: Context,
     persistence: SessionPersistence,
     options: ResumeAgentOptions,
-  ): Promise<AgentHandle> {
+  ): Promise<HostedAgentHandle> {
     const id = options.resumeSessionId
     const published = (async () => {
       // The open and read may outlive their owner: race them against caller
@@ -439,13 +540,14 @@ export abstract class HostedLoopFactory<TConfig, TAgent extends HostedAgent> ext
         return await this.setupAndPublish(
           ownerCtx,
           id,
-          preparation,
+          preparation.session,
           options.agentOptions ?? {},
           options.setup,
           options.signal,
           'resume',
-          owned,
+          new SessionLifetime(preparation.session, owned?.handle),
           options.parentAgent,
+          owned,
         )
       } finally {
         preparation?.[Symbol.dispose]()

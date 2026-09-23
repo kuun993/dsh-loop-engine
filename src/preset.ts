@@ -1,23 +1,31 @@
 /**
- * Hosted-engine agent preset: a managed copy of the deployment's `standard`
- * preset with the dsh-native command and skill rows stripped.
+ * Hosted-engine agent presets: one managed copy of the deployment's `standard`
+ * preset per hosted engine, with the dsh-native command and skill rows
+ * stripped.
  *
  * A hosted engine (Claude Code, Codex, Pi, Kimi) owns its session's command
- * and skill surface: the engine's own slash commands and skill providers are
- * registered globally by the plugin, and the dsh-native equivalents would only
- * duplicate or mislead — dsh `/plan` is advisory prompt text an external
- * engine never assembles, dsh `/compact` cannot shrink a context the engine's
- * child process holds, and dsh skills would sit next to the engine's own
- * catalog. Those rows live inside the agent-preset composition, which a
- * profile patch cannot reach, so the plugin authors a stripped preset into the
- * user preset root (`$DSH_HOME/.agent-presets/<id>`) and steers the roster's
- * default at runtime (see the plugin's apply).
+ * and skill surface: the plugin bridges the engine's own slash commands and
+ * skill providers into the session (see `engine-surface.ts`), and the
+ * dsh-native equivalents would only duplicate or mislead — dsh `/plan` is
+ * advisory prompt text an external engine never assembles, dsh `/compact`
+ * cannot shrink a context the engine's child process holds, and dsh skills
+ * would sit next to the engine's own catalog. Those rows live inside the
+ * agent-preset composition, which a profile patch cannot reach, so the plugin
+ * authors a stripped preset per engine into the user preset root
+ * (`$DSH_HOME/.agent-presets/<id>`).
  *
- * The preset is REGENERATED from the current `standard` composition on every
- * boot that needs it: text on disk is never authoritative, so a harness
- * upgrade that changes `standard` flows through. The file is plain YAML the
- * loader already accepts — the strip is a line transform that preserves
- * everything it does not drop byte for byte, comments included.
+ * The preset id is ALSO the per-session engine selector: the harness resolves
+ * one preset per session and hands its id to the agent factory at create time
+ * (`CreateAgentOptions.meta.agentPreset`), which is the only per-session
+ * channel that reaches agent creation. One preset per engine is therefore what
+ * makes "session A on Codex, session B on Kimi, concurrently" expressible in a
+ * harness that admits exactly one AgentFactory.
+ *
+ * The presets are REGENERATED from the current `standard` composition on every
+ * boot: text on disk is never authoritative, so a harness upgrade that changes
+ * `standard` flows through. The file is plain YAML the loader already accepts —
+ * the strip is a line transform that preserves everything it does not drop byte
+ * for byte, comments included.
  *
  * @module dsh-loop-engine/preset
  */
@@ -25,9 +33,18 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import type { HostedEngineId } from './agent-preset-ids.ts'
+import { HOSTED_ENGINE_IDS, SOURCE_PRESET_ID, enginePresetId } from './agent-preset-ids.ts'
 
-/** Preset id the plugin authors into the user preset root. */
-export const HOSTED_PRESET_ID = 'loop-engine'
+// The engine↔preset-id mapping is pure identity arithmetic, so it lives in the
+// zero-import `./agent-preset-ids.ts` (the browser half needs it; this file
+// imports `node:fs/promises`). Re-exported here to keep the node-side import
+// paths — this is the module the preset ids belong to.
+export {
+  HOSTED_PRESET_PREFIX, SOURCE_PRESET_ID,
+  engineOfPreset, enginePresetId, hostedEngineOf, sessionEngineOf,
+} from './agent-preset-ids.ts'
+export type { SessionEngine } from './agent-preset-ids.ts'
 
 /** Harness-home-relative directory of locally authored presets (mirrors `USER_PRESET_DIR` in `dsh-agent-presets`). */
 export const USER_PRESET_DIR = '.agent-presets'
@@ -38,30 +55,49 @@ export const COMPOSITION_FILE = 'agent.cordis.yml'
 /** The display-metadata file beside a preset's composition. */
 export const METADATA_FILE = 'preset.yml'
 
-/** Source preset the hosted preset derives from. */
-export const SOURCE_PRESET_ID = 'standard'
+/** Every preset id this plugin owns, whether or not it is currently authored. */
+export const HOSTED_PRESET_IDS: readonly string[] =
+  HOSTED_ENGINE_IDS.map(engine => enginePresetId(engine))
+
 
 /**
  * Top-level rows stripped from the source preset for hosted engines:
  * - `skill-filesystem` / `tool-skill`: the dsh skill surface — each engine
- *   registers its own skill provider globally;
- * - `tool-goal`: the model-facing goal tool — the managed block already
- *   disables dsh's `/goal` command for hosted engines;
+ *   registers its own skill provider in the session's agent scope;
+ * - `tool-goal` / `command-goal`: dsh's goal mode. The model-facing tool only
+ *   works while an in-process loop drives the session, and the human command
+ *   would sit in the menu with nothing behind it — no hosted engine here
+ *   implements `/goal`, so there is nothing for it to hand over to. The
+ *   `command-goal` row lives HERE, in the preset layer, because that is where
+ *   the human command is registered; disabling the host-plane row from the
+ *   profile patch does not reach it (`standard` carries its own row);
  * - `planning`: dsh plan mode — its only model-visible effect is a system
  *   prompt section an external engine never assembles;
  * - `compaction`: dsh `/compact` and auto-compaction — a hosted engine owns
  *   its context and its own `/compact` (Claude, Kimi).
  */
-export const STRIPPED_ROWS = ['skill-filesystem', 'tool-skill', 'tool-goal', 'planning', 'compaction'] as const
+export const STRIPPED_ROWS = ['skill-filesystem', 'tool-skill', 'tool-goal', 'command-goal', 'planning', 'compaction'] as const
 
-/** Header comment marking the managed composition; also makes rewrites idempotent. */
+/** Header comment marking the managed compositions; also makes rewrites idempotent. */
 const MANAGED_HEADER = `# Managed by dsh-loop-engine: the deployment's "${SOURCE_PRESET_ID}" preset minus
 # the dsh-native command/skill rows a hosted loop engine replaces. Regenerated
-# from "${SOURCE_PRESET_ID}" on boot — hand edits are overwritten.
+# from "${SOURCE_PRESET_ID}" on boot — hand edits are overwritten. The preset id
+# names the engine this session runs.
 `
 
-/** Display metadata of the managed preset, rendered as the `preset.yml` document. */
-const MANAGED_METADATA = 'name: Hosted Engine\ndescription: Standard preset minus the dsh-native commands and skills a hosted loop engine replaces.\n'
+/** Display metadata one managed preset renders, as its `preset.yml` document. */
+function managedMetadata(engine: HostedEngineId): string {
+  return `name: ${ENGINE_DISPLAY_NAMES[engine]}\n`
+    + `description: ${ENGINE_DISPLAY_NAMES[engine]}, with the dsh-native commands and skills it replaces removed.\n`
+}
+
+/** Human-readable engine names for the preset picker. */
+const ENGINE_DISPLAY_NAMES: Readonly<Record<HostedEngineId, string>> = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  pi: 'Pi',
+  kimi: 'Kimi Code',
+}
 
 /** A top-level entry opener (`- …` at column 0). */
 function isEntryStart(line: string): boolean {
@@ -153,7 +189,7 @@ export interface PresetCompositionSource {
 }
 
 /**
- * Regenerate the hosted-engine preset under the dsh home's user preset root
+ * Regenerate every hosted engine's preset under the dsh home's user preset root
  * from the roster's `standard` preset. Idempotent: an up-to-date directory is
  * untouched, so no standing mount sees a spurious file-stamp change.
  * @param dshHome - the resolved harness home.
@@ -161,11 +197,15 @@ export interface PresetCompositionSource {
  * @returns whether any file was written.
  * @throws when the source preset cannot be read or the writes fail.
  */
-export async function ensureHostedPreset(dshHome: string, source: PresetCompositionSource): Promise<boolean> {
+export async function ensureEnginePresets(dshHome: string, source: PresetCompositionSource): Promise<boolean> {
   const composition = await source.read(SOURCE_PRESET_ID)
   const stripped = `${MANAGED_HEADER}\n${stripPresetRows(composition)}`
-  const dir = join(dshHome, USER_PRESET_DIR, HOSTED_PRESET_ID)
-  const compositionChanged = await writeIfDifferent(join(dir, COMPOSITION_FILE), stripped)
-  const metadataChanged = await writeIfDifferent(join(dir, METADATA_FILE), MANAGED_METADATA)
-  return compositionChanged || metadataChanged
+  let changed = false
+  for (const engine of HOSTED_ENGINE_IDS) {
+    const dir = join(dshHome, USER_PRESET_DIR, enginePresetId(engine))
+    const compositionChanged = await writeIfDifferent(join(dir, COMPOSITION_FILE), stripped)
+    const metadataChanged = await writeIfDifferent(join(dir, METADATA_FILE), managedMetadata(engine))
+    changed = changed || compositionChanged || metadataChanged
+  }
+  return changed
 }

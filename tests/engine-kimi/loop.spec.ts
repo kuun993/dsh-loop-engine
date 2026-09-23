@@ -131,6 +131,17 @@ describe('KimiLoop spawn plumbing', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('fails loud when the context carries no subprocess service', async () => {
+    // The engine resolves the seam lazily at construction: a profile without it
+    // must fail the session loud rather than mount a driver that cannot spawn.
+    const ctx = new Context()
+    try {
+      expect(() => new KimiLoop(ctx, {})).toThrow(/needs the dsh subprocess service/)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('kimi process projection', () => {

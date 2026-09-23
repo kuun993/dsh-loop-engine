@@ -17,7 +17,7 @@ Codex 引擎让 dsh 会话由 OpenAI Codex CLI 驱动：每个 dsh step 通过 J
 
 ```
 src/engine-codex/
-├── loop.ts              # CodexLoop：AgentFactory + cordis 服务（HostedLoopFactory 子类，只给 label/inject/buildAgent）
+├── loop.ts              # CodexLoop：HostedEngineRuntime 子类（普通类，只给 label/resolveConfig/buildAgent）
 ├── agent.ts             # CodexAgent：turn/step 状态机、流式折叠、技能注入、权限折叠
 ├── permission.ts        # dsh 权限旋钮 → codex 声明式权限对的纯函数折叠
 ├── skills.ts            # CodexSkillProvider：AGENTS.md 发现与合并为一个 agents-md 技能
@@ -29,34 +29,37 @@ src/engine-codex/
     └── types.ts         # app-server 协议类型的最小手写子集
 ```
 
-- `loop.ts` 是**库而不是 cordis 插件入口**（`src/engine-codex/loop.ts:1-11`）；插件入口 `src/index.ts` 的 `mountCodex` 用 `ctx.plugin(CodexLoop, codexConfig(config))` 把它挂为子 fiber（`src/index.ts:572`）。
+- `loop.ts` 是**库而不是 cordis 插件入口**（`src/engine-codex/loop.ts:1-11`）：`CodexLoop` 是普通类，由路由器在会话选中 codex 时构造（`src/index.ts:560-561`）。
 - `appserver/types.ts` 明确是 `codex app-server generate-ts` 生成类型的**最小手写子集**（`src/engine-codex/appserver/types.ts:1-7`），只覆盖驱动用到的 initialize / thread / turn / 通知形状，多数字段用 `[key: string]: unknown` 放行。
-- 驱动复用的共享设施在 `src/driver-core/`：`prompt.ts`（历史序列化）、`permission-knobs.ts`（旋钮读取）、`skill-inject.ts`（`/name` 手势与 `<skill_content>` 渲染）、`ownership.ts`（工厂所有权与 abort race 的**原语**）、`hosted-loop-factory.ts`（把原语编排成 create/resume 事务，§3.1/3.2）、`inbox.ts`（`DriverInbox`：driver 自有的 durable inbox 投影）、`assistant-stream.ts`（`DriverAssistantStream`：live 帧发布与 compact stream 切分）。
+- 驱动复用的共享设施在 `src/driver-core/`：`prompt.ts`（历史序列化）、`permission-knobs.ts`（旋钮读取）、`skill-inject.ts`（`/name` 手势与 `<skill_content>` 渲染）、`ownership.ts`（工厂所有权与 abort race 的**原语**）、`hosted-engine-runtime.ts`（把原语编排成 create/resume 事务，§3.1/3.2）、`inbox.ts`（`DriverInbox`：driver 自有的 durable inbox 投影）、`assistant-stream.ts`（`DriverAssistantStream`：live 帧发布与 compact stream 切分）。
 - `CodexSkillProvider` 也不是自己实现的算法：它继承 `driver-core/agents-md-skill-provider.ts` 的 `AgentsMdSkillProvider`，本模块只给一份 spec（见 §7 与 `docs/driver-core.md` §7.2.1）。
 
-## 3. Loop 工厂与 Agent 生命周期
+## 3. 引擎运行时与 Agent 生命周期
 
-### 3.1 CodexLoop（工厂）
+### 3.1 CodexLoop（引擎运行时）
 
-`CodexLoop` 现在是 `HostedLoopFactory<ResolvedConfig, CodexAgent>` 的**三行子类**（`src/engine-codex/loop.ts:89-103`），服务键 `agentLoopCodex`（`loop.ts:97`），`static inject = ['agents', 'sessions', 'systemPrompt']`（`loop.ts:91`——**唯一不带 `subprocess` 的引擎**，因为它自己用 `node:child_process.spawn` 拉起 `codex app-server`）。构造函数只有一句 `super(ctx, 'agentLoopCodex', resolveConfig(config))`；唯一重写是 `buildAgent`（`loop.ts:101-103`）。
+`CodexLoop` 是 `HostedEngineRuntime<ResolvedConfig, CodexAgent>` 的**三行子类**（`src/engine-codex/loop.ts:90-102`）——一个**普通类**，不是 Cordis Service，不声明 `static inject`，也不自己抢 AgentFactory 槽位。ctx key 仍是 `agentLoopCodex`（`loop.ts:77`、`:79-83` 的模块声明）。构造函数只有一句 `super(ctx, 'agentLoopCodex', resolveConfig(config))`（`loop.ts:95`）；唯一重写是 `buildAgent`（`loop.ts:99-101`）。
 
-基类（`src/driver-core/hosted-loop-factory.ts`）在构造时做三件事：
+**唯一不需要 `subprocess` 服务的引擎**：codex 自己用 `node:child_process.spawn` 拉起 `codex app-server`（§1），所以四个引擎里只有它没有 `ctx.get('subprocess')` 的惰性解析与缺服务时的 loud 失败（对比 `src/engine-pi/loop.ts:164-167`、`src/engine-kimi/loop.ts:83-86`）。
 
-1. `ctx.effect(() => () => this.ownership.dispose())`——fiber 卸载时停掉工厂所有权（含所有存活 agent 的反向拆解）（`hosted-loop-factory.ts:109`）；
-2. `ctx.effect(() => ctx.agents.setFactory(this))`——注册到 harness **唯一的** AgentFactory 槽位（`hosted-loop-factory.ts:110`）；槽位被占时 `setFactory` 抛 `an agent factory is already registered`，由 `src/index.ts` 的有界重试（40 次 × 50ms）等基础 `agent-loop` 行被 patch 层禁用后腾出；
-3. 注册 `provider`/`model`/`cwd` 三个 systemPrompt 变量（`hosted-loop-factory.ts:114-116`）。注意：codex 拥有自己的 prompt，这些变量只喂给（本引擎用不到的）dsh 系统提示词的下游消费者，刻意与默认 loop 的注册保持一致。
+进程内唯一的 AgentFactory 是路由器 `RouterLoop`（`src/router-loop.ts:114`）：它按插件自己的每会话引擎记录分发（无记录时回退到会话记录的 agent preset），并在某个会话第一次选中 codex 时构造 `CodexLoop`（`src/index.ts:560-561`，实例缓存于 `RouterLoop.runtimeOf`，`src/router-loop.ts:158-164`）。基类（`src/driver-core/hosted-engine-runtime.ts`）在构造时只做两件事：
+
+1. `ctx.reflect.provide(label, this)`——把实例挂到 `ctx.agentLoopCodex`（`hosted-engine-runtime.ts:109`）。这是**内省面**（per-engine spec 与 `--dump-config` 读取器用它看进程实际构造了哪些驱动），不是 `setFactory`；
+2. `ctx.effect(() => () => this.ownership.dispose())`——fiber 卸载时停掉工厂所有权（含所有存活 agent 的反向拆解）（`hosted-engine-runtime.ts:115`）。
+
+`provider`/`model`/`cwd` 三个 systemPrompt 变量与 `agent-loop` settings section 都**不**在引擎这一层：它们由路由器继承的 harness `AgentLoop` 提供（`src/router-loop.ts:114-141`）——一个进程只被路由器占用那个槽位，所以这些进程级注册也只有一份。
 
 ### 3.2 创建/恢复事务（prepare → setup → publish）
 
-> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面条目中的行号都指该共享文件，codex 只是选它当基类的四个引擎之一。
+> **这套事务已抽到 `src/driver-core/hosted-engine-runtime.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面条目中的行号都指该共享文件，codex 只是选它当基类的四个引擎之一；路由器对每个会话调用的就是这两个入口（`src/router-loop.ts:203-212`、`:226-235`）。
 
-`createAgent`（`hosted-loop-factory.ts:283-329`）与 `resume`/`resumeWith`（`hosted-loop-factory.ts:368-456`）共享同一个发布事务 `setupAndPublish`（`hosted-loop-factory.ts:250-281`）：
+`createAgent`（`hosted-engine-runtime.ts:292-329`）与 `resume`/`resumeWith`（`hosted-engine-runtime.ts:375-456`）共享同一个发布事务 `setupAndPublish`（`hosted-engine-runtime.ts:249-282`）：
 
-1. **prepare**（`hosted-loop-factory.ts:133-248`）：通过 `this.buildAgent(...)`（`:219`）构造 `CodexAgent`，并把一个 memoized 的反向 `dispose()` **在发布前**注册到 `FactoryOwnership` 与 owner fiber——中途卸载会整体回滚。`signal` 融合三方取消源：调用方 signal、owner fiber 卸载、工厂 teardown（`hosted-loop-factory.ts:149-155`）。
-2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方 setup 并取 commit（`hosted-loop-factory.ts:273`）；失败则 `dispose()` 后重抛。
-3. **publish**（`hosted-loop-factory.ts:223-238`）：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → `emitAgentEvent(..., 'agent/session-start', { source })`，每步之间 `assertLive()` 检查融合信号。
+1. **prepare**（`hosted-engine-runtime.ts:132-246`）：通过 `this.buildAgent(...)`（`:218`）构造 `CodexAgent`，并把一个 memoized 的反向 `dispose()` **在发布前**注册到 `FactoryOwnership` 与 owner fiber——中途卸载会整体回滚。`signal` 融合三方取消源：调用方 signal、owner fiber 卸载、工厂 teardown（`hosted-engine-runtime.ts:148-156`）。
+2. **setup**：`raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方 setup 并取 commit（`hosted-engine-runtime.ts:272`）；失败则 `dispose()` 后重抛。
+3. **publish**（`hosted-engine-runtime.ts:225-236`）：依次 `sessions.enter` → `agents.enter` → `sessions.announce` → `agents.announce` → `emitAgentEvent(..., 'agent/session-start', { source })`，每步之间 `assertLive()` 检查融合信号。
 
-反向拆解顺序（`hosted-loop-factory.ts:164-194`）：`machine.cancel({ kind: 'disposed' })` → `whenIdle()` → `scope.dispose()` → 注销 enter/announce → 从 ownership 摘除。resume 路径额外处理：无 `sessionPersistence` 服务时直接报错（`hosted-loop-factory.ts:377-380`）；加载与 setup 全程用 `raceAbortCall` 竞争融合信号，被取消后晚到的 preparation 会被 `releaseAbandoned` 释放（`hosted-loop-factory.ts:409-415`）。
+反向拆解顺序（`hosted-engine-runtime.ts:163-193`）：`machine.cancel({ kind: 'disposed' })` → `whenIdle()` → `scope.dispose()` → 注销 enter/announce → 从 ownership 摘除。resume 路径额外处理：无 `sessionPersistence` 服务时直接报错（`hosted-engine-runtime.ts:377-378`）；加载与 setup 全程用 `raceAbortCall` 竞争融合信号，被取消后晚到的 preparation 由它的 release 回调关闭（`hosted-engine-runtime.ts:408-413`）。
 
 ### 3.3 CodexAgent（会话驱动）
 
@@ -145,7 +148,7 @@ step 循环（`src/engine-codex/agent.ts:740-905`）维护一套折叠状态：`
 
 ### 5.5 request/header
 
-每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:470-481`）。`provider` 恒为 `'codex'`（`src/engine-codex/agent.ts:54`）；未钉 `model` 时 model 标签为 `'codex-native'`（`src/engine-codex/agent.ts:55-60`）——**web 会话的建议性模型选择刻意不镜像进 header**，因为它从不驱动查询（与 `docs/proposals/model-selection-disable.md` 对 claude 引擎的论述同理）。该 provider 标签在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:470-481`）。`provider` 恒为 `'codex'`（`src/engine-codex/agent.ts:54`）；未钉 `model` 时 model 标签为 `'codex-native'`（`src/engine-codex/agent.ts:55-60`）——**web 会话的建议性模型选择刻意不镜像进 header**，因为它从不驱动查询（与 `docs/proposals/model-selection-disable.md` 对 claude 引擎的论述同理）。该 provider 标签由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ## 6. 权限模型
 
@@ -217,11 +220,11 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 ### 7.3 注册点
 
-`mountCodex` 在挂载工厂 fiber 之前注册 provider（`src/index.ts:563-573`）：`skills.registerProvider(control => new CodexSkillProvider(control))`，disposer 存 `skillDisposer`，引擎卸载/切换时由 `cleanupEngineRegistrations` 注销（`src/index.ts:477-487, 629-641`）。codex 引擎**不注册任何 slash command**（与 claude/kimi 不同）。`skills` 服务可选，缺席时跳过注册（`ctx.get` 返回 undefined）。
+`CodexSkillProvider` 由 `registerEngineSurface` 在 **agent 创建时**注册——注册走的是 **agent 自己的 ctx**，因此落进该 agent 的 scope 层，随 agent 拆解自动回收，两个并发会话互不可见（`src/engine-surface.ts:52-54` 的 codex 条目、`:93-96` 的注册逻辑；调用点 `src/router-loop.ts:171`）。旧实现里 `mountCodex` 的全局注册（`skillDisposer` + `cleanupEngineRegistrations`）已删除。codex 引擎**不注册任何 slash command**（与 claude/kimi 不同）。`skills` 服务可选，缺席时跳过注册（`agent.ctx.get` 返回 undefined）。
 
 ## 8. 配置项一览
 
-组合条目（`src/index.ts` 的 `Config`）是所有引擎旋钮的超集；codex 只消费以下字段，经 `codexConfig` 转发（`src/index.ts:221-229`）：
+组合条目（`src/index.ts` 的 `Config`）是所有引擎旋钮的超集；codex 只消费以下字段，经 `codexConfig` 转发（`src/index.ts:228-235`）：
 
 | 组合字段 | codex Config 字段 | 校验（`src/engine-codex/loop.ts:59-64`） | 默认 | 语义 |
 |---|---|---|---|---|
@@ -230,7 +233,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 | `env` | `env` | `z.dict(z.string()).default({})` | `{}` | **当前未被消费**（见 §9.3 第 2 条） |
 | `model` | `model` | `z.string()` | 无 | 透传给 `thread/start` 与 `turn/start` 的 `model`，并作为 header/消息 source 的模型标签；缺省时标签为 `codex-native`，模型由 codex 原生设置决定 |
 
-`resolveConfig`（`src/engine-codex/loop.ts:67-82`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:575-589` 验证）。
+`resolveConfig`（`src/engine-codex/loop.ts:67-74`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:574-581` 验证）。
 
 无关字段不报错：`disposeGraceMs`/`maxTurns`（claude 用）、`piProvider` 等与 codex 并存但不被读取；`tests/index.spec.ts:641` 专门验证 codex 的配置边界不再校验 `disposeGraceMs`。
 
@@ -253,19 +256,19 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 
 ### 9.3 注释与实现不一致（撰写时发现）
 
-1. **`loop.ts:1-11` 模块注释过时**：称驱动"through the OpenAI Codex SDK"、"The Codex SDK spawns its own CLI binary (no spawn injection seam)"。实际代码没有任何 Codex SDK 依赖——驱动自己用 `node:child_process.spawn` 拉起 `codex app-server`（`appserver/client.ts:9, 89`），走的是手写 JSON-RPC。注释大概沿袭自早期 SDK 方案，"不经 subprocess 接缝"的结论仍然成立，但措辞误导。
-2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:52-53`），`codexConfig` 也转发它（`src/index.ts:226`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:89-91`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
-3. **`clientInfo.version` 是硬编码字面量**：initialize 报 `'1.0.0-rc13'`（`appserver/client.ts:118`）——它没有随 `package.json`（0.1.5-rc3）一起更新，只是历史遗留字符串，改协议握手时要留意别把它当成真实包版本（kimi 的 `src/engine-kimi/acp/client.ts:131` 同样硬编码 `'1.0.0'`）。
+1. **`loop.ts:1-11` 模块注释已改对一半**：模块头现在写的是 "Codex loop engine module: drives every session it is handed through the OpenAI Codex SDK … The router routes a session here on the plugin's own engine record, else its agent preset; this module is a library, not a Cordis plugin entry. The Codex SDK spawns its own CLI binary (no spawn injection seam), so this loop deliberately does not inject the dsh subprocess service"。其中"路由器构造本引擎 / 本模块是库"已与实现一致（AgentFactory 槽位归路由器 `src/router-loop.ts:114`，本类是普通类而非占槽位的工厂），**仍然失真的是"Codex SDK"这两处**：驱动不依赖任何 Codex SDK，自己用 `node:child_process.spawn` 拉起 `codex app-server`（`appserver/client.ts:9, 89`）走手写 JSON-RPC，所以 "The Codex SDK spawns its own CLI binary" 的主语应当是驱动本身；"不经 subprocess 接缝"的结论本身仍然成立。
+2. **`env` 配置是死旋钮**：`Config.env` 注释称"layered over the credential-scrubbed parent environment"（`loop.ts:52-53`），`codexConfig` 也转发它（`src/index.ts:232`），但整个 `src/engine-codex/` 没有任何代码读取 `config.env`——`AppServerClient.create()` 的 spawn 不传 env（`appserver/client.ts:89-91`）。子进程永远继承 dsh 进程环境（也不存在注释所说的"credential-scrubbed"）。要么实现它，要么删掉该字段。
+3. **`clientInfo.version` 是硬编码字面量**：initialize 报 `'1.0.0-rc13'`（`appserver/client.ts:118`）——它没有随 `package.json`（0.1.5-rc3）一起更新，只是历史遗留字符串，改协议握手时要留意别把它当成真实包版本（kimi 的 `src/engine-kimi/acp/client.ts:176` 同样硬编码 `'1.0.0'`）。
 4. **`threadResume` 无调用方**（`appserver/client.ts:131-133`）：保留的协议面，dsh resume 不走 codex thread/resume。改 resume 语义时注意别误以为它在用。
 5. `turn()` 的 `token-usage` 事件与 `ErrorNotification.willRetry` 被产生/携带但无人消费；若将来要中途展示 token 用量或区分可重试错误，这两个钩子已经现成。
 
-另有一处仅测试侧的出入：`tests/engine-codex/agent.spec.ts:64` 与 `controls.spec.ts:54` 给 mock 的 `AppServerThread` 加了 `async dispose() {}`，真实类没有该方法——无害，但说明 mock 形状与真实类已轻微漂移。
+另有一处仅测试侧的出入：`tests/engine-codex/agent.spec.ts:58` 与 `controls.spec.ts:50` 给 mock 的 `AppServerThread` 加了 `async dispose() {}`，真实类没有该方法——无害，但说明 mock 形状与真实类已轻微漂移。
 
 ## 10. 测试覆盖要点
 
-全部 codex 测试位于 `tests/engine-codex/`（agent / controls / index / permission / skills + `appserver/` client / thread / mapping），共享同一手法：`vi.mock` 掉 `appserver/client.ts` 与 `appserver/thread.ts`，用 `mock.runStreamed` 喂 `AppServerEvent` 序列，断言**会话日志**（这是唯一事实源，也是最好的断言面）。`CodexLoop` 经本地 `loopPlugin` 包装挂载（因为引擎模块是库不是插件）。
+全部 codex 测试位于 `tests/engine-codex/`（agent / controls / index / permission / skills + `appserver/` client / thread / mapping），共享同一手法：`vi.mock` 掉 `appserver/client.ts` 与 `appserver/thread.ts`，用 `mock.runStreamed` 喂 `AppServerEvent` 序列，断言**会话日志**（这是唯一事实源，也是最好的断言面）。`CodexLoop` 经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 包装挂载——引擎模块是库不是插件，helper 做的是路由器在生产里做的事：构造引擎、把 AgentFactory 槽位交给它、发布三个 systemPrompt 变量。
 
-- **`agent.spec.ts`**（约 1600 行，核心）：turn/step/user-message/assistant-message/turn-end 全链路；**一段一步的 step 轮转（`stepStructure` 辅助函数断言 `type@step` 序列；含只在推理 delta 处轮转的形状）**；流式 chunk 序列与消息内嵌 `data.stream`（每条消息只内嵌自己那段 chunk）／live `agent/assistant-stream` 帧；推理折叠进后续 agent 消息、尾随推理独占消息并携带 usage、多消息 usage 只挂末条；两条 agent 消息之间插入 tool item（三类工具）／reasoning item／reasoning+tool item 时逐条消息的 content 与内嵌 stream 归因；plan item 出现在两条 agent 消息之间时的两种形状（有 delta：切段丢弃；无 delta：忽略不切）；多 delta 不重复 block-start；空 reasoning/空 text/无 usage 的容错；三类工具 item 的 tool/call + tool/result 与惰性 call；未知 item 忽略；`CODEX_ERROR`/`CODEX_NO_RESULT` 下部分转录保留；request/header 的 initial/resume 语义；取消（aborted turn）、`agent/pre-step` reject（blocked turn）；权限旋钮每查询重折叠与部署钉值逐字段优先；交互审批（command/file-change/permissions 的 accept / decline / grant、无审批服务 fail-closed、未知 method、running turn 信号传递）；`model` 透传 thread params 与 header；技能注入（转义、跳过不可用户调用/加载失败/未找到、无 skills 服务、非 user source 与 reasoning 块不触发、加载中取消整批作废、无 cwd 时不带 cwd 提示）。
+- **`agent.spec.ts`**（1916 行，核心）：turn/step/user-message/assistant-message/turn-end 全链路；**一段一步的 step 轮转（`stepStructure` 辅助函数断言 `type@step` 序列；含只在推理 delta 处轮转的形状）**；流式 chunk 序列与消息内嵌 `data.stream`（每条消息只内嵌自己那段 chunk）／live `agent/assistant-stream` 帧；推理折叠进后续 agent 消息、尾随推理独占消息并携带 usage、多消息 usage 只挂末条；两条 agent 消息之间插入 tool item（三类工具）／reasoning item／reasoning+tool item 时逐条消息的 content 与内嵌 stream 归因；plan item 出现在两条 agent 消息之间时的两种形状（有 delta：切段丢弃；无 delta：忽略不切）；多 delta 不重复 block-start；空 reasoning/空 text/无 usage 的容错；三类工具 item 的 tool/call + tool/result 与惰性 call；未知 item 忽略；`CODEX_ERROR`/`CODEX_NO_RESULT` 下部分转录保留；request/header 的 initial/resume 语义；取消（aborted turn）、`agent/pre-step` reject（blocked turn）；权限旋钮每查询重折叠与部署钉值逐字段优先；交互审批（command/file-change/permissions 的 accept / decline / grant、无审批服务 fail-closed、未知 method、running turn 信号传递）；`model` 透传 thread params 与 header；技能注入（转义、跳过不可用户调用/加载失败/未找到、无 skills 服务、非 user source 与 reasoning 块不触发、加载中取消整批作废、无 cwd 时不带 cwd 提示）。
 - **`controls.spec.ts`**：steer/inject 合批、cancel 清 inbox 与 `keepInbox`、maintenance 门闩唤醒、运行中取消后接新 turn、防御性 guard（无驱动预约直接 turn、无 cwd）、turn/start 与 turn/end 的 commit veto、空 step 完成、turn-stopping 注入续 step、followup/steer 的 turn/step 链式衔接、配置 schema 常量与解析、systemPrompt 变量装配。
 - **`index.spec.ts`**：工厂注册与 HMR 卸载后 `no agent factory registered`；seed/meta 透传；创建信号预中止（Error 与字符串 reason）；setup commit、setup 抛错回滚、悬挂 setup 中止；owner fiber 中途卸载回滚（含 scope mint 竞态）；resume 全套（无持久化报错、JSONL 后端恢复、预中止、加载取消释放 abandoned preparation、晚到失败吞掉、loop 失活拒绝）。
 - **`permission.spec.ts`**：三条折叠规则与 fail-closed 默认的纯函数断言。

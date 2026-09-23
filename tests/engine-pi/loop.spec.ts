@@ -96,6 +96,17 @@ describe('PiLoop spawn plumbing', () => {
     }
   })
 
+  it('fails loud when the context carries no subprocess service', async () => {
+    // The engine resolves the seam lazily at construction: a profile without it
+    // must fail the session loud rather than mount a driver that cannot spawn.
+    const ctx = new Context()
+    try {
+      expect(() => new PiLoop(ctx, {})).toThrow(/needs the dsh subprocess service/)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('exposes the accepted sandbox modes', () => {
     expect(PI_SANDBOX_MODES).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
   })

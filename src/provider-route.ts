@@ -11,6 +11,12 @@
  * injects a catalog (only `pi` does, from its model probe); catalog groups that
  * advertise nothing are dropped, so the picker is otherwise unchanged.
  *
+ * Serving the label is only half of it: the label is not a model endpoint, and a
+ * session switched back to `in-process` really does call a model — so that
+ * switch writes the deployment default into the session instead
+ * (`model-selection-reset.ts`), which is what keeps a real request away from
+ * this route.
+ *
  * @module dsh-loop-engine/provider-route
  */
 

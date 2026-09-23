@@ -11,11 +11,11 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 - **Claude Code 拥有自己的 prompt、工具和权限**。SDK 子进程是真正的 agent 运行时（自带系统提示、内置工具、技能展开）；dsh 侧只做收件箱、turn/step 边界、事件落盘和审批转发（`src/engine-claude/agent.ts:1-8`）。
 - **进程模型**：SDK 的 `query()` 内部 spawn 一个 `claude` CLI 子进程。引擎通过 SDK 的 `spawnClaudeCodeProcess` 钩子把 spawn 请求转交给 dsh 的 subprocess seam（`src/engine-claude/sdk.ts:145-148`），子进程树的生命周期（终止升级阶梯、grace）由 harness 统一管理，而不是 SDK 直接 `child_process.spawn`。
 
-与 dsh 的关系：harness 只有一个 `AgentFactory` 槽位（主仓 `packages/core/agent/src/index.ts:357`，重复注册抛 `an agent factory is already registered`）。插件入口 `src/index.ts` 在 web 设置页选择 claude-code 时，通过 managed block 禁用 base bundle 的 `agent-loop` 行，并把 `ClaudeCodeLoop` 挂为 cordis 子 fiber（`src/index.ts:560`），由它占用该槽位。
+与 dsh 的关系：harness 只有一个 `AgentFactory` 槽位（主仓 `packages/core/agent/src/index.ts:357`，重复注册抛 `an agent factory is already registered`）。插件入口 `src/index.ts` 用**与引擎无关的常量 managed block** 禁用 base bundle 的 `agent-loop` 行（`src/patch-manager.ts:59-68`），把槽位让给路由器 `RouterLoop`（`src/router-loop.ts:114`）——它继承 harness 的 `AgentLoop`，所以 `in-process` 会话也走它。路由器按插件自己的**每会话引擎记录**分发、该会话无记录时回退到它记录的 **agent preset**，某个会话第一次选中 claude-code 时才构造 `ClaudeCodeLoop`（`src/index.ts:558-559`、`src/router-loop.ts:158-164`）。设置页选的引擎只是**新会话的默认引擎**，不改写配置文件，也不需要刷新页面或重启。
 
 ## 2. 模块组成与各文件职责
 
-`src/engine-claude/` 是一个**库**而不是 cordis 插件入口（`src/engine-claude/loop.ts:6`），由 `src/index.ts` 的 `mountClaude` 挂成子 fiber。
+`src/engine-claude/` 是一个**库**而不是 cordis 插件入口（`src/engine-claude/loop.ts:6`）：`ClaudeCodeLoop` 是普通类，由路由器在会话选中 claude-code 时构造（`src/index.ts:558-559`）。
 
 | 文件 | 职责 |
 |---|---|
@@ -31,42 +31,46 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 
 - `prompt.ts` — `serializeHistory`，见第 4 节。
 - `ownership.ts` — `FactoryOwnership`（工厂卸载时取消并等待所有存活 agent 的 teardown）、`raceAbort` / `raceAbortCall`（setup 等待与融合 abort 信号竞速）——**原语**。
-- `hosted-loop-factory.ts` — `HostedLoopFactory`：把上面的原语编排成 create/resume 的 prepare→setup→publish 事务；claude 只提供 label、`inject` 与 `buildAgent`（第 3.1/3.2 节）。
+- `hosted-engine-runtime.ts` — `HostedEngineRuntime`：把上面的原语编排成 create/resume 的 prepare→setup→publish 事务；claude 只提供 label、`resolveConfig` 与 `buildAgent`（第 3.1/3.2 节）。
 - `inbox.ts` — `DriverInbox`：会话自己的 durable 收件箱投影（把 `agent/inbox/spliced` 事件重放折叠成待处理输入），替代 harness 已改成接口的 `Inbox`。
 - `assistant-stream.ts` — `DriverAssistantStream`：一次流式尝试的 live 帧（`agent/assistant-stream` 的 start/chunk/end）与交给 durable `assistant/message` 的内嵌 `stream` 压缩。
 - `permission-knobs.ts` — 从 session log 读取最后一条 `sandbox/mode` / `approval/policy` 事件的引擎无关读取器。
 - `skill-inject.ts` — `/name` 手势扫描、`isSkillName` 校验、`<skill_content>` XML 渲染与转义。
 - `context-files.ts` — **claude 引擎不使用**。它是 codex/pi/kimi 的 AGENTS.md 收集器；claude 的技能发现在 `src/skills.ts` 自成一套（见第 7 节）。任务清单把它列入"被引用"是误列，改 claude 引擎时不用看它。
 
-引擎外的两块 claude 专属代码在插件入口层：`src/commands.ts`（斜杠命令桥）与 `src/skills.ts`（`ClaudeCodeSkillProvider`），均由 `mountClaude` 注册（`src/index.ts:530-561`）。
+引擎外的两块 claude 专属代码：`src/commands.ts`（斜杠命令桥）与 `src/skills.ts`（`ClaudeCodeSkillProvider`），均由 `src/engine-surface.ts` 的 `registerEngineSurface` 在 **agent 创建时**注册进该 agent 自己的 scope（`src/engine-surface.ts:47-62`、`:77-96`；调用点 `src/router-loop.ts:171`）。**不再是插件的全局注册**——两个并发的 claude 会话各有自己的层，菜单互不可见，agent scope 拆除时一起回收。
 
-## 3. Loop 工厂与 Agent 生命周期
+## 3. 引擎运行时与 Agent 生命周期
 
-### 3.1 工厂注册
+### 3.1 引擎运行时与槽位归属
 
-`ClaudeCodeLoop` 现在是 `HostedLoopFactory<ResolvedConfig, ClaudeCodeAgent>` 的**三行子类**（`src/engine-claude/loop.ts:95-110`），`static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']`（`:97`）。构造函数里：
+`ClaudeCodeLoop` 是 `HostedEngineRuntime<ResolvedConfig, ClaudeCodeAgent>` 的**三行子类**（`src/engine-claude/loop.ts:96-108`）——一个**普通类**，不是 Cordis Service，不声明 `static inject`，也不自己占用 AgentFactory 槽位。ctx key 仍是 `agentLoopClaudeCode`（`src/engine-claude/loop.ts:83`、`:85-89` 的模块声明）。构造函数里：
 
-- `super(ctx, 'agentLoopClaudeCode', resolveConfig(config))`（`:103`）——服务名同时是全部 effect label 的前缀。
+- `super(ctx, CLAUDE_CODE_ENGINE_LABEL, resolveConfig(config))`（`:101`）——label 同时是全部 effect label 的前缀。
 - `resolveConfig` 在插件配置边界做校验（`src/engine-claude/loop.ts:63-80`）：`disposeGraceMs` 必须是正有限数且不超过 `MAX_TIMER_DELAY_MS`（超过 32 位定时器上限会静默溢出，所以硬拒绝）。
-- 唯一的重写是 `buildAgent`（`:107-109`）：`new ClaudeCodeAgent(loopCtx, id, options, session, this.config)`。
+- 唯一的重写是 `buildAgent`（`:105-107`）：`new ClaudeCodeAgent(loopCtx, id, options, session, this.config)`。
 
-基类（`src/driver-core/hosted-loop-factory.ts`）在构造时做其余的事：
+`subprocess` 服务不再靠 `static inject` 保证：引擎是 `new` 出来的普通类，没有 Cordis 的注入列表可声明。claude 驱动只需要一个 `loopCtx.subprocess.spawn`（第 6 节），在使用点从 ctx 取；缺服务时是选中 claude-code 的那个会话大声失败，而不是整个插件启动失败。
 
-- `ctx.effect(() => ctx.agents.setFactory(this))` 占用 AgentFactory 槽位，fiber 卸载时 effect 反转、槽位自动清空（`hosted-loop-factory.ts:110`）——这是运行时切换引擎能生效的关键。
-- 注册 `provider` / `model` / `cwd` 三个 system-prompt 变量（`hosted-loop-factory.ts:114-116`）。注意：claude 引擎**不用** dsh 的系统提示组装，这些变量只是镜像默认 loop 的注册，喂给下游可能读取它们的消费者。
+槽位归路由器：进程内唯一的 AgentFactory 是 `RouterLoop`（`src/router-loop.ts:114`），它继承 harness 的 `AgentLoop`，按插件自己的每会话引擎记录分发（无记录时回退到会话记录的 agent preset），并在某个会话第一次选中 claude-code 时构造 `ClaudeCodeLoop`（`src/index.ts:558-559`，实例缓存于 `RouterLoop.runtimeOf`，`src/router-loop.ts:158-164`）。基类（`src/driver-core/hosted-engine-runtime.ts`）在构造时只做两件事：
+
+- `ctx.reflect.provide(label, this)` 把实例挂到 ctx key（`hosted-engine-runtime.ts:109`）——**这是内省面，不是 `setFactory`**；
+- 注册工厂所有权 effect，fiber 卸载时停掉所有权、所有存活 agent 的反向拆解随之执行（`hosted-engine-runtime.ts:115`）。
+
+`provider` / `model` / `cwd` 三个 system-prompt 变量与 `agent-loop` settings section 都**不**在引擎这一层：它们由路由器继承的 harness `AgentLoop` 提供（`src/router-loop.ts:114-141`；注册点在主仓 `packages/core/agent-loop/src/index.ts:421-423`，settings section 在 `:401`）。注意：claude 引擎**不用** dsh 的系统提示组装，这些变量只是喂给下游可能读取它们的消费者。
 
 ### 3.2 创建与发布事务
 
-> **这套事务已抽到 `src/driver-core/hosted-loop-factory.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面描述的是共享体的行为，claude 只是其中一个子类——条目中的行号除特别注明外都指共享文件。
+> **这套事务已抽到 `src/driver-core/hosted-engine-runtime.ts`，四个引擎共用一份**（`docs/driver-core.md` §4 有完整说明）。下面描述的是共享体的行为，claude 只是其中一个子类——条目中的行号除特别注明外都指共享文件；路由器对每个会话调用的就是这两个入口（`src/router-loop.ts:203-212`、`:226-235`）。
 
-`createAgent` / `resume` 都走同一个 `prepare → setup → publish` 事务（`prepare` 见 `hosted-loop-factory.ts:133-248`，`setupAndPublish` 见 `:250`）：
+`createAgent` / `resume` 都走同一个 `prepare → setup → publish` 事务（`prepare` 见 `hosted-engine-runtime.ts:132-246`，`setupAndPublish` 见 `:249`）：
 
-1. `prepare` 通过 `this.buildAgent(...)`（`:219`）构造 `ClaudeCodeAgent`，并建一个**备忘化**（memoized）的反向 teardown。teardown 在发布**之前**就注册进 `FactoryOwnership` 和 owner fiber 的 effect，因此 setup 中途工厂卸载或 owner 卸载都会整体回滚。
-2. 三方取消信号融合：caller 的 `signal`、owner fiber 卸载、工厂 teardown，共同驱动一个 `AbortController`，`prepared.signal` 供 setup 等待竞速（`hosted-loop-factory.ts:149-155`）。
-3. `setupAndPublish` 里 `raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方的 setup，成功后 `commit()` 再 `publish`：`publish` 回调逐个进 `sessions` / `agents` 两个注册表 → `announce` → 发 `agent/session-start`（`hosted-loop-factory.ts:273`、`:223-238`）。失败路径 `await prepared.dispose()` 后重抛。
-4. `resume` 额外要求 `sessionPersistence` 服务存在，否则响亮失败（`hosted-loop-factory.ts:377-380`）；加载阶段同样与取消信号竞速，加载完成才被取消的 preparation 会被 `[Symbol.dispose]()` 释放（`hosted-loop-factory.ts:409-415`、`:451-453`）。
+1. `prepare` 通过 `this.buildAgent(...)`（`:218`）构造 `ClaudeCodeAgent`，并建一个**备忘化**（memoized）的反向 teardown。teardown 在发布**之前**就注册进 `FactoryOwnership` 和 owner fiber 的 effect，因此 setup 中途工厂卸载或 owner 卸载都会整体回滚。
+2. 三方取消信号融合：caller 的 `signal`、owner fiber 卸载、工厂 teardown，共同驱动一个 `AbortController`，`prepared.signal` 供 setup 等待竞速（`hosted-engine-runtime.ts:148-156`）。
+3. `setupAndPublish` 里 `raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)` 跑调用方的 setup，成功后 `commit()` 再 `publish`：`publish` 回调逐个进 `sessions` / `agents` 两个注册表 → `announce` → 发 `agent/session-start`（`hosted-engine-runtime.ts:272`、`:225-236`）。失败路径 `await prepared.dispose()` 后重抛。
+4. `resume` 额外要求 `sessionPersistence` 服务存在，否则响亮失败（`hosted-engine-runtime.ts:377-378`）；加载阶段同样与取消信号竞速，加载完成才被取消的 preparation 会被 `[Symbol.dispose]()` 释放（`hosted-engine-runtime.ts:408-413`、`:449-452`）。
 
-`dispose` 的顺序固定：abort 融合信号 → `machine.cancel({ kind: 'disposed' })` → `whenIdle()` 等驱动退出 → `scope.dispose()` → 摘注册 → 摘 owner 跟随（`hosted-loop-factory.ts:164-194`）。`disposeGraceMs` 不在这一层生效——它是给 SDK 子进程树的终止宽限（见第 6 节），agent 级 dispose 不等它。
+`dispose` 的顺序固定：abort 融合信号 → `machine.cancel({ kind: 'disposed' })` → `whenIdle()` 等驱动退出 → `scope.dispose()` → 摘注册 → 摘 owner 跟随（`hosted-engine-runtime.ts:163-193`）。`disposeGraceMs` 不在这一层生效——它是给 SDK 子进程树的终止宽限（见第 6 节），agent 级 dispose 不等它。
 
 ### 3.3 Agent 的 turn/step 驱动
 
@@ -76,7 +80,7 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 - **唤醒**：`wakeDriver` 只在 idle 时开新 driver；非 idle 时若原因是 maintenance 或"abort 后唤醒"则 latch `wakeRequested`，driver 退出时若收件箱仍有消息会接力唤醒（`src/engine-claude/agent.ts:219-237`、`254-268`）。一个细节：abort 之后收到的 wakeup 会被 `send` 重分类为 `next-turn`（`src/engine-claude/agent.ts:146-148`），保证它开启新 turn 而不是混入已死的 step。
 - **turn**：`turn/start` 落盘 → 循环 `preStep`（claim 消息 → `agent/pre-step` waterfall，可被拦截 reject → 技能注入）→ `step/start` → 每条用户消息落 `user/message` → `step()` → `step/end`。turn 结束原因在 `turn/end` 落盘：`completed` / `blocked` / `aborted` / `error`。`agent/turn-stopping` serial 事件给拦截器最后一次注入输入的机会。
   两个关键点：① `step()` 内部会在助手片段边界轮转 step（§4.1），所以收尾的 `step/end` 关的是 `phase.step` 而非本次迭代开头开的 step；② **轮转出来的 step 不重跑 `preStep`**——只有 turn 的第一个 step 走 inbox claim / waterfall / 技能注入，因为一次 query 是原子的、中途也无法投递 steer/inject。
-- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:447-458`）。header 的 model 标签是 `config.model ?? 'claude-code-native'`——**故意不镜像** web 会话的模型选择，因为那个选择从不驱动 query（`src/engine-claude/agent.ts:51-56`；背景见 `docs/proposals/model-selection-disable.md`）。provider 标签 `'claude-code'` 在引擎挂载期间由插件注册为占位 provider 路由（见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:447-458`）。header 的 model 标签是 `config.model ?? 'claude-code-native'`——**故意不镜像** web 会话的模型选择，因为那个选择从不驱动 query（`src/engine-claude/agent.ts:51-56`；背景见 `docs/proposals/model-selection-disable.md`）。provider 标签 `'claude-code'` 由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
 
 ### 3.4 中断与销毁
 
@@ -151,9 +155,9 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 转发回来的行之所以能被 CLI 展开，靠的是驱动侧的斜杠命令步：`engineSlashPrompt` 让本步的 prompt 就是那一行（`src/engine-claude/agent.ts:531`）。CLI 的派发条件是 `T.startsWith("/")`（`rCb` 里 `F !== null && !G && F.startsWith("/")` → `processSlashCommand`），带 `<user>` 框架的转录永远不满足，`/status` 就成了给模型的散文。
 
 - 内置 4 个：`help` / `compact` / `clear` / `review`（`src/commands.ts:88-93`）。这份清单是**实测**出来的：逐条真跑一次 SDK query，`/help`、`/compact`、`/clear`（回一条 `conversation_reset`）、`/review`（真跑一次 review 流程）都被 CLI 当命令处理，而 `/explain`、`/fix`、`/tests` 回 `Unknown command: /xxx`——所以后者已从清单删除。（注意 `/status` 在 SDK 环境回 `isn't available in this environment.`：多数本地命令只在交互 TUI 可用，这是**引擎自己的答复**，会作为 assistant 消息（`model: "<synthetic>"`）落进会话，驱动无需特判。）
-- **用户级自定义命令**（`~/.claude/commands/*.md`）由 `discoverUserSlashCommands` 同步扫描注册：只收 `.md`、名字须过 dsh 命令名语法、与内置重名跳过；描述取 frontmatter `description`，否则取正文首个非空非标题行（>120 字符截断），都没有则跳过（`src/commands.ts:103-129`）。同步扫描是有意的——挂载路径必须在引擎切换 commit 返回前完成注册。
+- **用户级自定义命令**（`~/.claude/commands/*.md`）由 `discoverUserSlashCommands` 同步扫描注册：只收 `.md`、名字须过 dsh 命令名语法、与内置重名跳过；描述取 frontmatter `description`，否则取正文首个非空非标题行（>120 字符截断），都没有则跳过（`src/commands.ts:103-129`）。同步扫描是有意的——注册点没有 await 点，命令必须在 agent 发布前注册完（`src/commands.ts:95-102` 头注）。
 - **项目级 `.claude/commands/` 故意不注册**：它们依赖 cwd，全局注册会跨项目冲突；未注册的 `/行` 本来就会当用户文本透传给 CLI，命中命令步后照常裸发。
-- 注册时与 dsh 原生命令撞名：警告并跳过，不让挂载失败（`src/index.ts:628-634`）。
+- 注册时与 dsh 原生命令撞名：警告并跳过（`commands.register` 抛错就 warn 并继续），不让 agent 启动失败（`src/engine-surface.ts:84-91`）。
 
 ### 7.2 技能 provider（`src/skills.ts`）
 
@@ -178,7 +182,7 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 
 ## 8. 配置项一览
 
-配置从 `cordis.yml` 的 composition entry 进来：`src/index.ts` 的 `Config` 是全引擎超集，`claudeCodeConfig` 只挑出 claude 的字段转发（`src/index.ts:211-219`），`ClaudeCodeLoop` 再用自己的 schemastery schema + `resolveConfig` 校验。schema 只在字段存在时校验、缺省落 `undefined`（`src/engine-claude/loop.ts:54-60` 与 `src/index.ts:120-134` 注释），所以 `resolveConfig` 里仍保留 `??` 兜底——测试里有"不经插件 schema 直接构造"的路径。
+配置从 `cordis.yml` 的 composition entry 进来：`src/index.ts` 的 `Config` 是全引擎超集，`claudeCodeConfig` 只挑出 claude 的字段转发（`src/index.ts:217-225`），`ClaudeCodeLoop` 再用自己的 schemastery schema + `resolveConfig` 校验。schema 只在字段存在时校验、缺省落 `undefined`（`src/engine-claude/loop.ts:54-60` 与 `src/index.ts:111-121` 注释），所以 `resolveConfig` 里仍保留 `??` 兜底——测试里有"不经插件 schema 直接构造"的路径。
 
 | 配置项 | 类型 / 默认 | 生效位置 |
 |---|---|---|
@@ -194,16 +198,16 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 
 - **配置边界**：`disposeGraceMs` 非法在构造时抛（`src/engine-claude/loop.ts:64-72`）；schemastery 对非法枚举/类型在 compose 时拒绝。原则是无头部署的误配必须响亮失败。
 - **query 失败**：SDK result 错误 → `LlmError`（`CLAUDE_CODE_*` 码）→ `turn/end` 记 `error` + `agent/error` 事件；空流 → `CLAUDE_CODE_NO_RESULT`；无 cwd → 普通 Error，错误码 `UNKNOWN`（`src/engine-claude/agent.ts:419-424`）。
-- **静默降级**：技能加载失败/不存在/不可调用跳过；无 `approval` 服务时 ask 策略落 deny；无 `skills` 服务时手势不注入；无 `commands` 服务时斜杠菜单不注册。这些都有意不 fail-loud，因为可选宿主服务可能缺席（`src/index.ts:74-82`）。
+- **静默降级**：技能加载失败/不存在/不可调用跳过；无 `approval` 服务时 ask 策略落 deny；无 `skills` 服务时手势不注入；无 `commands` 服务时斜杠菜单不注册。这些都有意不 fail-loud，因为可选宿主服务可能缺席（`src/index.ts:82-89`）。
 - **已知边界**：
   - 图片不转录，以占位文本代替（`src/driver-core/prompt.ts:20-21`）；思维链不进 prompt（每次 query 重新思考，`src/driver-core/prompt.ts:34-37`）。
   - `redacted-thinking` 与未知内容块在 durable log 中不可恢复（`src/engine-claude/mapping.ts:100-102`）。
   - 无 SDK 会话持久化：每次 step 都是完整历史重放，长会话的 prompt 会线性增长——这是"session log 唯一事实源"设计的固有代价。
-  - 运行时切换引擎靠挂载/卸载 fiber 实现；AgentFactory 槽位竞争有有界重试（40 次 × 50ms，`src/index.ts:85-86`、`517-525`），与 patch-layer reload 竞速，超出则报错需重启。
+  - 引擎**按会话**选定：创建时由插件自己的每会话记录决定（该会话无记录时用它记录的 agent preset），之后可在会话打开且没有 turn 在飞时随时切到别的引擎（`src/router-loop.ts:281-314`、`:306-317`）；经 harness 的 preset 通道仍只有**空白**会话能换引擎，非空白会话只 warn 并保持原引擎（`src/router-loop.ts:577-602`）。插件装载期间 managed block 恒存在（不再有"in-process = 没有块"的形态）。**托管引擎之间的切换不需要重启、也不需要刷新**；**任一边是 in-process 时宿主会释放这条会话的 agent 并让页面自动重载一次**（重载后回到同一条会话，宿主按记录重建它——`dsh web` 进程不重启，`docs/per-session-engine.md` §5.2）。
 
 ## 10. 测试覆盖要点
 
-claude 引擎的测试在 `tests/engine-claude/`（另有 `tests/commands.spec.ts`、`tests/skills.spec.ts` 覆盖入口层），统一手法是 `vi.mock('@anthropic-ai/claude-agent-sdk')` 替换 `query`，用内存 SDKMessage 流驱动真实 `ClaudeCodeLoop` + 真实 session store/subprocess 插件，断言落在 session log 上：
+claude 引擎的测试在 `tests/engine-claude/`（另有 `tests/commands.spec.ts`、`tests/skills.spec.ts` 覆盖入口层），统一手法是 `vi.mock('@anthropic-ai/claude-agent-sdk')` 替换 `query`，用内存 SDKMessage 流驱动真实 `ClaudeCodeLoop` + 真实 session store/subprocess 插件，断言落在 session log 上。per-engine spec 里的 `ClaudeCodeLoop` 经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 挂载——helper 做路由器在生产里做的事：构造引擎、把 AgentFactory 槽位交给它、发布三个 systemPrompt 变量：
 
 - `agent.spec.ts` — 工厂注册、turn/step/事件落盘、**一段一步的 step 轮转（`stepStructure` 辅助函数断言 `type@step` 序列）**、**query 总量 usage 只在未轮转时落盘**、流式 chunk 与其内嵌 `data.stream`／live `agent/assistant-stream` 帧（含 committed 收尾）、三种思维链兜底、工具调用/结果配对、SDK 错误码映射、request header 的 initial/resume、取消与 pre-step 拦截、会话权限旋钮折叠（ask 转发 / 无审批服务落 deny / 中途切 full access）、技能注入全部分支（含取消丢弃、无 cwd 提示）。
 - `controls.spec.ts` — steer/inject 同批消费、cancel 清队列与 `keepInbox`、maintenance 的门闩唤醒、运行中取消后新 turn、防御性 guard（无 driver 的 turn、无 cwd、未来 subtype）、多步 continuation、resume header 落盘。
@@ -218,5 +222,4 @@ claude 引擎的测试在 `tests/engine-claude/`（另有 `tests/commands.spec.t
 
 1. **`loop.ts:45` 的 `model` 配置 JSDoc 不完整**：注释说 "Model label for the logged request header; Claude Code native settings own the actual model"，但实现同时把 `config.model` 作为 SDK `model` override 传给每次 query（`src/engine-claude/agent.ts:505`、`src/engine-claude/sdk.ts:102`）。钉了 `model` 就是钉了实际推理模型，不只是日志标签。`sdk.ts:40` 对同一字段的注释（"Model override for the SDK"）才是准确的。
 2. **`mapping.ts:137-152` JSDoc 重复**：`toolResultContent` 的 docblock 逐字出现了两遍。
-3. **`index.ts:507` 注释过时**："Cleanup claude-specific registrations on failure (a no-op for codex)"——现在命令/技能注册同样存在于 pi 和 kimi 引擎，"a no-op for codex" 已不准确（codex 也有技能注册）。
-4. **任务背景材料的偏差**（非源码问题）：driver-core 的 `context-files.ts` 不被 claude 引擎引用，它服务 codex/pi/kimi 的技能 provider；claude 的技能发现在 `src/skills.ts` 内自包含。
+3. **任务背景材料的偏差**（非源码问题）：driver-core 的 `context-files.ts` 不被 claude 引擎引用，它服务 codex/pi/kimi 的技能 provider；claude 的技能发现在 `src/skills.ts` 内自包含。

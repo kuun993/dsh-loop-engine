@@ -7,7 +7,7 @@
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { LoopEngineId } from '../settings.ts'
+import type { LoopEngineId } from '../agent-preset-ids.ts'
 
 /** State rendered by the loop engine section. */
 export interface LoopEngineState {

@@ -1,11 +1,12 @@
 /**
- * Shared factory ownership and abort-race machinery for the hosted engines.
+ * Shared engine ownership and abort-race machinery for the hosted engines.
  * All four loop drivers (Claude Code, Codex, Pi, Kimi Code) run the same
- * lifecycle: exactly one factory owns the AgentFactory slot, every live
- * agent's teardown is tracked until it settles, and setup awaits are raced
- * against a fused abort signal. These helpers are engine-free — they only
+ * lifecycle: one runtime per engine owns that engine's live agents, every
+ * live agent's teardown is tracked until it settles, and setup awaits are
+ * raced against a fused abort signal. The process-wide AgentFactory slot is
+ * the router's, not any engine's; these helpers are engine-free — they only
  * touch the fiber state, the session id type, and an AbortController — so the
- * loop modules share them verbatim.
+ * engine modules share them verbatim.
  *
  * @module dsh-loop-engine/driver-core/ownership
  */

@@ -18,13 +18,10 @@ import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { Readable, Writable } from 'node:stream'
 
-/** Local plugin wrapper: mount constructs the Kimi loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new KimiLoop(ctx, config as Parameters<typeof KimiLoop>[1])
-  },
-}
+import { loopPluginFor } from '../helpers/agent-harness.ts'
+
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(KimiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 /** A subprocess handle shaped like the seam returns one (never actually spawned here). */
 function fakeHandle(): SubprocessHandle {

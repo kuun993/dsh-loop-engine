@@ -43,12 +43,19 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/dsh-invariants',
   // Claude Code engine peers: each must stay a single shared runtime instance.
   '@deepseek-ai/dsh-agent',
+  // The router EXTENDS the harness loop; inlining it would create a second
+  // `AgentLoop` class identity and a second service registration.
+  '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-scope',
   '@deepseek-ai/dsh-session',
   '@deepseek-ai/dsh-session-persistence',
   '@deepseek-ai/dsh-subprocess',
   '@deepseek-ai/dsh-timeout',
+  // The plugin's own Remote extends `TypertRemoteService` and marks its method
+  // with `@Remote`; inlining the protocol would give the Gateway a second copy
+  // of the descriptor-recorded prototype markers it reads by reflection.
+  '@deepseek-ai/dsh-typert-protocol',
   '@anthropic-ai/claude-agent-sdk',
   '@anthropic-ai/sdk',
   // Codex engine CLI: spawned as the app-server child process at runtime.

@@ -1,91 +1,94 @@
 /**
- * Web-switchable agent loop engine, node half.
+ * Per-session agent loop engines, node half.
  *
  * Hosts the non-default agent-loop engines (Claude Code, Codex, Pi, Kimi Code)
- * and bridges them with the harness's single AgentFactory slot. The engine is
- * selected by the `agent-loop-engine` settings section; the selection is
- * realized by a managed block in the profile's `cordis.patch.yml` that
- * disables the base bundle's `agent-loop` row — exactly one AgentFactory may
- * register, so a non-default engine owns the slot by disabling the base loop
- * first, and `in-process` leaves the base row active (this plugin does NOT
- * register its own factory then).
+ * and routes each session to the engine it runs. The engine is the PLUGIN's own
+ * per-session fact (`session-engine-store.ts`), read first and over the recorded
+ * agent preset; a session the plugin has no record for keeps the preset answer,
+ * which is what makes every pre-existing session behave exactly as before.
+ * The harness admits exactly one AgentFactory per process, so "session A on
+ * Codex while session B runs Kimi" is realized by a single router factory
+ * ({@link RouterLoop}, which extends the harness's own `AgentLoop`) dispatching
+ * to one driver runtime per engine; `in-process` sessions keep the harness loop
+ * through that same router.
  *
- * The managed block is the ground truth the factory decision reads at boot:
- * apply() reads the file synchronously, so a committed engine change takes
- * effect on the next recomposition (restart); the config-only HMR watcher
- * re-applies the patch file but cannot re-register an AgentFactory mid-run.
- * The settings section is seeded from the block so the UI mirrors the file,
- * and a committed settings change writes the block (only when it differs).
+ * Because the router owns the slot, the plugin keeps the base bundle's
+ * `agent-loop` row disabled for as long as it is composed. That managed block
+ * lives in the profile's `cordis.patch.yml` (see `patch-manager.ts`) and is the
+ * plugin's only footprint in the harness's configuration; the block names no
+ * engine, because the engine is a per-session decision.
  *
- * A hosted engine also takes over the session's command and skill surface:
- * the block disables dsh's `command-goal` row, and the plugin authors a
- * stripped copy of the `standard` agent preset into the user preset root
- * (see `preset.ts`) and steers the `agent-presets` roster default to it, so
- * new sessions get the engine's commands and skills instead of the dsh-native
- * ones an external engine cannot honor. Switching back to `in-process`
- * restores the previous default.
+ * The plugin authors one preset per hosted engine into the user preset root
+ * (`$DSH_HOME/.agent-presets/loop-engine-<engine>`, see `preset.ts`), each a
+ * copy of `standard` minus the dsh-native command and skill rows an external
+ * engine replaces, and it serves every hosted engine's provider route label in
+ * the llm registry (`provider-route.ts`): an engine logs its own label into
+ * each session's request/header, and the web host refuses a turn whose session
+ * selection names a provider no adapter serves. The preset is now only the
+ * session's agent-plane composition (and the engine's own default for a session
+ * with no record) — it is no longer the thing that decides a running session's
+ * engine.
  *
- * While a hosted engine is mounted the plugin also serves its provider route
- * label (`claude-code` / `codex` / `pi` / `kimi`) from the llm registry with
- * a model-less placeholder adapter (see `provider-route.ts`): the engine logs
- * that label into each session's request/header, and the web host refuses a
- * turn whose session selection names a provider no adapter serves — without
- * the placeholder the second prompt of every hosted session would fail with
- * `model-unavailable`.
+ * The `agent-loop-engine` settings section carries the DEFAULT engine for new
+ * sessions — which preset the roster's default points at — not a process-wide
+ * switch: existing sessions keep the engine they run, and nothing is torn down or
+ * reloaded by it. (A PER-SESSION switch is a different thing: it is made from the
+ * chat composer, and when it involves the harness loop it releases that session's
+ * agent and reloads the page — `router-loop.ts` `move`, `client/reload.ts`.)
  *
  * @module dsh-loop-engine
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { Context, type Fiber } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import type { AgentPresetsService, LlmRegistry, SettingsMutator } from './driver-core/host-servers.ts'
+import { engineOfSession } from './engine-of-session.ts'
+import { LoopEngineRemote } from './engine-remote.ts'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
 import type { PiModelEntry } from './engine-pi/probe.ts'
 import { KimiLoop, type Config as KimiConfig } from './engine-kimi/loop.ts'
-import { KimiSkillProvider } from './engine-kimi/skills.ts'
-import { KIMI_COMMANDS } from './engine-kimi/commands.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
 import {
   applyManagedBlock,
-  currentEngineOf,
+  hasLegacyManagedBlock,
   hasManagedBlock,
-  managedBlockEngineOf,
+  legacyBlockEngineOf,
 } from './patch-manager.ts'
-import { ensureHostedPreset, HOSTED_PRESET_ID } from './preset.ts'
+import { enginePresetId, ensureEnginePresets } from './preset.ts'
 import { HOSTED_PROVIDER_ROUTES, HostedEngineRouteAdapter } from './provider-route.ts'
+import { ROUTER_SERVICES, RouterLoop, type RouterEngine } from './router-loop.ts'
+import {
+  resolveEngineRecordPath,
+  SessionEngineStore,
+  writeFileAtomicSync,
+} from './session-engine-store.ts'
+import type { RouterSurfaceHolder } from './engine-remote.ts'
 import {
   loopEngineSettingsNamespace,
   LOOP_ENGINE_SETTINGS_SCHEMA,
+  type HostedEngineId,
   type LoopEngineId,
   type LoopEngineSettings,
 } from './settings.ts'
-import { CLAUDE_CODE_COMMANDS, discoverUserSlashCommands, type CommandDefinition } from './commands.ts'
-import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from './skills.ts'
-import { CodexSkillProvider } from './engine-codex/skills.ts'
-import { PiSkillProvider } from './engine-pi/skills.ts'
 
 export const name = 'loop-engine'
 
 /**
  * Services the plugin's own fiber requires. The plugin declares none of its
- * own: the optional host services it reads (`commands`, `skills`) are resolved
- * lazily via `ctx.get` and may be absent, and the hosted engine factories
- * (Claude Code / Codex) declare their own `inject` when the plugin mounts them
- * as children. Empty keeps the plugin from demanding a service that a minimal
- * profile does not provide.
+ * own: the optional host services it reads (`commands`, `skills`, `agentPresets`,
+ * `llm`) are resolved lazily via `ctx.get` and may be absent, and the router
+ * declares the harness loop's own dependency set when it mounts. Empty keeps
+ * the plugin from demanding a service that a minimal profile does not provide.
  */
 export const inject = []
-
-/** Bounded retry window for the AgentFactory slot race on runtime switches. */
-const MAX_MOUNT_ATTEMPTS = 40
-const MOUNT_RETRY_MS = 50
 
 /** Composition entry for the loop engine selection and the hosted engine drivers. */
 export interface Config extends ClaudeCodeConfig {
@@ -115,9 +118,8 @@ export interface Config extends ClaudeCodeConfig {
  * matching the permissive interface and read path (`resolvePatchPath` defaults
  * the patch path; each engine driver resolves only the knobs it owns and
  * omitted deployment tunables fall back to the session). The composition entry
- * is an engine-agnostic superset: the selectable knobs belong to whichever
- * engine the settings pick at runtime, so both engines' knobs may coexist and
- * only the selected one is consumed.
+ * is an engine-agnostic superset: every hosted engine's knobs live here at
+ * once, because any session may select any engine.
  */
 export const Config: z<Config> = z.object({
   profile: z.string(),
@@ -155,7 +157,7 @@ function isMissing(error: unknown): boolean {
 async function readPatchOrUndefined(path: string): Promise<string | undefined> {
   try {
     return await readFile(path, 'utf8')
-  } catch (error) {
+  } catch (error: unknown) {
     if (isMissing(error)) return undefined
     throw error
   }
@@ -170,32 +172,36 @@ export async function writePatchFile(path: string, text: string): Promise<void> 
 }
 
 /**
- * Synchronously atomically replace the patch file. The engine-selection
- * onChange is a synchronous hook with no await, and the write MUST land before
- * the caller is told the switch committed — otherwise a user who restarts
- * `dsh web` immediately reads the stale file and the previous engine boots.
+ * Synchronously atomically replace the patch file. The settings onChange that
+ * commits a default-engine change is a synchronous hook with no await, and the
+ * write MUST land before the caller is told the change committed — otherwise a
+ * user who restarts `dsh web` immediately reads the stale file.
  * @param path - the profile's patch file.
  * @param text - the next file content.
  */
 export function writePatchFileSync(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp-${randomUUID()}`
-  writeFileSync(tmp, text, 'utf8')
-  renameSync(tmp, path)
+  writeFileAtomicSync(path, text)
 }
 
 /**
- * Rewrite the managed block for a target engine, preserving the rest of the
- * file byte for byte. Only writes when the file actually differs.
+ * Ensure the profile's patch file carries the plugin's managed block, which
+ * disables the base bundle's `agent-loop` row so this plugin's router owns the
+ * single AgentFactory slot. Idempotent: a file already carrying a block and no
+ * legacy block is left untouched.
  * @param path - the profile's patch file.
- * @param engine - the target engine.
  * @returns whether a write occurred.
  */
-export async function syncManagedBlock(path: string, engine: LoopEngineId): Promise<boolean> {
+export async function syncManagedBlock(path: string): Promise<boolean> {
   const current = await readPatchOrUndefined(path)
-  if (current !== undefined && currentEngineOf(current) === engine) return false
-  const next = applyManagedBlock(current ?? '', engine)
-  await writePatchFile(path, next)
+  // A file already carrying the CURRENT block and no legacy span is left
+  // untouched. A legacy span is rewritten even when its begin marker names an
+  // engine this build does not recognize: the routing model does not read an
+  // engine out of the file at all, so an unrecognized name is simply a legacy
+  // span to migrate.
+  if (current !== undefined && hasManagedBlock(current) && !hasLegacyManagedBlock(current)) {
+    return false
+  }
+  await writePatchFile(path, applyManagedBlock(current ?? ''))
   return true
 }
 
@@ -203,13 +209,13 @@ export async function syncManagedBlock(path: string, engine: LoopEngineId): Prom
 function readPatchFileSync(path: string): string {
   try {
     return readFileSync(path, 'utf8')
-  } catch (error) {
+  } catch (error: unknown) {
     if (isMissing(error)) return ''
     throw error
   }
 }
 
-/** Forward the engine-driver fields of the composition entry to the Claude Code loop. */
+/** Forward the engine-driver fields of the composition entry to the Claude Code engine. */
 function claudeCodeConfig(config: Config): ClaudeCodeConfig {
   return {
     ...config.permissionMode === undefined ? {} : { permissionMode: config.permissionMode },
@@ -220,7 +226,7 @@ function claudeCodeConfig(config: Config): ClaudeCodeConfig {
   }
 }
 
-/** Forward the engine-driver fields of the composition entry to the Codex loop. */
+/** Forward the engine-driver fields of the composition entry to the Codex engine. */
 function codexConfig(config: Config): CodexConfig {
   return {
     ...config.sandboxMode === undefined ? {} : { sandboxMode: config.sandboxMode },
@@ -230,7 +236,7 @@ function codexConfig(config: Config): CodexConfig {
   }
 }
 
-/** Forward the engine-driver fields of the composition entry to the Pi loop. */
+/** Forward the engine-driver fields of the composition entry to the Pi engine. */
 function piConfig(config: Config): PiConfig {
   return {
     ...config.piProvider === undefined ? {} : { provider: config.piProvider },
@@ -241,7 +247,7 @@ function piConfig(config: Config): PiConfig {
   }
 }
 
-/** Forward the engine-driver fields of the composition entry to the Kimi loop. */
+/** Forward the engine-driver fields of the composition entry to the Kimi engine. */
 function kimiConfig(config: Config): KimiConfig {
   return {
     ...config.model === undefined ? {} : { model: config.model },
@@ -251,67 +257,33 @@ function kimiConfig(config: Config): KimiConfig {
 }
 
 /**
- * Apply the plugin: seed the settings section from the managed block, host
- * the non-default engine factory when the block says so, and translate
- * committed engine changes into managed-block writes.
+ * Apply the plugin: own the profile's managed block, mount the routing factory,
+ * author the per-engine presets, and serve every hosted engine's provider
+ * route. The settings section carries the deployment's default engine.
  * @param ctx - the composing context.
- * @param config - composition entry for the managed patch file.
+ * @param config - composition entry for the managed patch file and engine knobs.
  */
 export function apply(ctx: Context, config: Config): void {
   const patchPath = resolvePatchPath(config)
-  // Seed from the file so attach is a no-op when the file already matches.
   const patchText = readPatchFileSync(patchPath)
-  let fileEngine = currentEngineOf(patchText)
-  // A block naming an engine this build does not recognize (written by a newer
-  // or different build) disables the base `agent-loop` row with nothing to take
-  // the slot: the plugin mounts no factory, and every session then fails with
-  // "no agent factory registered". Strip the block so the base loop can own the
-  // slot again. Re-enabling the base row takes a recomposition, hence the
-  // restart instruction; leaving the file alone would deadlock the profile.
-  if (hasManagedBlock(patchText) && managedBlockEngineOf(patchText) === undefined) {
+  // A block written by an older build names the ONE engine the profile used to
+  // be pinned to. Carry that choice into the settings seed so the deployment's
+  // default engine survives the upgrade, then rewrite the block to the
+  // engine-agnostic form the router needs.
+  const legacyEngine = legacyBlockEngineOf(patchText)
+  const needsWrite = hasLegacyManagedBlock(patchText) || !hasManagedBlock(patchText)
+  if (needsWrite) {
     try {
-      writePatchFileSync(patchPath, applyManagedBlock(patchText, 'in-process'))
-      fileEngine = 'in-process'
-      ctx.logger.error(
-        'loop-engine: the managed block names an engine this build does not recognize; removed it so the base agent loop can own the factory slot. Restart `dsh web` to bring the base loop back.',
-      )
+      writePatchFileSync(patchPath, applyManagedBlock(patchText))
     } catch (error: unknown) {
-      ctx.logger.error(`loop-engine: could not repair the unrecognized managed block: ${String(error)}`)
+      // Without the block the base `agent-loop` row keeps the factory slot and
+      // the router's registration is refused; every session would then fail
+      // loud, so this is reported at error level rather than swallowed.
+      ctx.logger.error(
+        `loop-engine: could not write the managed block to "${patchPath}": ${String(error)}. `
+        + 'The base agent loop still owns the factory slot; restart `dsh web` after fixing the path.',
+      )
     }
-  }
-  // Only the non-default engines live here. Their managed block disables the
-  // base `agent-loop` row, freeing the single AgentFactory slot for the
-  // selected loop's own registration; `in-process` mounts no factory here
-  // and the base loop stays the slot owner. The selected factory is hosted
-  // as a plugin fiber so a runtime switch can mount and unmount it — the
-  // AgentFactory is a single slot, so the active engine must own it in the
-  // same process, not only at the next boot.
-
-  // Minimal shape of the host commands service (avoiding a direct peer dep).
-  interface CommandsService {
-    register(def: CommandDefinition): () => void
-  }
-  // Minimal shape of the host skills service.
-  interface SkillsService {
-    registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void
-  }
-  // Minimal shape of the host preset roster (avoiding a direct peer dep on
-  // @deepseek-ai/dsh-agent-presets): the effective default id, and the
-  // composition reader the hosted preset derives from.
-  interface AgentPresetsService {
-    readonly defaultId: string
-    read(id: string): Promise<string>
-  }
-  // Minimal shape of the host settings service mutation seam.
-  interface SettingsMutator {
-    mutate(ns: SettingsNamespace, ops: readonly SettingsPathOp[]): Promise<void>
-    /** Registered namespaces, when the provider can enumerate them. */
-    describe?(): { ns: string }[]
-  }
-  // Minimal shape of the host llm registry: only the route registration a
-  // hosted engine's request/header provider label needs.
-  interface LlmRegistry {
-    registerAdapter(providers: string[], adapter: HostedEngineRouteAdapter): () => void
   }
 
   /** Settings namespace of the preset roster (owned by dsh-agent-presets). */
@@ -319,20 +291,31 @@ export function apply(ctx: Context, config: Config): void {
   /** Bounded retry window for the roster's settings namespace attach race. */
   const PRESET_DEFAULT_ATTEMPTS = 30
   const PRESET_DEFAULT_RETRY_MS = 100
-
-  let engineFiber: (Fiber & PromiseLike<Fiber>) | undefined
-  /** The engine whose fiber is currently mounted (or mounting), if any. */
-  let mountedEngine: LoopEngineId | undefined
+  /** Bounded retry window for the llm service attach race on route registration. */
+  const ROUTE_ATTEMPTS = 30
+  const ROUTE_RETRY_MS = 100
   /**
-   * Bumped for every mount and every unmount, so an in-flight mount can tell
-   * whether it is still the current one. A fast A→B switch settles A's fiber
-   * after B is live, and A's rejection must not run against B.
+   * Bounded retry window for the base loop's slot: it holds the `agentLoop`
+   * name until the harness's live patch reload applies this plugin's block.
    */
-  let mountGeneration = 0
+  const ROUTER_ATTEMPTS = 40
+  const ROUTER_RETRY_MS = 50
+  /** Attempts already spent waiting for the base loop to release the slot. */
+  let routerAttempts = 0
+  /** Pending router-remount timer (base loop still holding the slot). */
+  let routerRetry: ReturnType<typeof setTimeout> | undefined
+
+  const CLEAR_ROUTER_RETRY = (): void => {
+    if (routerRetry !== undefined) {
+      clearTimeout(routerRetry)
+      routerRetry = undefined
+    }
+  }
+
   /**
    * Set by the plugin's cleanup effect. Every scheduled retry checks it before
    * acting: a retry armed from an async continuation can otherwise outlive the
-   * context and re-enter the mount or settings path after disposal.
+   * context and re-enter the settings path after disposal.
    */
   let disposed = false
 
@@ -344,44 +327,16 @@ export function apply(ctx: Context, config: Config): void {
    */
   const retryLater = (run: () => void, ms: number): ReturnType<typeof setTimeout> =>
     setTimeout(() => { if (!disposed) run() }, ms)
-  let commandDisposers: (() => void)[] | undefined
-  let skillDisposer: (() => void) | undefined
-  /** Cached Pi model catalog from `pi --list-models`, shared by the Pi route adapter.
-   * Populated asynchronously by `PiLoop`'s constructor; the route adapter reads it
-   * through a live closure, so the probe need not finish before the mount returns. */
+
+  /**
+   * Cached Pi model catalog from `pi --list-models`, shared by the Pi route
+   * adapter. Populated asynchronously by the Pi engine's constructor; the route
+   * adapter reads it through a live closure, so the probe need not finish before
+   * a session selects the engine.
+   */
   const piCatalogHolder: { entries: readonly PiModelEntry[] } = { entries: [] }
-  /** Bounded retry bookkeeping for the AgentFactory slot race described below. */
-  let mountAttempts = 0
-  let mountRetry: ReturnType<typeof setTimeout> | undefined
 
-  const CLEAR_RETRY = (): void => {
-    if (mountRetry !== undefined) {
-      clearTimeout(mountRetry)
-      mountRetry = undefined
-    }
-  }
-
-  /** The roster default the plugin replaced, restored on the way back to in-process. */
-  let savedPresetDefault: string | undefined
-  /** Pending preset-default retry timer (attach race or stale-value re-check). */
-  let presetRetry: ReturnType<typeof setTimeout> | undefined
-
-  const CLEAR_PRESET_RETRY = (): void => {
-    if (presetRetry !== undefined) {
-      clearTimeout(presetRetry)
-      presetRetry = undefined
-    }
-  }
-
-  /** Bounded retry window for the llm service attach race on route registration. */
-  const ROUTE_ATTEMPTS = 30
-  const ROUTE_RETRY_MS = 100
-
-  /** Live placeholder-route registration, released on unmount. */
-  let routeHandle: (() => void) | undefined
-  /** The engine whose route `routeHandle` serves (idempotent re-mount guard). */
-  let routeEngine: LoopEngineId | undefined
-  /** Pending route-registration retry timer (llm service not up yet). */
+  let routeDisposers: (() => void)[] | undefined
   let routeRetry: ReturnType<typeof setTimeout> | undefined
 
   const CLEAR_ROUTE_RETRY = (): void => {
@@ -391,56 +346,117 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** Withdraw the mounted engine's provider route placeholder, if any. */
-  const releaseRoute = (): void => {
-    CLEAR_ROUTE_RETRY()
-    const handle = routeHandle
-    routeHandle = undefined
-    routeEngine = undefined
-    handle?.()
-  }
-
   /**
-   * Serve the mounted engine's provider route label from the llm registry.
-   * A hosted engine logs its own label into each session's request/header, and
-   * the web host refuses a turn whose session selection names a provider no
-   * adapter serves — without this placeholder the second prompt of every
-   * hosted session fails with `model-unavailable`. The placeholder advertises
-   * no models, so the model catalog is unchanged. Best-effort like the
-   * command/skill registrations: a composition without the llm service cannot
-   * enforce the route check either, so an absent registry only schedules a
-   * bounded retry against the fiber start-order race.
+   * Serve every hosted engine's provider route label from the llm registry.
+   *
+   * Each hosted engine logs its own label into its sessions' request/header,
+   * and the web host refuses a turn whose session selection names a provider no
+   * adapter serves — without these placeholders the second prompt of every
+   * hosted session fails with `model-unavailable`. All four labels are served
+   * at once because any session may select any engine. The placeholders
+   * advertise no models (only Pi injects its probed catalog), so the model
+   * catalog is unchanged.
+   *
+   * Best-effort: a composition without the llm service cannot enforce the route
+   * check either, so an absent registry only schedules a bounded retry against
+   * the fiber start-order race.
    */
-  const mountProviderRoute = (engine: LoopEngineId, attempt = 0): void => {
-    if (engine === 'in-process') return
-    // A slot-collision retry re-enters the mount path for the same engine;
-    // its live route must not be registered twice.
-    if (routeEngine === engine && routeHandle !== undefined) return
+  const mountProviderRoutes = (attempt = 0): void => {
     CLEAR_ROUTE_RETRY()
-    const label = HOSTED_PROVIDER_ROUTES[engine]
     const llm = ctx.get('llm') as LlmRegistry | undefined
     if (llm === undefined) {
       if (attempt < ROUTE_ATTEMPTS) {
-        routeRetry = retryLater(() => mountProviderRoute(engine, attempt + 1), ROUTE_RETRY_MS)
+        routeRetry = retryLater(() => mountProviderRoutes(attempt + 1), ROUTE_RETRY_MS)
       }
       return
     }
-    try {
-      const options = engine === 'pi' ? { listModels: () => piCatalogHolder.entries } : undefined
-      routeHandle = llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options))
-      routeEngine = engine
-    } catch (error: unknown) {
-      // A deployment whose own adapter already serves the label needs no
-      // placeholder. The llm registry signals that structurally with an error
-      // code; the message arm stays for a registry that throws an uncoded error.
-      const duplicateAdapter = (error as { code?: unknown } | null)?.code === 'DUPLICATE_ADAPTER'
-      if (error instanceof Error && (duplicateAdapter || error.message.includes('already registered'))) {
-        ctx.logger.warn(`loop-engine: provider route "${label}" is already served by another adapter`)
-        return
+    const registered: (() => void)[] = []
+    for (const [engine, label] of Object.entries(HOSTED_PROVIDER_ROUTES)) {
+      const options = engine === 'pi' ? { listModels: (): readonly PiModelEntry[] => piCatalogHolder.entries } : undefined
+      try {
+        registered.push(llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options)))
+      } catch (error: unknown) {
+        // A deployment whose own adapter already serves the label needs no
+        // placeholder. The llm registry signals that structurally with an error
+        // code; the message arm stays for a registry that throws an uncoded one.
+        const duplicateAdapter = (error as { code?: unknown } | null)?.code === 'DUPLICATE_ADAPTER'
+        if (error instanceof Error && (duplicateAdapter || error.message.includes('already registered'))) {
+          ctx.logger.warn(`loop-engine: provider route "${label}" is already served by another adapter`)
+          continue
+        }
+        ctx.logger.error(`loop-engine: provider route "${label}" registration failed: ${String(error)}`)
       }
-      ctx.logger.error(`loop-engine: provider route "${label}" registration failed: ${String(error)}`)
+    }
+    routeDisposers = registered
+  }
+
+  /** Release every placeholder route registered by the plugin. */
+  const releaseRoutes = (): void => {
+    CLEAR_ROUTE_RETRY()
+    const disposers = routeDisposers
+    routeDisposers = undefined
+    for (const dispose of disposers ?? []) dispose()
+  }
+
+  /** Pending preset-default retry timer (attach race or stale-value re-check). */
+  let presetRetry: ReturnType<typeof setTimeout> | undefined
+  /** Pending engine-preset authoring retry timer (roster attach race). */
+  let authorRetry: ReturnType<typeof setTimeout> | undefined
+
+  const CLEAR_PRESET_RETRY = (): void => {
+    if (presetRetry !== undefined) {
+      clearTimeout(presetRetry)
+      presetRetry = undefined
     }
   }
+
+  const CLEAR_AUTHOR_RETRY = (): void => {
+    if (authorRetry !== undefined) {
+      clearTimeout(authorRetry)
+      authorRetry = undefined
+    }
+  }
+
+  /**
+   * Author every hosted engine's preset into the user preset root, once.
+   *
+   * Done up front rather than on the first engine selection: the plugin owns
+   * the factory slot for its whole lifetime, so a session may ask for any
+   * engine at any moment, and the roster reads presets from disk. The roster
+   * service attaches from its own settings inject callback, which may land
+   * after this plugin's apply, hence the bounded retry.
+   *
+   * The in-flight promise is memoized because two paths want the presets — the
+   * boot-time authoring and the default-engine steering — and letting both walk
+   * the same eight files races their writes: the loser's `rename` fails on
+   * Windows, and the deployment's default then never gets steered.
+   * @param attempt - retry counter for the roster attach race.
+   * @returns the roster and its settled authoring, or undefined when no roster
+   *   is composed (the retry keeps looking for a bounded window either way).
+   */
+  const authorEnginePresets = (
+    attempt = 0,
+  ): { presets: AgentPresetsService; settled: Promise<boolean> } | undefined => {
+    CLEAR_AUTHOR_RETRY()
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets === undefined) {
+      if (attempt < PRESET_DEFAULT_ATTEMPTS) {
+        authorRetry = retryLater(() => authorEnginePresets(attempt + 1), PRESET_DEFAULT_RETRY_MS)
+      }
+      return undefined
+    }
+    const settled = authoring ??= ensureEnginePresets(resolveDshHome(), presets).catch((error: unknown) => {
+      // Failures are advisory: the presets stay absent and the roster default
+      // keeps pointing at the deployment's own preset, so sessions still run.
+      ctx.logger.error(`loop-engine: engine preset authoring failed: ${String(error)}`)
+      authoring = undefined
+      return false
+    })
+    return { presets, settled }
+  }
+
+  /** The in-flight or settled preset authoring, shared by every caller. */
+  let authoring: Promise<boolean> | undefined
 
   /**
    * Apply one roster-default op, retrying while the `agent-presets` settings
@@ -476,330 +492,189 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  /**
-   * Undo the plugin's roster-default override. The roster's settings section
-   * may not have attached yet at boot — its persisted default only becomes
-   * visible in `defaultId` on attach — so a clean first read is re-checked on
-   * a bounded timer before concluding nothing is stale.
-   */
-  const restorePresetDefault = (attempt = 0): void => {
-    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
-    /* v8 ignore start -- steerPresetDefault only calls this with the roster present, and the disposal cleanup clears any pending re-check */
-    /* v8 ignore next -- see above */
-    if (presets === undefined) return
-    /* v8 ignore stop */
-    if (presets.defaultId === HOSTED_PRESET_ID) {
-      const saved = savedPresetDefault
-      savedPresetDefault = undefined
-      mutatePresetDefault(saved === undefined
-        ? { op: 'unset', path: ['default'] }
-        : { op: 'set', path: ['default'], value: saved })
-      return
-    }
-    if (attempt < PRESET_DEFAULT_ATTEMPTS) {
-      presetRetry = retryLater(() => restorePresetDefault(attempt + 1), PRESET_DEFAULT_RETRY_MS)
-    }
-  }
+  /** The roster default the plugin replaced, restored when the default returns to in-process. */
+  let savedPresetDefault: string | undefined
+  /** The engine the roster default currently points at. */
+  let steeredEngine: LoopEngineId | undefined
 
   /**
-   * Steer the session's command/skill surface to match the engine. A hosted
-   * engine regenerates its stripped preset and points the roster default at
-   * it (new sessions only; live sessions keep the preset they joined);
-   * `in-process` restores whatever default the plugin replaced. Best-effort:
-   * a profile without the roster (headless) or an unauthorable preset leaves
-   * the surface exactly as the base composition shipped it.
+   * Point the roster's default at the preset selecting `engine`, so new
+   * sessions open on the deployment's default engine. Live sessions keep the
+   * preset they were composed from — the roster reads its default per call.
+   * `in-process` restores whatever default the plugin replaced.
    */
   const steerPresetDefault = (engine: LoopEngineId): void => {
-    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
-    if (presets === undefined) return
+    steeredEngine = engine
     if (engine === 'in-process') {
-      restorePresetDefault()
+      const saved = savedPresetDefault
+      savedPresetDefault = undefined
+      if (saved === undefined) return
+      mutatePresetDefault({ op: 'set', path: ['default'], value: saved })
       return
     }
-    void (async () => {
-      try {
-        await ensureHostedPreset(resolveDshHome(), presets)
-      } catch (error: unknown) {
-        // No default switch without the preset on disk: pointing the roster
-        // at a missing preset would fail every new session loud.
-        ctx.logger.error(`loop-engine: hosted preset authoring failed: ${String(error)}`)
-        return
-      }
-      const current = presets.defaultId
-      if (current === HOSTED_PRESET_ID) return
-      savedPresetDefault = current
-      mutatePresetDefault({ op: 'set', path: ['default'], value: HOSTED_PRESET_ID })
-    })()
+    const started = authorEnginePresets()
+    // A profile without the preset roster has nothing to steer.
+    if (started === undefined) return
+    void started.settled.then((authored) => {
+      // No presets on disk: pointing the roster at a missing preset would fail
+      // every new session loud, so the default stays where it was.
+      if (!authored) return
+      const current = started.presets.defaultId
+      const target = enginePresetId(engine)
+      if (current === target) return
+      // Remember the deployment's own default only when it is not one of ours,
+      // so switching between hosted engines never overwrites it with a managed id.
+      if (!current.startsWith('loop-engine-')) savedPresetDefault = current
+      mutatePresetDefault({ op: 'set', path: ['default'], value: target })
+    })
   }
 
-  /** Dispose the engine-specific command and skill registrations. */
-  const cleanupEngineRegistrations = (): void => {
-    if (commandDisposers !== undefined) {
-      for (const dispose of commandDisposers) dispose()
-      commandDisposers = undefined
-    }
-    if (skillDisposer !== undefined) {
-      skillDisposer()
-      skillDisposer = undefined
+  /** The engine the settings section names, or the legacy block's, for the initial seed. */
+  const seedEngine: LoopEngineId = legacyEngine ?? 'in-process'
+
+  /**
+   * The plugin's one diagnostic sink: the routing decision, the Remote, and the
+   * engine record all report through it, so a deployment sees plugin diagnostics
+   * in the host's own log with a single voice.
+   */
+  const pluginWarn = (message: string): void => { ctx.logger.warn(message) }
+
+  /**
+   * The plugin's own per-session engine record, read by the routing decision and
+   * written by an engine switch (`selectEngine`). Created up front and read
+   * lazily, so a deployment that never switches an engine never touches the
+   * file.
+   */
+  const engineRecords = new SessionEngineStore(resolveEngineRecordPath(), pluginWarn)
+
+  /**
+   * Where the Remote's two endpoints find the router. Empty until the router is
+   * mounted, and emptied again if a mount attempt fails: a holder still pointing
+   * at a disposed router would report a live agent nobody drives and release an
+   * agent nobody rebuilds.
+   */
+  const routerHolder: RouterSurfaceHolder = { current: undefined }
+
+  /** Build one hosted engine's driver runtime on the router's context. */
+  const buildEngine = (engineCtx: Context, engine: HostedEngineId): RouterEngine => {
+    switch (engine) {
+      case 'claude-code':
+        return new ClaudeCodeLoop(engineCtx, claudeCodeConfig(config))
+      case 'codex':
+        return new CodexLoop(engineCtx, codexConfig(config))
+      case 'pi':
+        return new PiLoop(engineCtx, { ...piConfig(config), piCatalogHolder })
+      case 'kimi':
+        return new KimiLoop(engineCtx, kimiConfig(config))
     }
   }
 
   /**
-   * Host one engine factory as a plugin fiber and touch it so it starts now:
-   * Cordis starts plugin fibers lazily on await, and the settings watch is a
-   * synchronous callback with no await of its own. Report a start failure; a
-   * factory that never mounted leaves the slot null, which surface errors
-   * describe correctly.
-   * @param engine - the engine being mounted (for diagnostics and retry).
-   * @param mount - the engine-specific fiber construction.
+   * Mount the routing factory, retrying while the base bundle's `agent-loop`
+   * row still owns the slot.
+   *
+   * The managed block this plugin writes is read at the NEXT composition, so on
+   * a fresh install's first boot that row is still active and the router's
+   * registration is refused — the router registers as `agentLoop`, the base
+   * loop's own service name, so the collision shows up as a duplicate service
+   * rather than a factory error. Retry on exactly that collision, bounded, so
+   * the router comes up as soon as the harness's live patch reload drops the
+   * base row; any other failure is deployment trouble and fails loud once.
+   *
+   * The inject gate exists because the router's constructor touches these
+   * services synchronously (`ctx.agents.setFactory`, `ctx.systemPrompt.variable`,
+   * `ctx.sessionProjections.register`), which a plugin's apply cannot assume
+   * are up yet. Each attempt gets a FRESH fiber: a failed construction has
+   * already claimed the `agentLoop` name and registered effects on its own.
    */
-  const hostFactory = (engine: LoopEngineId, mount: () => (Fiber & PromiseLike<Fiber>)): void => {
-    /* v8 ignore start -- mountEngine only fires when no fiber is live (onChange's mountedEngine check and the rejection handler's cleanup); defensive re-entrancy backstop */
-    /* v8 ignore next -- see above */
-    if (engineFiber !== undefined) return
-    /* v8 ignore stop */
-    const generation = ++mountGeneration
-    const fiber = mount()
-    engineFiber = fiber
-    mountedEngine = engine
-    void fiber.then(() => undefined, (error: unknown) => {
-      // A mount superseded by a later switch must not run its failure handling:
-      // the fast A→B window leaves A rejecting after B is live, and the cleanup
-      // below would dispose B's registrations and drop B's fiber handle.
-      if (generation !== mountGeneration) return
-      // Cleanup claude-specific registrations on failure (a no-op for codex).
-      cleanupEngineRegistrations()
-      engineFiber = undefined
-      mountedEngine = undefined
-      // A runtime switch to a hosted engine races the patch-layer reload that
-      // disables the base `agent-loop` row: until that reload lands, the base
-      // factory still owns the single AgentFactory slot and `setFactory`
-      // rejects. Retry on exactly that collision — bounded — so the hosted
-      // factory registers right after the reload frees the slot; any other
-      // failure is deployment trouble and fails loud once.
-      // The base loop's service is present exactly while the base `agent-loop`
-      // row still owns the slot, so a boot race is detected structurally and
-      // survives a reword of the collision message. A runtime switch between
-      // two hosted engines has no such signal — the base row is long gone and
-      // the outgoing engine holds the slot until its fiber unwinds — so the
-      // message arm stays as the only signal for that case.
-      const baseLoopHoldsSlot = ctx.get('agentLoop') !== undefined
-      if (
-        error instanceof Error
-        && (baseLoopHoldsSlot || error.message.includes('an agent factory is already registered'))
-        && mountAttempts < MAX_MOUNT_ATTEMPTS
-      ) {
-        mountAttempts += 1
-        mountRetry = retryLater(() => {
-          // Mounting on a context that disposal already tore down throws
-          // synchronously, and a timer callback has no caller to report it.
-          try {
-            mountEngine(engine)
-          } catch (retryError: unknown) {
-            /* v8 ignore start -- only reachable inside the unload window, where the
-               context is already inactive but the cleanup effect that raises
-               `disposed` has not run yet; no test can schedule that deterministically */
-            /* v8 ignore next -- see above */
-            ctx.logger.error(`loop-engine: ${engine} mount retry failed: ${String(retryError)}`)
-            /* v8 ignore stop */
-          }
-        }, MOUNT_RETRY_MS)
-        return
-      }
-      ctx.logger.error(
-        `loop-engine: ${engine} factory failed to start: ${String(error)} — restart \`dsh web\` to release the factory slot`,
-      )
-    })
-  }
-
-  const mountClaude = (): void => {
-    /* v8 ignore start -- hostFactory owns the live-fiber backstop; this guard additionally protects the command/skill registrations from doubling */
-    /* v8 ignore next -- see above */
-    if (engineFiber !== undefined) return
-    /* v8 ignore stop */
-
-    // Register Claude Code slash commands alongside the DSH-native ones. The
-    // handlers forward the raw `/name` line to the receiving agent, where the
-    // CLI expands it natively; a name collision with a dsh-native command is
-    // skipped with a warning instead of failing the mount loud.
-    const commands = ctx.get('commands') as CommandsService | undefined
-    if (commands !== undefined) {
-      const disposers: (() => void)[] = []
-      for (const command of [...CLAUDE_CODE_COMMANDS, ...discoverUserSlashCommands()]) {
-        try {
-          disposers.push(commands.register(command))
-        } catch (error: unknown) {
-          ctx.logger.warn(`loop-engine: skip claude-code command /${command.name}: ${String(error)}`)
-        }
-      }
-      commandDisposers = disposers
-    }
-
-    // Register the Claude Code skill provider so skills from .claude/skills/
-    // and CLAUDE.md are available alongside DSH skills.
-    const skills = ctx.get('skills') as SkillsService | undefined
-    if (skills !== undefined) {
-      skillDisposer = skills.registerProvider(control => new ClaudeCodeSkillProvider(control))
-    }
-
-    hostFactory('claude-code', () => ctx.plugin(ClaudeCodeLoop, claudeCodeConfig(config)))
-  }
-
-  /** Mount the Codex loop factory plus its AGENTS.md skill provider. */
-  const mountCodex = (): void => {
-    // Register the Codex skill provider so AGENTS.md instruction files are
-    // available through the same dsh skill-injection seam as Claude skills.
-    const skills = ctx.get('skills') as SkillsService | undefined
-    if (skills !== undefined) {
-      skillDisposer = skills.registerProvider(control => new CodexSkillProvider(control))
-    }
-
-    hostFactory('codex', () => ctx.plugin(CodexLoop, codexConfig(config)))
-  }
-
-  /** Mount the Pi loop factory plus its AGENTS.md + SKILL.md skill provider. */
-  const mountPi = (): void => {
-    // Register the Pi skill provider so AGENTS.md/CLAUDE.md context files and
-    // `skills/` catalogs are available through the same dsh skill-injection
-    // seam as Claude/Codex.
-    const skills = ctx.get('skills') as SkillsService | undefined
-    if (skills !== undefined) {
-      skillDisposer = skills.registerProvider(control => new PiSkillProvider(control))
-    }
-
-    hostFactory('pi', () => ctx.plugin(PiLoop, {
-      ...piConfig(config),
-      piCatalogHolder,
-    }))
-  }
-
-  /** Mount the Kimi loop factory plus its slash-command bridge and skill provider. */
-  const mountKimi = (): void => {
-    // Register Kimi's slash commands alongside the DSH-native ones. The handlers
-    // forward the raw `/name` line to the receiving agent, where the engine
-    // expands it; a name collision with a dsh-native command is skipped with a
-    // warning instead of failing the mount loud.
-    const commands = ctx.get('commands') as CommandsService | undefined
-    if (commands !== undefined) {
-      const disposers: (() => void)[] = []
-      for (const command of KIMI_COMMANDS) {
-        try {
-          disposers.push(commands.register(command))
-        } catch (error: unknown) {
-          ctx.logger.warn(`loop-engine: skip kimi command /${command.name}: ${String(error)}`)
-        }
-      }
-      commandDisposers = disposers
-    }
-
-    // Register the Kimi skill provider so AGENTS.md context files and `.kimi-code`
-    // `skills/` catalogs are available through the dsh skill-injection seam.
-    const skills = ctx.get('skills') as SkillsService | undefined
-    if (skills !== undefined) {
-      skillDisposer = skills.registerProvider(control => new KimiSkillProvider(control))
-    }
-
-    hostFactory('kimi', () => ctx.plugin(KimiLoop, kimiConfig(config)))
-  }
-
-  /** Mount the factory of a non-default engine; `in-process` mounts nothing here. */
-  const mountEngine = (engine: LoopEngineId): void => {
-    mountProviderRoute(engine)
-    if (engine === 'claude-code') mountClaude()
-    else if (engine === 'codex') mountCodex()
-    else if (engine === 'pi') mountPi()
-    else if (engine === 'kimi') mountKimi()
-  }
-
-  const unmountEngine = (): void => {
-    const fiber = engineFiber
-    const engine = mountedEngine
-    mountAttempts = 0
-    // Supersede any in-flight mount, so a late rejection from the engine being
-    // torn down cannot act on the engine that replaces it.
-    mountGeneration += 1
-    CLEAR_RETRY()
-    releaseRoute()
-    cleanupEngineRegistrations()
-    mountedEngine = undefined
-    if (fiber === undefined) return
-    engineFiber = undefined
-    void fiber.then(
-      (resolved) => {
-        // A rejecting dispose must not surface as an unhandled rejection; the
-        // slot is already released either way.
-        resolved.dispose().catch((error: unknown) => {
-          ctx.logger.error(`loop-engine: ${String(engine)} factory dispose failed: ${String(error)}`)
-        })
-      },
-      /* v8 ignore next -- a fiber that failed already cleared engineFiber in hostFactory's rejection handler, so this rejection arm is unreachable */
-      () => undefined,
-    )
-  }
-  mountEngine(fileEngine)
-  steerPresetDefault(fileEngine)
-  // A pending slot-collision retry must not outlive the plugin: mounting after
-  // this fiber is gone would fail on the inactive context and log noise. The
-  // preset-default and route-registration retries are bounded the same way,
-  // and the route placeholder leaves the llm registry with the plugin.
-  ctx.effect(() => () => {
-    disposed = true
-    CLEAR_RETRY()
-    CLEAR_PRESET_RETRY()
-    releaseRoute()
-  }, 'loop-engine: retry cleanup')
-  // installSection always calls setSource before the first onChange,
-  // so `source` is guaranteed set here; the assertion is a contract guard.
-  let source: (() => LoopEngineSettings) | undefined
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, loopEngineSettingsNamespace(), LOOP_ENGINE_SETTINGS_SCHEMA, { engine: fileEngine, showInComposer: true }, {
-      setSource: (current) => { source = current },
-      onChange: () => {
-        const next = source!().engine
-        if (next === fileEngine) return
-        // Synchronous: the settings watch has no await, and a user may restart
-        // `dsh web` immediately after switching — the managed block must be on
-        // disk before the commit returns, or the restart reads the old engine.
-        // The write lands BEFORE the mount: a failed write must leave the live
-        // engine, the picker, and the file in agreement, rather than swapping in
-        // an engine the file and the settings doc do not name.
-        try {
-          const updated = applyManagedBlock(readPatchFileSync(patchPath), next)
-          writePatchFileSync(patchPath, updated)
-        } catch (error: unknown) {
-          ctx.logger.error(`loop-engine: managed block write failed: ${String(error)}`)
-          // Pull the selection back so the picker cannot claim a switch that
-          // never reached the file. Deferred: reverting from inside the watch
-          // would re-enter this callback synchronously. `settingsCtx.settings`
-          // is injected, so the service is present by construction.
-          setTimeout(() => {
-            settingsCtx.settings.mutate(loopEngineSettingsNamespace(), [{ op: 'set', path: ['engine'], value: fileEngine }])
-              .catch((revertError: unknown) => {
-                ctx.logger.error(`loop-engine: engine selection revert failed: ${String(revertError)}`)
-              })
-          }, 0)
+  const mountRouter = (): void => {
+    const fiber = ctx.inject(ROUTER_SERVICES, (routerCtx) => {
+      try {
+        const router = new RouterLoop(
+          routerCtx,
+          (engine): RouterEngine => buildEngine(routerCtx, engine),
+          engineRecords,
+          pluginWarn,
+        )
+        routerHolder.current = router
+      } catch (error: unknown) {
+        // A router that failed to construct owns nothing: the holder must not
+        // keep pointing at the fiber this attempt is about to dispose.
+        routerHolder.current = undefined
+        // A live base loop under the same service name is the structural
+        // "the slot is still taken" signal; it survives any rewording of the
+        // harness's duplicate-service message.
+        if (ctx.get('agentLoop') !== undefined && routerAttempts < ROUTER_ATTEMPTS) {
+          routerAttempts += 1
+          routerRetry = retryLater(() => {
+            void Promise.resolve(fiber.dispose()).then(mountRouter, mountRouter)
+          }, ROUTER_RETRY_MS)
           return
         }
-        fileEngine = next
-        // Runtime engines follow the selection in the same process: switching
-        // to a hosted engine mounts its factory, switching back to in-process
-        // unmounts it so the base loop regains the single AgentFactory slot.
-        // Re-entering the already-mounted engine must stay a no-op — mounting
-        // it again would tear down and rebuild the fiber that hosts the live
-        // sessions — but it cannot happen here: reaching this point required
-        // `next !== fileEngine`, and mountedEngine is only ever `undefined` or
-        // equal to fileEngine (a failed mount clears it, a successful switch
-        // sets both). The comparison is a backstop, not a live branch.
-        /* v8 ignore start -- unreachable as argued above; guards live sessions against churn */
-        /* v8 ignore next -- see above */
-        if (mountedEngine !== next) {
-          unmountEngine()
-          mountEngine(next)
-        }
-        /* v8 ignore stop */
-        // The selection committed: steer new sessions to the matching preset.
-        steerPresetDefault(next)
-      },
+        ctx.logger.error(`loop-engine: could not start the loop router: ${String(error)}`)
+      }
     })
+  }
+  mountRouter()
+
+  /**
+   * Publish "which engine does this session run?" and "move it to another" to
+   * the browser half as the plugin's own Remote (`remote.loopEngine.engine`,
+   * `remote.loopEngine.select`, see `engine-remote.ts`).
+   *
+   * Registered unconditionally, on this plugin's fiber: `TypertRemoteService`
+   * binds a visible `typertRemote` and registers a Cordis service, and the
+   * Gateway reflects over live services at INVOKE time — so a profile that
+   * mounts no Gateway pays nothing, and unmounting the plugin withdraws the
+   * binding with the fiber.
+   *
+   * The read it publishes is the mounted router's own bookkeeping
+   * ({@link RouterLoop.reportEngine}: the engine driving this session NOW, plus
+   * the one a committed switch has recorded for its next build), falling back to
+   * {@link engineOfSession} — the plugin's own record first, then the same
+   * durable-log fold the router routes on — while no router is mounted. Either
+   * way the engine a session is shown as running and the engine it is actually
+   * driven by are one answer, and the one case where a session has two facts
+   * travels as two fields rather than as a claim that the switch already landed.
+   */
+  const mountEngineRemote = (): void => {
+    new LoopEngineRemote(
+      ctx,
+      (sessionId) => engineOfSession(ctx, sessionId, engineRecords),
+      routerHolder,
+      pluginWarn,
+    )
+  }
+  mountEngineRemote()
+
+  mountProviderRoutes()
+  authorEnginePresets()
+  ctx.effect(() => () => {
+    disposed = true
+    CLEAR_ROUTE_RETRY()
+    CLEAR_PRESET_RETRY()
+    CLEAR_AUTHOR_RETRY()
+    CLEAR_ROUTER_RETRY()
+    releaseRoutes()
+  }, 'loop-engine: cleanup')
+
+  // installSection always calls setSource before the first onChange, so
+  // `source` is guaranteed set here; the assertion is a contract guard.
+  let source: (() => LoopEngineSettings) | undefined
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(
+      ctx,
+      loopEngineSettingsNamespace(),
+      LOOP_ENGINE_SETTINGS_SCHEMA,
+      { engine: seedEngine, showInComposer: true },
+      {
+        setSource: (current) => { source = current },
+        onChange: () => {
+          const next = source!().engine
+          if (next === steeredEngine) return
+          steerPresetDefault(next)
+        },
+      },
+    )
   })
 }

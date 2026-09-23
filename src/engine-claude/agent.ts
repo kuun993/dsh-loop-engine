@@ -46,7 +46,7 @@ import { DriverInbox } from '../driver-core/inbox.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
-import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec } from './sdk.ts'
+import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec, type SpawnCapability } from './sdk.ts'
 import {
   invokedSkillNames,
   isSkillName,
@@ -145,6 +145,13 @@ export class ClaudeCodeAgent implements Agent {
     public readonly options: AgentOptions,
     public readonly session: Session,
     private readonly config: ResolvedConfig,
+    /**
+     * Process-spawn capability handed down from the engine, which resolves it
+     * from the host's subprocess service. Held as a capability rather than read
+     * off the context because a service PROPERTY read requires the reading
+     * fiber to have injected it, and this agent's context is the engine's.
+     */
+    private readonly spawn: SpawnCapability,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
     this.inbox = new DriverInbox(session, {
@@ -562,7 +569,7 @@ export class ClaudeCodeAgent implements Agent {
         disposeGraceMs: this.config.disposeGraceMs,
         ...this.config.model === undefined ? {} : { model: this.config.model },
         ...this.config.maxTurns === undefined ? {} : { maxTurns: this.config.maxTurns },
-        spawn: spec => this.loopCtx.subprocess.spawn(spec),
+        spawn: this.spawn,
         onUnattended: (line) => { diagnostics.push(line) },
       }, controller)
       const query = officialQuery({ prompt, options })

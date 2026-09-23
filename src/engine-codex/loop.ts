@@ -1,9 +1,9 @@
 /**
- * Codex loop engine module: hosts the AgentFactory that drives every session
- * through the OpenAI Codex SDK, one stateless thread per dsh step, with the
- * durable session log as the sole source of model context. dsh-loop-engine
- * constructs this factory when the Codex engine is selected; this module is a
- * library, not a Cordis plugin entry. The Codex SDK spawns its own CLI binary
+ * Codex loop engine module: drives every session it is handed through the
+ * OpenAI Codex SDK, one stateless thread per dsh step, with the durable
+ * session log as the sole source of model context. The router routes a session
+ * here on the plugin's own engine record, else its agent preset; this module is
+ * a library, not a Cordis plugin entry. The Codex SDK spawns its own CLI binary
  * (no spawn injection seam), so this loop deliberately does not inject the dsh
  * subprocess service.
  *
@@ -16,7 +16,7 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { CodexAgent } from './agent.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode, ResolvedConfig } from './types.ts'
-import { HostedLoopFactory } from '../driver-core/hosted-loop-factory.ts'
+import { HostedEngineRuntime } from '../driver-core/hosted-engine-runtime.ts'
 
 /** Codex CLI sandbox modes a deployment may pin. */
 export const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
@@ -73,7 +73,9 @@ function resolveConfig(config: Config): ResolvedConfig {
   }
 }
 
-/** Host-face ctx key for the Codex loop service. */
+/** Host-face ctx key this engine's runtime is registered under. */
+export const CODEX_ENGINE_LABEL = 'agentLoopCodex'
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     agentLoopCodex: CodexLoop
@@ -81,20 +83,16 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
- * Concrete AgentFactory and driver service of the Codex loop. Creation and
- * resume follow the registry factory contract and the shared publication
- * transaction: prepare, run setup, then publish through both registries,
- * announce, and emit `agent/session-start`.
+ * Creation/resume machinery for the Codex engine. The process-wide
+ * AgentFactory slot belongs to the router, which delegates each session to the
+ * engine its preset names; this class is that engine's driver, not a plugin.
  */
-export class CodexLoop extends HostedLoopFactory<ResolvedConfig, CodexAgent> {
-  /** Services the loop resolves through its own fiber; blessed identically to the package-level entry inject. */
-  static inject = ['agents', 'sessions', 'systemPrompt']
-
+export class CodexLoop extends HostedEngineRuntime<ResolvedConfig, CodexAgent> {
   constructor(
     ctx: Context,
     config: Config,
   ) {
-    super(ctx, 'agentLoopCodex', resolveConfig(config))
+    super(ctx, CODEX_ENGINE_LABEL, resolveConfig(config))
   }
 
   /** Construct the Codex driver for one prepared session. */

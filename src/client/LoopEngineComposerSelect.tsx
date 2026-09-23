@@ -1,12 +1,68 @@
 /**
  * Composer loop-engine picker: a compact dropdown registered at the
  * `conversation.input.right` seat, so it sits immediately left of the model
- * select in the composer's tool row. The engine is a deployment-level choice,
- * so this surface shares the same settings-backed {@link LoopEngineStore} as
- * the settings section and the header badge — a change in any one is what the
- * others show next. Switching still asks for confirmation first (it interrupts
- * sessions still running on the previous engine) and reloads the page once the
- * commit lands, matching the settings section's semantics.
+ * select in the composer's tool row.
+ *
+ * It picks the engine of the session it is rendered in — the picker's value is
+ * this plugin's own authoritative read of that session's engine, and a pick
+ * moves the session over this plugin's own `loopEngine/select` Remote. Any
+ * session can be moved, at any point in its life, as long as it is open and no
+ * turn is in flight, and the host picks one of two ways to make the pick land:
+ *
+ *  - between two hosted engines it REBUILDS that session's agent IN PLACE, on the
+ *    session's own live Session object, so the conversation it is rendered beside
+ *    never closes;
+ *  - when the harness loop is on either side of the change, the host RELEASES
+ *    that session's agent and answers `reload: true`: the session goes cold with
+ *    its record naming the new engine, this page is reloaded (which is what
+ *    clears the client state a `session/disposed` leaves behind), and the page
+ *    that comes back opens the same session again — the host then builds it on
+ *    the engine the record names (`src/client/reload.ts`). This control says so
+ *    in a notice rather than letting the reload look like a glitch.
+ *
+ * Either way the host refuses one that is
+ * running, and a refusal leaves the session's engine untouched — the label goes
+ * back to the engine the session actually runs. The refusal is rendered from its
+ * CODE in the user's own language (`refusalFace`), with the host's own sentence
+ * kept as detail — never as the message itself, which is how a raw
+ * `session "…" is running; …` used to reach the user.
+ *
+ * A pick commits as soon as the host can apply it, with ONE exception: when the
+ * target and the engine this session ACTUALLY runs differ in being the in-process
+ * one, the host cannot hand the session over in place, so the switch releases its
+ * agent and reloads this page — and a reload costs this page's scroll position and
+ * any unsent draft in it. That one pick is staged behind a confirmation
+ * (`switchNeedsReload(报告里的实际引擎, 目标引擎)`, resolved before anything is
+ * sent) and only then committed; a pick between two hosted engines, which swaps
+ * the agent in place and reloads nothing, still commits immediately and opens no
+ * dialog at all. That judgement is only ever made about an engine somebody knows:
+ * until the host has answered what this session runs there is no engine to judge,
+ * and a session with no answer may reload in EITHER direction — so the control is
+ * DISABLED for as long as it is reading (`engineSwitchReady`), rather than
+ * guessing a direction. This control deliberately asks NOTHING else: whether the session
+ * can be moved right now is the host's own judgement — it refuses one that is not
+ * open, one that is mid-turn, and a subagent's own session, each with a code and a
+ * sentence — so a pick that cannot land costs nothing, and the control never
+ * reads an idle hint off a cached session list.
+ *
+ * So it opens two dialogs, with different jobs: the CONFIRMATION (two buttons,
+ * cancel and switch) that a reloading pick must pass before it is sent, and the
+ * NOTICE (one button, close) that reports what the host answered — the refusal's
+ * localized copy with the host's sentence as detail, or this plugin's own
+ * sentence for a reloaded pick.
+ *
+ * WITH a session, the settings default is never shown — not even while the first
+ * answer is still in flight: a session on the pre-routing single preset id reads
+ * "legacy hosted engine", one whose engine is not recorded (or not readable)
+ * reads "not recorded", and a session whose engine has not been answered yet
+ * reads "reading" AND is disabled while it does (see above) — a default or a stale
+ * hint would be a claim about a session this control has no facts for, and a pick
+ * would have to be judged against an engine nobody knows. Without a session (the
+ * seat renders only with one, so this is the defensive branch) the trigger names
+ * the default and a pick writes it — immediately, like every other pick here, and
+ * with the control usable from the start: a new-session page is waiting for
+ * nothing, and that pick reloads nothing. The settings section's own picker is the
+ * one that still stages its choice behind a confirmation.
  *
  * Styling is token-driven inline styles like the badge and section (the
  * client-module bundle is esbuild-built without a CSS loader).
@@ -22,10 +78,17 @@ import {
   Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
-import type { LoopEngineId } from '../settings.ts'
-import type { en } from './locales.ts'
+import type { LoopEngineId } from '../agent-preset-ids.ts'
+import { useEngineOfSession } from './use-session-engine.ts'
+import {
+  engineSwitchReady, switchNeedsReload,
+  type SessionEngineCache, type SessionEngineReport, type SessionEngineSwitcher, type SessionSeat,
+} from './session-engine.ts'
+import {
+  engineLabelKey, engineStateLabelKey, pendingEngineText, refusalFace, type LoopEngineKey, type en,
+} from './locales.ts'
 
 /** Injected dependencies of {@link LoopEngineComposerSelect} (slot `inject`). */
 export interface LoopEngineComposerSelectInjected {
@@ -35,14 +98,25 @@ export interface LoopEngineComposerSelectInjected {
     /** Engine snapshot bound by the UI renderer as useSnapshot. */
     snapshot: SnapshotStore<LoopEngineState>
   }
+  /** The plugin's authoritative per-session engine cache. */
+  sessionEngines: SessionEngineCache
+  /** Move one session to another engine. */
+  switchEngine: SessionEngineSwitcher
   /** Composer copy bound to the loop engine dictionaries. */
   t: (key: keyof typeof en) => string
 }
 
-/** Props delivered by the slot outlet (the renderer erases the share boundary). */
-export type LoopEngineComposerSelectProps = Partial<InjectFace<LoopEngineComposerSelectInjected>>
+/**
+ * Props delivered by the slot outlet (the renderer erases the share boundary).
+ * The seat members stay partial here so the registration face matches the slot's
+ * own props; {@link ComposerFace} asserts them the way the component reads them.
+ */
+export type LoopEngineComposerSelectProps =
+  PropsRuntime<'conversation.input.right'>
+  & Partial<SessionSeat>
+  & Partial<InjectFace<LoopEngineComposerSelectInjected>>
 
-type ComposerFace = InjectFace<LoopEngineComposerSelectInjected>
+type ComposerFace = InjectFace<LoopEngineComposerSelectInjected> & SessionSeat
 
 const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] = [
   { value: 'in-process', key: 'engineInProcess' },
@@ -52,15 +126,57 @@ const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] =
   { value: 'kimi', key: 'engineKimi' },
 ]
 
-/** Locale key of one engine's option label. */
-function engineLabelKey(engine: LoopEngineId): keyof typeof en {
-  switch (engine) {
-    case 'claude-code': return 'engineClaudeCode'
-    case 'codex': return 'engineCodex'
-    case 'pi': return 'enginePi'
-    case 'kimi': return 'engineKimi'
-    default: return 'engineInProcess'
-  }
+/**
+ * What the trigger shows for one resolved status: the copy key, the engine whose
+ * mark leads the label (none when the session's engine is not known), and the
+ * menu row to highlight (none in the same case, so no engine is claimed).
+ */
+interface TriggerFace {
+  /** Copy key of the trigger's label. */
+  label: keyof LoopEngineKey
+  /** Engine whose mark leads the trigger, or undefined when no engine is known. */
+  engine: LoopEngineId | undefined
+  /** Menu row shown as selected, or undefined when the status names no engine. */
+  selectedId: string | undefined
+  /**
+   * The engine this session's record names while something else is driving it,
+   * when there is one: it is appended to the label as a marker and never becomes
+   * the label, the mark, or the highlighted row — see {@link triggerFace}. It also
+   * marks that engine's own menu row ({@link pendingRowMark}), which is the one
+   * thing a user who opens the menu can see without reading the trigger's tooltip.
+   */
+  pending?: LoopEngineId
+}
+
+/** Trigger face while a session's engine has no answer yet: no engine claimed. */
+const READING: TriggerFace = { label: 'engineLoading', engine: undefined, selectedId: undefined }
+
+/**
+ * Resolve the trigger's face. A session always speaks for itself, including when
+ * all it can say is that its engine was never recorded; the settings default
+ * answers only for the seat's defensive no-session branch
+ * ({@link defaultFace}).
+ *
+ * The face names the engine the session RUNS. A report whose record names a
+ * different engine means one thing only — a switch whose release did not take,
+ * so the session is still driven by the engine it had — and that engine is
+ * carried as {@link TriggerFace.pending}: a marker beside the name, never the
+ * name, so the control cannot claim a swap that has not happened, and the user
+ * is not left thinking the pick was lost either.
+ * @param report - what the session's engine read answered.
+ * @returns the copy key, mark, highlighted row, and the recorded-engine marker.
+ */
+function triggerFace(report: SessionEngineReport): TriggerFace {
+  const { engine: state, pending } = report
+  const face: TriggerFace = state.kind === 'engine'
+    ? { label: engineLabelKey(state.engine), engine: state.engine, selectedId: state.engine }
+    : { label: engineStateLabelKey(state), engine: undefined, selectedId: undefined }
+  return pending === undefined ? face : { ...face, pending }
+}
+
+/** The trigger face for a seat with no session: the settings default. */
+function defaultFace(fallback: LoopEngineId): TriggerFace {
+  return { label: engineLabelKey(fallback), engine: fallback, selectedId: fallback }
 }
 
 /**
@@ -159,7 +275,20 @@ const chevron: CSSProperties = {
 
 const chevronOpen: CSSProperties = { ...chevron, transform: 'rotate(180deg)' }
 
-const confirmBody: CSSProperties = {
+/**
+ * Trailing annotation on the menu row of the engine a session's record names
+ * while another engine is driving it: dimmer and smaller than the row's own
+ * label, so the row still reads as a row of the menu rather than as a different
+ * kind of entry.
+ */
+const rowPendingMark: CSSProperties = {
+  marginLeft: 4,
+  color: 'var(--dsw-alias-label-caption)',
+  fontSize: 12,
+}
+
+/** Body copy of the failure notice that carries the host's own reason. */
+const noticeBody: CSSProperties = {
   margin: 0,
   fontSize: 13,
   lineHeight: 1.55,
@@ -167,49 +296,168 @@ const confirmBody: CSSProperties = {
 }
 
 /**
- * Render the composer's loop-engine dropdown. Hides until the settings scope
- * settles, so the composer never flashes a provisional engine.
+ * The host's own sentence under a refusal's localized copy: dimmer and smaller
+ * than the copy above it, so it reads as the technical detail it is (a write
+ * error, a driver that would not start) rather than as a second message. It wraps
+ * instead of overflowing, because the underlying error is not sized for a dialog.
+ */
+const noticeDetail: CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-tertiary)',
+  wordBreak: 'break-word',
+}
+
+/**
+ * Render the composer's loop-engine dropdown for the session on screen. Hides
+ * until the settings scope settles, so the picker never flashes a provisional
+ * default while a session's own engine is already known.
  * @param props - composed slot props.
- * @returns the picker, or null while the engine is unknown.
+ * @returns the picker, or null while the picker is unavailable or switched off.
  */
 export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null {
-  const { controller, useSnapshot, t } = props as ComposerFace
-  const { status, engine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  const { controller, useSnapshot, sessionId, sessionEngines, switchEngine, t } = props as ComposerFace
+  const { status, engine: defaultEngine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  // The session's own engine, as the plugin's Remote reports it. Until the host
+  // answers — and for a session whose engine is not recorded at all — the picker
+  // claims nothing: it never falls back to the settings default, and never keeps
+  // showing a stale hint.
+  const resolved = useEngineOfSession(sessionEngines, sessionId)
+  const { label, engine, selectedId, pending } = sessionId === undefined
+    ? defaultFace(defaultEngine)
+    : resolved === undefined ? READING : triggerFace(resolved)
+  /**
+   * Whether this session's engine is known, and a pick therefore judgeable — the
+   * reason the trigger is greyed out while it reads. Only a session can be
+   * waiting for an answer: the no-session seat writes the default for sessions
+   * created later, moves nothing, and reloads nothing.
+   */
+  const switchReady = sessionId === undefined || engineSwitchReady(resolved)
   const [open, setOpen] = useState(false)
   const [hovered, setHovered] = useState(false)
-  const [pending, setPending] = useState<LoopEngineId | null>(null)
+  /**
+   * The host's notice about the last pick: a refusal (this plugin's own copy for
+   * its code, with the host's sentence as `detail` when that sentence carries the
+   * cause) or a switch that reloaded the page.
+   */
+  const [notice, setNotice] = useState<
+    { readonly title: keyof LoopEngineKey; readonly body: string; readonly detail?: string } | null
+  >(null)
+  /** The pick staged behind the reload confirmation, or null when none is. */
+  const [pendingReload, setPendingReload] = useState<LoopEngineId | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
 
-  // Hidden until the settings scope settles (no provisional engine), and
+  // Hidden until the settings scope settles (no provisional default), and
   // again when the settings toggle clears the composer picker.
   if (status !== 'ready' || !showInComposer) return null
 
-  const disabled = !writable
-  const label = t(engineLabelKey(engine))
+  // Two different reasons the trigger is not usable, and both leave the label
+  // saying what it is showing: the settings may not be writable (deployment
+  // policy), or this session's engine may not be known yet — a pick would then
+  // have to be judged against an engine nobody has. The second case keeps
+  // reading「读取中…」rather than hiding the control, so the user sees what the
+  // wait is for.
+  const disabled = !writable || !switchReady
+  const labelText = t(label)
+  // The recorded-engine marker, when the host reports one that is not what this
+  // session runs: appended to the label, so the control names the engine that
+  // runs and states the one the record holds rather than showing that one as if
+  // it had already taken over.
+  const pendingText = pending === undefined ? undefined : ` · ${pendingEngineText(t, pending)}`
   // The hint a user needs at a glance: what this control does (and, for the
-  // Claude Code engine, that the model seat in this session is inert).
-  const title = engine === 'claude-code' ? t('claudeModelNotice') : t('description')
+  // Claude Code engine, that the model seat in this session is inert). A session
+  // whose record names another engine gets the hint that says what that means.
+  const title = pending !== undefined
+    ? t('pendingComposerHint')
+    : engine === 'claude-code'
+      ? t('claudeModelNotice')
+      : sessionId === undefined ? t('description') : t('composerHint')
 
-  // Pick only stages the choice; the switch itself waits for confirmation.
+  // A pick commits as soon as the host will take it. Whether this session can be
+  // moved is the host's answer to give, so this control asks and reports — it
+  // never infers "idle" from a cached list hint, and only a pick that reloads the
+  // page is ever held back (and then for the user's confirmation, not for a
+  // permission this control cannot grant; see `onSelect` below).
+  const commitSwitch = (value: LoopEngineId): void => {
+    if (sessionId === undefined) {
+      // No session to switch: the pick chooses what sessions created later run.
+      void controller.setEngine(value)
+      return
+    }
+    // A session's engine is this plugin's own per-session record, so the pick
+    // asks the host to move that session. The host refuses a session that is not
+    // open, one that is mid-turn, and a subagent's own session; a refusal leaves
+    // the record untouched — the trigger's label is therefore already back on the
+    // engine the session runs, and only the notice is left to say why. A switch
+    // that DID land already dropped the cached answer (`onSwitched`), so the
+    // trigger, the header chip and the turn-status row all read the new engine.
+    void switchEngine(sessionId, value).then((result) => {
+      if (!result.ok) {
+        if (result.kind === 'unavailable') {
+          // This page cannot reach the plugin's own Remote at all, which is not a
+          // refusal the host made and therefore carries no code.
+          setNotice({ title: 'switchFailedTitle', body: t('switchUnavailable') })
+          return
+        }
+        // A refusal is reported from its CODE, in the user's language: the host's
+        // sentence is detail under that copy (the two failures that carry an
+        // underlying error), or the message itself when the code is one this
+        // build does not know. Either way something readable is shown — the raw
+        // English sentence is never the whole message.
+        const face = refusalFace(result.code)
+        setNotice({
+          title: 'switchFailedTitle',
+          body: face.body === undefined ? result.reason : t(face.body),
+          ...face.detail ? { detail: result.reason } : {},
+        })
+        return
+      }
+      // A pick the host had to land by releasing this session's agent: the page
+      // is already reloading (the switcher does it), so this notice is the last
+      // thing painted on it. It says what happened and where the page returns
+      // to, which is the difference between a switch and a glitch.
+      if (result.reload === true) {
+        setNotice({ title: 'switchReloadTitle', body: t('switchReloadBody') })
+        return
+      }
+    })
+  }
+  // The one pick that is staged instead of committed: it reloads the page, which
+  // costs this page's scroll position and any unsent draft — so the user decides
+  // with that cost in front of them. Which picks those are is not guessed here:
+  // `switchNeedsReload` applies the host's own split against the engine this
+  // session ACTUALLY runs (the report, never the record), and its rule is the
+  // reason a hosted-to-hosted pick opens nothing at all.
   const onSelect = (next: string): void => {
     setOpen(false)
     const value = next as LoopEngineId
-    if (value === engine) return
-    setPending(value)
-  }
-  const confirmSwitch = (): void => {
-    const value = pending
-    setPending(null)
-    if (value !== null) {
-      void controller.setEngine(value).then((landed) => {
-        // Session views established under the previous engine's factory do not
-        // migrate: a committed switch reloads the page so every session
-        // re-attaches against the new composition.
-        if (landed) window.location.reload()
-      })
+    // No-op on the row already in force — the session's own engine, or the
+    // default this seat writes when it carries no session. A legacy or
+    // unrecorded session highlights no row, so any pick asks for a switch.
+    if (value === selectedId) return
+    if (sessionId !== undefined) {
+      // A session's pick is only judgeable against an engine the host has named,
+      // and the trigger cannot be used before it has: this is the one way a pick
+      // can still arrive with no answer — a menu opened just before the answer
+      // was dropped (a committed switch invalidates it) outlives it. Such a pick
+      // is dropped, never guessed at; `engineSwitchReady` narrows the report, so
+      // the judgement below cannot be reached without one.
+      if (!engineSwitchReady(resolved)) return
+      if (switchNeedsReload(resolved.engine, value)) {
+        setPendingReload(value)
+        return
+      }
     }
+    commitSwitch(value)
   }
-  const cancelSwitch = (): void => { setPending(null) }
+  const confirmReload = (): void => {
+    const value = pendingReload
+    setPendingReload(null)
+    if (value !== null) commitSwitch(value)
+  }
+  const cancelReload = (): void => { setPendingReload(null) }
+  const dismissNotice = (): void => { setNotice(null) }
 
   return (
     <>
@@ -218,10 +466,17 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
         onClose={() => { setOpen(false) }}
         items={ENGINE_OPTIONS.map(option => ({
           id: option.value,
-          label: t(option.key),
+          // The recorded engine's own row carries the marker too: the trigger may
+          // be truncated to ellipsis, and a user who opens the list has to be
+          // able to see which row was recorded instead of concluding the pick
+          // did nothing. The check mark stays on the row in force (selectedId),
+          // which is never the marked one.
+          label: option.value === pending
+            ? <>{t(option.key)}<span style={rowPendingMark}>{t('engineMenuPendingSuffix')}</span></>
+            : t(option.key),
           icon: engineGlyph(option.value),
         }))}
-        selectedId={engine}
+        selectedId={selectedId}
         onSelect={onSelect}
         align="start"
         portal
@@ -239,8 +494,8 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
             onMouseLeave={() => { setHovered(false) }}
             onClick={() => { setOpen(!open) }}
           >
-            <span style={triggerIcon} aria-hidden>{engineGlyph(engine, 14)}</span>
-            <span style={triggerLabel}>{label}</span>
+            {engine === undefined ? null : <span style={triggerIcon} aria-hidden>{engineGlyph(engine, 14)}</span>}
+            <span style={triggerLabel}>{labelText}{pendingText}</span>
             <span style={open ? chevronOpen : chevron} aria-hidden>
               <IconChevronDownOutline14 size={14} />
             </span>
@@ -248,18 +503,28 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
         )}
       />
       <Modal
-        open={pending !== null}
-        onClose={cancelSwitch}
-        title={t('confirmTitle')}
-        closeLabel={t('closeLabel')}
+        open={pendingReload !== null}
+        onClose={cancelReload}
+        title={t('switchReloadConfirmTitle')}
+        closeLabel={t('cancelAction')}
         footer={(
           <>
-            <Button variant="outline" onClick={cancelSwitch}>{t('cancelAction')}</Button>
-            <Button variant="primary" onClick={confirmSwitch}>{t('confirmAction')}</Button>
+            <Button variant="outline" onClick={cancelReload}>{t('cancelAction')}</Button>
+            <Button variant="primary" onClick={confirmReload}>{t('switchReloadConfirmAction')}</Button>
           </>
         )}
       >
-        <p style={confirmBody}>{t('confirmBody')}</p>
+        <p style={noticeBody}>{t('switchReloadConfirmBody')}</p>
+      </Modal>
+      <Modal
+        open={notice !== null}
+        onClose={dismissNotice}
+        title={t(notice?.title ?? 'switchFailedTitle')}
+        closeLabel={t('closeLabel')}
+        footer={<Button variant="primary" onClick={dismissNotice}>{t('closeLabel')}</Button>}
+      >
+        <p style={noticeBody}>{notice?.body}</p>
+        {notice?.detail === undefined ? null : <p style={noticeDetail}>{notice.detail}</p>}
       </Modal>
     </>
   )

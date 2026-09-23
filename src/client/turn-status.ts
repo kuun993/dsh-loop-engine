@@ -6,8 +6,46 @@
  * namespace (a second `locale.register` for the same namespace throws), so a
  * plugin cannot change the text. What it CAN do is restyle the element, and
  * that is all this module does — it paints an engine-specific glyph and color
- * onto the row while a hosted engine is selected, and leaves the stock look
- * alone otherwise.
+ * onto the row while the session on screen runs a hosted engine, and leaves the
+ * stock look alone otherwise.
+ *
+ * WHICH engine it paints is the SESSION ON SCREEN's, not the settings default.
+ * {@link reflectTurnStatusEngine} is driven from the per-session engine cache
+ * (`./session-engine.ts`) — the same authoritative answer the header chip and
+ * the composer render from, the plugin's own Remote read off the session's
+ * durable log — and it is driven by the ONE hook those two surfaces share
+ * (`./use-session-engine.ts`). So this row cannot disagree with the two surfaces
+ * beside it; while it was keyed off the settings store it did, and painted
+ * Claude Code's glyph onto every session's row whenever claude-code was the
+ * default, a session running pi included.
+ *
+ * The reflection's SUBJECT is still a document-level attribute rather than the
+ * row's own element: the sheet has to reach a class the harness hashes
+ * (`[class$="_turnStatus"]`), which takes an attribute selector on an ancestor,
+ * and the row offers no session-scoped hook for a plugin to hang it on. A
+ * document-level attribute has exactly ONE owner at a time, though — and on this
+ * page the WRITERS outnumber the reader: the chip and the composer of every
+ * session that has been rendered carry an answer, the session the user has just
+ * left included, and the cache publishes a session's answer regardless of what is
+ * on screen. So "whoever reflected last" is not "the session on screen", and an
+ * implementation that read it as one shipped the bug this guard ends: a
+ * background session's answer — or the late answer of the session the user just
+ * left — painted ITS engine onto the row of the session on screen, and a session
+ * running pi showed Kimi's moon.
+ *
+ * The owner is therefore DECLARED, not inferred: a reflection names the session
+ * it speaks for and writes only while that session is the row's focus
+ * ({@link focusTurnStatusSession}); a reflection whose subject is not the focused
+ * session is a NO-OP, so only the session on screen can paint and only it can
+ * un-paint. The chip and the composer of one session reflect the same value (the
+ * write is idempotent); the focus is withdrawn by
+ * {@link blurTurnStatusSession}, which acts only while the focus is still the
+ * departing session's (React runs a departing component's cleanup in no
+ * guaranteed order against an arriving one's, so an unconditional withdrawal
+ * would un-focus the session that just took over); and the attribute itself is
+ * never withdrawn on unmount: the sibling surface of the same session still
+ * paints by it, and a leftover attribute is inert on a page whose turn-status row
+ * is not rendered.
  *
  * Three facts about the harness markup make that safe and specific:
  *   - the row carries exactly one class whose `[hash]_turnStatus` suffix is
@@ -29,11 +67,9 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { LoopEngineId } from '../settings.ts'
-import type { LoopEngineState } from './store.ts'
+import type { LoopEngineId } from '../agent-preset-ids.ts'
 
-/** Attribute on `<html>` naming the running engine; absent means stock. */
+/** Attribute on `<html>` naming the engine the session on screen runs; absent means stock. */
 const ENGINE_ATTR = 'data-loop-engine'
 
 /** Owning plugin id, stamped on the injected tag for identification. */
@@ -43,8 +79,8 @@ const PLUGIN_ID = 'dsh-loop-engine'
  * The engine-keyed stylesheet.
  *
  * Every selector is gated on the root attribute, so the sheet is inert until
- * {@link reflect} names a hosted engine — with no attribute, no rule sets
- * `content` and no pseudo-element box is ever generated.
+ * {@link reflectTurnStatusEngine} names a hosted engine — with no attribute, no
+ * rule sets `content` and no pseudo-element box is ever generated.
  *
  * The glyph must re-declare `color` and `-webkit-text-fill-color`: the row
  * clips its own background to text and sets the fill transparent, and that
@@ -161,35 +197,131 @@ html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"]::before {
 /* Moon phases rather than a rigid rotation: a spinning moon bitmap can only
    squash and mirror itself, never show a full or a new moon. Stepping the
    glyph through the phase set sweeps the lit edge across the disc AND actually
-   reaches 🌕 and 🌑. The order runs waning (full → new), so the lit edge
-   retreats right-to-left — the direction the user picked. */
+   reaches 🌕 and 🌑. The order runs waning first (full → new → full), so the lit
+   edge travels counter-clockwise, and the glyph under the row's first paint
+   (🌗) is a mid-phase rather than a full or a new moon. */
 @keyframes le-moon {
   0% { content: "🌕"; }
-  12.5% { content: "🌔"; }
-  25% { content: "🌓"; }
-  37.5% { content: "🌒"; }
+  12.5% { content: "🌖"; }
+  25% { content: "🌗"; }
+  37.5% { content: "🌘"; }
   50% { content: "🌑"; }
-  62.5% { content: "🌘"; }
-  75% { content: "🌗"; }
-  87.5% { content: "🌖"; }
+  62.5% { content: "🌒"; }
+  75% { content: "🌓"; }
+  87.5% { content: "🌔"; }
   100% { content: "🌕"; }
 }
 
 `
 
 /**
- * Reflect the active engine onto the document root so the stylesheet above
- * selects it.
+ * The session whose surfaces are on screen: the row's one declared subject.
  *
- * Only a settled, hosted engine paints: `in-process` is the stock row, and a
- * not-yet-resolved or refused selection must not guess, so both clear the
- * attribute and restore what the harness shipped.
- * @param engine - the engine recorded by the settings scope.
- * @param settled - whether the settings scope has produced a final answer.
+ * The row is driven by two components per session (the header chip and the
+ * composer picker), and by every session that has ever been rendered — a
+ * session's answer can land after the user has left it — so the attribute cannot
+ * be "whoever reflected last". This is the owner a reflection is measured
+ * against: {@link focusTurnStatusSession} sets it, {@link blurTurnStatusSession}
+ * withdraws it (with the guard the React unmount order needs), and
+ * {@link reflectTurnStatusEngine} writes only for it. `undefined` until a
+ * session's surfaces declare themselves.
  */
-function reflect(engine: LoopEngineId, settled: boolean): void {
+let focusedSessionId: string | undefined
+
+/**
+ * Reflect the engine of the session ON SCREEN; `undefined` restores the stock
+ * row.
+ *
+ * The caller names the session it speaks for, and that is the row's SUBJECT: a
+ * reflection paints its session's engine only while that session is the focused
+ * one ({@link focusTurnStatusSession}), and is a NO-OP otherwise — the whole
+ * guard, and the reason the attribute can no longer be taken over by a session
+ * the user is not looking at. The subject is an explicit argument rather than
+ * ambient state, so a caller cannot reflect without saying whose engine it is,
+ * and cannot say "whoever, I don't know".
+ *
+ * `in-process` is the harness's own row, and `undefined` is every answer that
+ * names no engine at all: a session the host reports as `legacy` (it ran a
+ * hosted engine, the id never said which) or `unset`, a session whose first
+ * answer has not landed yet, and an answer dropped in preparation for a re-read.
+ * None of them paints — naming an engine for an unknown one is the misreport
+ * this module was fixed for — so each clears the attribute. The clear is as
+ * authoritative as the paint: a session that takes the focus with no answer yet
+ * takes the previous session's paint off with it.
+ *
+ * The write is idempotent and never a withdrawal: the chip and the composer of
+ * one session both come through here with the same value, and unmounting never
+ * clears the attribute, because the sibling surface of the same session is still
+ * on screen painting through it.
+ *
+ * The NO-OP covers the late reflection as well — the one from the session the
+ * user has just left, whose own answer landing after the switch used to paint
+ * over the session that replaced it.
+ * @param sessionId - the session this reflection speaks for, or undefined for a
+ *   page with no session at all (the new-session page, which has no turn-status
+ *   row): such a page has nothing to say about the row, so nothing is written and
+ *   nothing is withdrawn — it leaves the row it found alone.
+ * @param engine - the engine that session runs, when it is known.
+ */
+export function reflectTurnStatusEngine(
+  sessionId: string | undefined,
+  engine: LoopEngineId | undefined,
+): void {
+  if (sessionId === undefined || sessionId !== focusedSessionId) return
+  writeTurnStatusEngine(engine)
+}
+
+/**
+ * Declare which session's surfaces are on screen — the row's one subject.
+ *
+ * Only the focused session may paint ({@link reflectTurnStatusEngine}), which is
+ * what keeps the row on the session the user is looking at: the alternative,
+ * "whoever writes last owns the row", was the bug this guard ends, because the
+ * chip and the composer of EVERY session that has been rendered write here, and
+ * a session's answer can land after the user has left it.
+ *
+ * The caller is the component that renders that session: only a component knows
+ * which session is the one on screen, and the hook both of that session's
+ * surfaces share (`./use-session-engine.ts`) is the only place that declares it.
+ * @param sessionId - the session whose surfaces are now on screen.
+ */
+export function focusTurnStatusSession(sessionId: string): void {
+  focusedSessionId = sessionId
+}
+
+/**
+ * Withdraw the focus — but only while it is still this session's.
+ *
+ * The guard is the point: React offers no ordering guarantee between a departing
+ * component's cleanup and an arriving one's, so an unconditional withdrawal would
+ * let the session the user has just left un-focus the session that replaced it
+ * and silence the row. A session that is no longer the focus has nothing to
+ * withdraw; unmounting also never clears the attribute itself, which the sibling
+ * surface of the same session (and, for a session that is still on screen, the
+ * next focus) still paints by.
+ * @param sessionId - the session whose surface is going away.
+ */
+export function blurTurnStatusSession(sessionId: string): void {
+  if (focusedSessionId === sessionId) focusedSessionId = undefined
+}
+
+/**
+ * Write — or clear — the document-level attribute {@link ENGINE_ATTR}.
+ *
+ * The caller has already established that its subject is the focused session,
+ * so this is the write itself and nothing else.
+ * @param engine - the focused session's engine, when it is known.
+ */
+function writeTurnStatusEngine(engine: LoopEngineId | undefined): void {
+  // Non-browser boots of the client tree have no document to paint.
+  if (typeof document === 'undefined') return
   const root = document.documentElement
-  if (!settled || engine === 'in-process') {
+  // `dataset` is keyed by the CAMELCASED attribute name: `data-loop-engine` is
+  // `dataset.loopEngine`. The literal attribute name is NOT an alternative — the
+  // map's named setter refuses any key containing a dash before a lowercase
+  // letter (`dataset['data-loop-engine'] = …` throws a `SyntaxError` DOMException),
+  // which would take the whole reflect path down with it.
+  if (engine === undefined || engine === 'in-process') {
     delete root.dataset.loopEngine
     return
   }
@@ -197,15 +329,16 @@ function reflect(engine: LoopEngineId, settled: boolean): void {
 }
 
 /**
- * Install the per-engine turn-status styling for the lifetime of `ctx`.
+ * Install the per-engine turn-status stylesheet for the lifetime of `ctx`.
  *
- * Keyed off the shared controller store, so it follows a live engine switch
- * exactly as the settings section and header chip do; the store is read rather
- * than the settings scope so all three surfaces cannot disagree.
+ * This is the sheet and nothing else: which engine it selects is written by
+ * {@link reflectTurnStatusEngine}, driven from the session on screen's own
+ * authoritative answer (`./session-engine.ts`), through the hook the chip and
+ * the composer share (`./use-session-engine.ts`) — not from the settings
+ * default.
  * @param ctx - the client root context.
- * @param store - the loop-engine controller's snapshot source.
  */
-export function installTurnStatusStyles(ctx: ClientContext, store: SnapshotStore<LoopEngineState>): void {
+export function installTurnStatusStyles(ctx: ClientContext): void {
   // Non-browser boots of the client tree have no document to paint.
   if (typeof document === 'undefined') return
 
@@ -216,16 +349,10 @@ export function installTurnStatusStyles(ctx: ClientContext, store: SnapshotStore
     tag.textContent = STYLESHEET
     document.head.appendChild(tag)
     return () => {
+      // The sheet that selected the attribute goes with it, so no engine is
+      // named any more.
       tag.remove()
       delete document.documentElement.dataset.loopEngine
     }
   }, 'loop-engine: per-engine turn status styles')
-
-  const sync = (): void => {
-    const { status, engine } = store.getSnapshot()
-    reflect(engine, status === 'ready')
-  }
-  ctx.effect(() => store.subscribe(sync), 'loop-engine: turn status engine reflection')
-  // The store may already hold a settled engine from an earlier mount.
-  sync()
 }

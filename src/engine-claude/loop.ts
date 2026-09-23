@@ -1,9 +1,9 @@
 /**
- * Claude Code loop engine module: hosts the AgentFactory that drives every
- * session through the official Claude Agent SDK, one stateless query per dsh
- * step, with the durable session log as the sole source of model context.
- * dsh-loop-engine constructs this factory when the Claude Code engine is
- * selected; this module is a library, not a Cordis plugin entry.
+ * Claude Code loop engine module: drives every session it is handed through
+ * the official Claude Agent SDK, one stateless query per dsh step, with the
+ * durable session log as the sole source of model context. The router routes a
+ * session here on the plugin's own engine record, else its recorded agent
+ * preset; this module is a library, not a Cordis plugin entry.
  *
  * @module dsh-loop-engine/engine-claude
  */
@@ -14,9 +14,9 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { ClaudeCodeAgent } from './agent.ts'
-import { DEFAULT_DISPOSE_GRACE_MS } from './sdk.ts'
+import { DEFAULT_DISPOSE_GRACE_MS, type SpawnCapability } from './sdk.ts'
 import type { ClaudeCodePermissionMode, ResolvedConfig } from './types.ts'
-import { HostedLoopFactory } from '../driver-core/hosted-loop-factory.ts'
+import { HostedEngineRuntime } from '../driver-core/hosted-engine-runtime.ts'
 
 /** Deployment-selectable non-interactive Claude Code permission modes. */
 export const CLAUDE_CODE_PERMISSION_MODES: readonly ClaudeCodePermissionMode[] = [
@@ -79,7 +79,9 @@ function resolveConfig(config: Config): ResolvedConfig {
   }
 }
 
-/** Host-face ctx key for the Claude Code loop service. */
+/** Host-face ctx key this engine's runtime is registered under. */
+export const CLAUDE_CODE_ENGINE_LABEL = 'agentLoopClaudeCode'
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     agentLoopClaudeCode: ClaudeCodeLoop
@@ -87,24 +89,31 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
- * Concrete AgentFactory and driver service of the Claude Code loop. Creation
- * and resume follow the registry factory contract and the shared publication
- * transaction: prepare, run setup, then publish through both registries,
- * announce, and emit `agent/session-start`.
+ * Creation/resume machinery for the Claude Code engine. The process-wide
+ * AgentFactory slot belongs to the router, which delegates each session to the
+ * engine its preset names; this class is that engine's driver, not a plugin.
  */
-export class ClaudeCodeLoop extends HostedLoopFactory<ResolvedConfig, ClaudeCodeAgent> {
-  /** Services the loop resolves through its own fiber; blessed identically to the package-level entry inject. */
-  static inject = ['agents', 'sessions', 'systemPrompt', 'subprocess']
+export class ClaudeCodeLoop extends HostedEngineRuntime<ResolvedConfig, ClaudeCodeAgent> {
+  /** Process-spawn capability handed to every agent, sandboxed by the subprocess seam. */
+  readonly spawn: SpawnCapability
 
   constructor(
     ctx: Context,
     config: Config,
   ) {
-    super(ctx, 'agentLoopClaudeCode', resolveConfig(config))
+    super(ctx, CLAUDE_CODE_ENGINE_LABEL, resolveConfig(config))
+    // Resolved lazily rather than injected: this engine is built only when a
+    // session actually selects it, so a profile without the subprocess service
+    // fails that session loud instead of stalling the whole plugin.
+    const subprocess = ctx.get('subprocess')
+    if (subprocess === undefined) {
+      throw new Error('loop-engine: the claude-code engine needs the dsh subprocess service on this context')
+    }
+    this.spawn = (spec) => subprocess.spawn(spec)
   }
 
   /** Construct the Claude Code driver for one prepared session. */
   protected override buildAgent(loopCtx: Context, id: SessionId, options: AgentOptions, session: Session): ClaudeCodeAgent {
-    return new ClaudeCodeAgent(loopCtx, id, options, session, this.config)
+    return new ClaudeCodeAgent(loopCtx, id, options, session, this.config, this.spawn)
   }
 }

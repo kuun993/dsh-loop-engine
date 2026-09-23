@@ -14,13 +14,10 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { PiLoop, PI_SANDBOX_MODES } from '../../src/engine-pi/loop.ts'
 import type { PiMessage } from '../../src/engine-pi/rpc/types.ts'
 
-/** Local plugin wrapper: mount constructs the Pi loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new PiLoop(ctx, config as Parameters<typeof PiLoop>[1])
-  },
-}
+import { loopPluginFor } from '../helpers/agent-harness.ts'
+
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
 const mock = vi.hoisted(() => {
   const defaultEvents = async function* (): AsyncGenerator<Record<string, unknown>> {

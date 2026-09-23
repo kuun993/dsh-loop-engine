@@ -21,10 +21,11 @@
  * `model` is deliberately absent even though the CLI has it: the dsh web
  * client owns a `/model` contribution, and a same-named host command makes
  * `ui-commands` throw the whole command menu source away, leaving only the
- * skill group. `/goal` is absent too: the managed block frees the
- * `command-goal` slot for hosted engines, but the ACP surface has no `/goal` to
- * take it over, so registering one would only answer with an unknown-command
- * error.
+ * skill group. `/goal` is absent too: the ACP surface implements no `/goal`, so
+ * registering one would only answer with an unknown-command error. Hosted
+ * sessions have no dsh `/goal` either — the engine preset they join strips the
+ * `command-goal` row (`src/preset.ts`, `STRIPPED_ROWS`) — so the command is
+ * simply not part of their menu.
  *
  * @module dsh-loop-engine/engine-kimi/commands
  */

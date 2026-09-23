@@ -30,13 +30,10 @@ import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
-/** Local plugin wrapper: mount constructs the Claude Code loop factory (the engine module is a library, not a Cordis plugin). */
-const loopPlugin = {
-  inject: ['agents', 'sessions', 'systemPrompt', 'subprocess'],
-  apply: (ctx: Context, config: Record<string, unknown>): void => {
-    void new ClaudeCodeLoop(ctx, config as Parameters<typeof ClaudeCodeLoop>[1])
-  },
-}
+import { loopPluginFor } from '../helpers/agent-harness.ts'
+
+/** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
+const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-claude/sdk.ts'
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
@@ -814,6 +811,17 @@ describe('configuration and assembly surfaces', () => {
       expect(loop.config.model).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails loud when the context carries no subprocess service', async () => {
+    // The engine resolves the seam lazily at construction: a profile without it
+    // must fail the session loud rather than mount a driver that cannot spawn.
+    const bare = new Context()
+    try {
+      expect(() => new ClaudeCodeLoop(bare, {})).toThrow(/needs the dsh subprocess service/)
+    } finally {
+      await bare.fiber.dispose()
     }
   })
 
