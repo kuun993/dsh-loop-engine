@@ -32,6 +32,7 @@ import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-a
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { query as officialQuery, type SDKResultError } from '@anthropic-ai/claude-agent-sdk'
+import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
 import {
   mapAssistantMessage,
@@ -43,6 +44,7 @@ import {
 } from './mapping.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
@@ -55,14 +57,23 @@ import {
   type SkillsService,
 } from '../driver-core/skill-inject.ts'
 
-/** Provider route label used for logged header snapshots and message provenance. */
-export const PROVIDER = 'claude-code'
+/**
+ * Provider route label this driver logs into request/header snapshots and
+ * message provenance — the ONE route every hosted engine shares
+ * ({@link HOSTED_ROUTE_LABEL}), so all four engines select `external/default`
+ * and the model menu carries a single group instead of one per engine.
+ */
+export const PROVIDER = HOSTED_ROUTE_LABEL
 /**
  * Model label logged when the deployment pins no model: Claude Code owns its
- * model natively, so the web session's advisory model selection is deliberately
- * not mirrored into the header (it never drives a query).
+ * model natively, so the web session's model selection is deliberately not
+ * mirrored into the header — it reaches the engine separately, as the
+ * `Options.model` the driver resolves each step (`sessionModelOverrideOf`). It is
+ * {@link HOSTED_DEFAULT_MODEL} — the one entry this engine's provider route
+ * advertises (`provider-route.ts`) — so the session's `(provider, model)`
+ * resolves to that entry and the model seat renders "default" instead of a
+ * composite string naming a model no adapter serves.
  */
-const NATIVE_MODEL_LABEL = 'claude-code-native'
 
 /** Minimal shape of the approval service (inline to avoid a peer dep on @deepseek-ai/dsh-user-approval). */
 interface ApprovalService {
@@ -499,7 +510,7 @@ export class ClaudeCodeAgent implements Agent {
 
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
-    return this.config.model ?? NATIVE_MODEL_LABEL
+    return this.config.model ?? HOSTED_DEFAULT_MODEL
   }
 
   /** Append the request header snapshot once per loop instance. */
@@ -562,12 +573,18 @@ export class ClaudeCodeAgent implements Agent {
      */
     let live: DriverAssistantStream | undefined
     try {
+      // The session's own pick wins over the deployment's pin, read every step
+      // so a model changed mid-conversation reaches the next query. Claude Code
+      // takes a bare model id/alias (`Options.model`), so only the model half of
+      // the override travels; the provider is a dsh routing fact it does not
+      // speak.
+      const model = sessionModelOverrideOf(this.loopCtx, this.session)?.model ?? this.config.model
       const options = claudeQueryOptions({
         cwd,
         ...this.queryPermission(),
         env: this.config.env,
         disposeGraceMs: this.config.disposeGraceMs,
-        ...this.config.model === undefined ? {} : { model: this.config.model },
+        ...model === undefined ? {} : { model },
         ...this.config.maxTurns === undefined ? {} : { maxTurns: this.config.maxTurns },
         spawn: this.spawn,
         onUnattended: (line) => { diagnostics.push(line) },
@@ -720,7 +737,7 @@ export class ClaudeCodeAgent implements Agent {
                 step: phase.step,
                 message: createAssistantMessage({
                   content: trailing,
-                  source: { provider: PROVIDER, model: NATIVE_MODEL_LABEL },
+                  source: { provider: PROVIDER, model: HOSTED_DEFAULT_MODEL },
                 }),
                 ...pendingUsage === undefined ? {} : { usage: pendingUsage },
                 stream: attempt?.stream ?? [],

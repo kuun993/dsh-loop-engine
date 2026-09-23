@@ -1,5 +1,7 @@
 # Pi 引擎在 dsh web 页面切换模型 — 设计
 
+> ⚠️ **已废弃（0.1.5-rc3）**：这里描述的 Pi 模型选择 plumbing **已被移除**——探针 `src/engine-pi/probe.ts`、`PiLoop` 的 `piCatalogHolder`、`PiAgent.dynamicModel()`/`pickModel()` 全部删除，四个托管引擎共用一个 provider 标签（`external`）、只广告一条 `default` 条目，模型选择不再驱动任何托管引擎。现状与取舍见 `docs/proposals/per-session-model-for-hosted-engines.md` §0，用户可见语义见 `docs/per-session-engine.md` §5.2。本文件只作历史记录保留。
+
 **目标**：让运行在 Pi loop engine 上的会话，能通过 dsh 原生的 `/model` 弹层与 composer 模型位切换 Pi 的推理模型，且该选择真实驱动 Pi 子进程的 `--model`。
 
 改动全部收在 `dsh-loop-engine` 插件内（`src/provider-route.ts` + `src/engine-pi/`），**不修改主仓 harness**。

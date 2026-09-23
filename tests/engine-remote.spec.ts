@@ -741,7 +741,7 @@ describe('switching a session\'s engine', () => {
     // there is no "keeps X" notice to report any more.
     expect(app.routerWarn).toHaveBeenCalledTimes(1)
     expect(app.routerWarn).toHaveBeenCalledWith(
-      expect.stringContaining('not restoring the model selection'),
+      expect.stringContaining('cannot be given a real model selection'),
     )
     // ③ Nothing was built to replace it: the session is COLD, and its record is
     // the engine its next build uses. No hosted engine is started here at all.

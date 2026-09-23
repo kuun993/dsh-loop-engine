@@ -104,6 +104,33 @@ describe('session lifecycle', () => {
     client.dispose()
   })
 
+  it('sends session/set_model with the session id and model id', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    const init = client.initialize()
+    fake.push(`{"jsonrpc":"2.0","id":${INIT_ID},"result":{}}`)
+    await init
+    const model = client.setModel('s_1', 'deepseek-flash')
+    fake.push('{"jsonrpc":"2.0","id":2,"result":{}}')
+    await expect(model).resolves.toEqual({})
+    const sent = JSON.parse(fake.writes[1]!) as { method: string; params: { sessionId: string; modelId: string } }
+    expect(sent.method).toBe('session/set_model')
+    expect(sent.params).toEqual({ sessionId: 's_1', modelId: 'deepseek-flash' })
+    client.dispose()
+  })
+
+  it('rejects set_model when the agent refuses the model', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    const init = client.initialize()
+    fake.push(`{"jsonrpc":"2.0","id":${INIT_ID},"result":{}}`)
+    await init
+    const model = client.setModel('s_1', 'nope')
+    fake.push('{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"unknown model"}}')
+    await expect(model).rejects.toThrow('unknown model')
+    client.dispose()
+  })
+
   it('sends the session/prompt body shape', async () => {
     const fake = fakeProcess()
     const client = new AcpClient(fake.process)

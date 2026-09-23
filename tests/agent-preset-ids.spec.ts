@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest'
 import {
   HOSTED_ENGINE_IDS, HOSTED_PRESET_PREFIX, LEGACY_HOSTED_PRESET_ID, LOOP_ENGINE_IDS,
   LOOP_ENGINE_REFUSAL_CODES, SOURCE_PRESET_ID, engineOfPreset, enginePresetId, hostedEngineOf,
-  isLoopEngineRefusalCode, sessionEngineOf,
+  isHostedEngine, isLoopEngineRefusalCode, sessionEngineOf,
 } from '../src/agent-preset-ids.ts'
 import * as preset from '../src/preset.ts'
 import * as settings from '../src/settings.ts'
@@ -48,6 +48,18 @@ describe('agent-preset-ids is zero-import', () => {
     expect(LEGACY_HOSTED_PRESET_ID).toBe(HOSTED_PRESET_PREFIX.slice(0, -1))
     expect(LOOP_ENGINE_IDS.map(enginePresetId)).not.toContain(LEGACY_HOSTED_PRESET_ID)
     expect(engineOfPreset(LEGACY_HOSTED_PRESET_ID)).toBeUndefined()
+  })
+
+  it('classifies an engine as hosted without naming one of them', () => {
+    // The judgement the two surfaces that say "the model is the engine's own
+    // business" share (`src/client/LoopEngineSection.tsx`,
+    // `src/client/LoopEngineComposerSelect.tsx`): every hosted engine answers the
+    // same way, and an engine nobody has answered for yet is not hosted — a
+    // surface that does not know says nothing rather than claiming the wrong
+    // half.
+    for (const id of HOSTED_ENGINE_IDS) expect(isHostedEngine(id)).toBe(true)
+    expect(isHostedEngine('in-process')).toBe(false)
+    expect(isHostedEngine(undefined)).toBe(false)
   })
 
   it('classifies a refusal code, so the browser half can normalize an unknown one away', () => {

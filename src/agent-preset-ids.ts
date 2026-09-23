@@ -37,6 +37,72 @@ export const HOSTED_ENGINE_IDS = LOOP_ENGINE_IDS.filter(
   (id): id is HostedEngineId => id !== 'in-process',
 )
 
+/**
+ * Whether an engine is one this plugin hosts — an external CLI some other
+ * vendor runs, which owns its own model — rather than the harness's own loop.
+ *
+ * The judgement a surface needs to say "the model is the engine's own business"
+ * without hardcoding one engine's name: every hosted engine behaves the same
+ * way here, and naming one of them would make a general fact read as a property
+ * of that engine. An engine nobody has answered for yet is not hosted: a surface
+ * that does not know says nothing rather than claiming the wrong half.
+ * @param engine - an engine id, or undefined while one is still being read.
+ * @returns whether that engine is hosted by this plugin.
+ */
+export function isHostedEngine(engine: LoopEngineId | undefined): engine is HostedEngineId {
+  return engine !== undefined && engine !== 'in-process'
+}
+
+/**
+ * The single provider route label EVERY hosted engine logs into its sessions'
+ * `request/header`, and the one placeholder route this plugin registers in the
+ * llm registry.
+ *
+ * One label for all four engines, because the browser model catalog is built
+ * for the whole Host GENERATION and is not scoped to a session
+ * (`packages/api/session-controller/src/catalog.ts` — "Build the browser model
+ * catalog without requiring a Session"; it walks `ctx.llm.listProviders()`
+ * once). A per-engine label would therefore surface one provider group per
+ * engine in every session's menu at once — four identical `default` entries —
+ * which is what this constant collapses away.
+ *
+ * The value is ASCII on purpose: it is a WIRE value. It is written into each
+ * session's `request/header`, it travels through selections, and the host
+ * compares it (`providerInfo().id` must equal the provider the adapter
+ * registered for — `packages/llm/llm/src/index.ts` `prepareRoutes`). The
+ * display name ({@link HOSTED_ROUTE_NAME}) is the same token, for the reason
+ * that constant documents.
+ */
+export const HOSTED_ROUTE_LABEL = 'external'
+
+/**
+ * The user-visible name of the one hosted route ({@link HOSTED_ROUTE_LABEL}),
+ * shown as the model menu's provider group label.
+ *
+ * The same token as the wire value, and deliberately not localized: the catalog
+ * carries exactly one string per provider group (`ModelCatalog`'s `group.name`,
+ * taken from `LlmProviderInfo.name`) and the browser half has no hook to
+ * re-translate it, so one fixed name is what every locale sees.
+ */
+export const HOSTED_ROUTE_NAME = 'external'
+
+/**
+ * The one model id a hosted engine's provider route advertises to the model
+ * menu, and the model label that engine logs into its sessions'
+ * `request/header` when the deployment pins none.
+ *
+ * The two are ONE string on purpose, and that is a host-side requirement rather
+ * than a style choice: the picker builds its selection out of a catalog entry
+ * (`ModelSelect.tsx` `choices` — `model: model.id`) and resolves a session's
+ * `(provider, model)` back to that entry by comparing the pair with the logged
+ * header (`selectedIndex`), so an entry whose `id` differs from the logged
+ * label falls through to the raw `provider/model` string — how a menu ends up
+ * showing a model that does not exist. The label is the engine's own word for
+ * "whatever it decides"; `name` is the same string because `LlmModelInfo.name`
+ * is rendered verbatim and has no localization hook.
+ */
+export const HOSTED_DEFAULT_MODEL = 'default'
+
 /** Prefix every plugin-authored preset id carries. */
 export const HOSTED_PRESET_PREFIX = 'loop-engine-'
 

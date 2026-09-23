@@ -43,7 +43,24 @@ export interface SettingsMutator {
   /** Apply ops to one namespace. */
   mutate(ns: SettingsNamespace, ops: readonly SettingsPathOp[]): Promise<void>
   /** Registered namespaces, when the provider can enumerate them. */
-  describe?(): { ns: string }[]
+  describe?(): SettingsDescriptorLike[]
+}
+
+/**
+ * One registered settings namespace, as the host describes it
+ * (`@deepseek-ai/dsh-settings` `SettingsDescriptor`). Only the two fields this
+ * plugin reads are declared.
+ */
+export interface SettingsDescriptorLike {
+  /** Namespace name. */
+  readonly ns: string
+  /**
+   * The composition's own value for this namespace, before the user layer. It is
+   * what a saved user-layer value overrode, which is why `model-selection-reset.ts`
+   * reads it: the deployment's own configured default model is a real model it
+   * can name when the saved default does not.
+   */
+  readonly base?: unknown
 }
 
 /** The host llm registry (`ctx.llm`), as this plugin uses it. */

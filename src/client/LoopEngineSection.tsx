@@ -24,6 +24,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
 import type { LoopEngineId } from '../agent-preset-ids.ts'
+import { isHostedEngine } from '../agent-preset-ids.ts'
 import type { en } from './locales.ts'
 
 /** Injected dependencies of {@link LoopEngineSection} (slot `inject`). */
@@ -209,7 +210,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         )}
       />
       {status === 'saving' ? <p style={notice}>{t('saving')}</p> : <p style={notice}>{t('switchNotice')}</p>}
-      {engine === 'claude-code' ? <p style={notice}>{t('claudeModelNotice')}</p> : null}
+      {isHostedEngine(engine) ? <p style={notice}>{t('hostedEngineModelNotice')}</p> : null}
       <label style={toggleRow}>
         <input
           type="checkbox"

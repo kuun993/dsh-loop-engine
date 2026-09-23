@@ -29,9 +29,11 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
+import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import type { KimiSpawnCapability, KimiSpawnSpec } from './process.ts'
@@ -62,14 +64,23 @@ import {
   type SkillsService,
 } from '../driver-core/skill-inject.ts'
 
-/** Provider route label used for logged header snapshots and message provenance. */
-export const PROVIDER = 'kimi'
+/**
+ * Provider route label this driver logs into request/header snapshots and
+ * message provenance — the ONE route every hosted engine shares
+ * ({@link HOSTED_ROUTE_LABEL}), so all four engines select `external/default`
+ * and the model menu carries a single group instead of one per engine.
+ */
+export const PROVIDER = HOSTED_ROUTE_LABEL
 /**
  * Model label logged when the deployment pins no model: Kimi owns its model
- * natively, so the web session's advisory model selection is deliberately not
- * mirrored into the header (it never drives a query).
+ * natively, so the web session's model selection is deliberately not mirrored
+ * into the header — it reaches the engine separately, as the ACP
+ * `session/set_model` the driver resolves each step (`sessionModelOverrideOf`). It is
+ * {@link HOSTED_DEFAULT_MODEL} — the one entry this engine's provider route
+ * advertises (`provider-route.ts`) — so the session's `(provider, model)`
+ * resolves to that entry and the model seat renders "default" instead of a
+ * composite string naming a model no adapter serves.
  */
-const NATIVE_MODEL_LABEL = 'kimi-native'
 
 /* jscpd:ignore-start -- mirrors the Pi/Codex drivers; the engines share the default agent-loop driver's phase machine. */
 type Phase =
@@ -445,7 +456,7 @@ export class KimiAgent implements Agent {
 
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
-    return this.config.model ?? NATIVE_MODEL_LABEL
+    return this.config.model ?? HOSTED_DEFAULT_MODEL
   }
 
   /** Append the request header snapshot once per loop instance. */
@@ -539,6 +550,15 @@ export class KimiAgent implements Agent {
     // Answer ACP tool-approval requests from the session's dsh approval knobs.
     client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))
     const acpSessionId = await client.newSession(cwd)
+    signal.throwIfAborted()
+
+    // The session's own pick wins over the deployment's pin, read every step so
+    // a model changed mid-conversation reaches the next session. Kimi selects a
+    // model per ACP session through `session/set_model`, and the client rejects
+    // on an error frame — so a model Kimi refuses fails this step loud rather
+    // than leaving the default in place.
+    const model = sessionModelOverrideOf(this.loopCtx, this.session)?.model ?? this.config.model
+    if (model !== undefined) await client.setModel(acpSessionId, model)
     signal.throwIfAborted()
 
     try {

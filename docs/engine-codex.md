@@ -104,7 +104,7 @@ src/engine-codex/
 
 ### 4.5 线程模型与已知边界
 
-- **每 step 一个新线程**：`threadParams = { cwd, sandbox, approvalPolicy, model? }`（`src/engine-codex/agent.ts:629-634`），随后 `thread.turn([{ type: 'text', text: prompt }], { signal, params })`（`src/engine-codex/agent.ts:636-642`）。codex 侧不积累历史——全部上下文在序列化后的 prompt 文本里。
+- **每 step 一个新线程**：`threadParams = { cwd, sandbox, approvalPolicy, model? }`（`src/engine-codex/agent.ts:629-634`），随后 `thread.turn([{ type: 'text', text: prompt }], { signal, params })`（`src/engine-codex/agent.ts:636-642`）。`model?` 由共享判据取：`sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`）——会话选的真实 dsh 模型优先，`config.model` 只是回落；codex 收裸 model slug，不带 provider。线程每步新建，所以中途 `/model` 下一步生效。codex 侧不积累历史——全部上下文在序列化后的 prompt 文本里。
 - 线程从不显式关闭/归档；它们随 app-server 进程在 agent 拆解时被杀而消亡。
 - `client.threadResume`（`src/engine-codex/appserver/client.ts:131-133`）在整个 `src/` 中**没有调用方**——dsh 的 resume 语义由会话日志恢复实现，不用 codex 的 thread/resume。它是当前未用的 API 表面。
 - `thread.ts` 会产出 `token-usage` 事件（`thread/tokenUsage/updated`），但 `agent.ts` 的事件 switch 不处理它（落进 default 忽略）；turn 用量只取自 `turn/completed` 的 `turn.usage`。同理 `ErrorNotification.willRetry` 被携带但无人消费。
@@ -148,7 +148,7 @@ step 循环（`src/engine-codex/agent.ts:740-905`）维护一套折叠状态：`
 
 ### 5.5 request/header
 
-每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:470-481`）。`provider` 恒为 `'codex'`（`src/engine-codex/agent.ts:54`）；未钉 `model` 时 model 标签为 `'codex-native'`（`src/engine-codex/agent.ts:55-60`）——**web 会话的建议性模型选择刻意不镜像进 header**，因为它从不驱动查询（与 `docs/proposals/model-selection-disable.md` 对 claude 引擎的论述同理）。该 provider 标签由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+每个 loop 实例在首个 step 记一次 `request/header`：无既有 header 记 `reason: 'initial'`，有则记 `'resume'`（`src/engine-codex/agent.ts:578-589`）。`provider` 恒为四个引擎**共用**的 `'external'`（`PROVIDER = HOSTED_ROUTE_LABEL`，`src/engine-codex/agent.ts`）；未钉 `model` 时 model 标签为 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts`）——**header 是引擎自己的座位标签，不镜像 web 会话的模型选择**：会话选的真实模型是每步经 `thread/start` / `turn/start` 的 `model` 参数传给 codex 的（§4.5、§8），两者是两件事。这个 `'default'` 同时是本插件给共享占位 provider 路由**唯一**广告的模型条目（`src/provider-route.ts`）：菜单按 `model.id` 解析会话的 `(provider, model)`，两边同串才能让那一格显示成「default」，而不是拼出一个没有任何适配器能服务的 `external/...`。该共享标签由插件**常驻**注册为**一条**占位 provider 路由（`src/index.ts` 的 `mountProviderRoutes`、`src/provider-route.ts`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。早期版本写下的 `'codex'` 标签不再注册，但仍被 `isHostedProviderRoute` 判为托管路由以便重置老会话。
 
 ## 6. 权限模型
 
@@ -231,7 +231,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 | `sandboxMode` | `sandboxMode` | `'read-only' \| 'workspace-write' \| 'danger-full-access'`（`loop.ts:22-26`） | 无（跟随会话旋钮） | 钉死每个线程的沙箱模式 |
 | `approvalPolicy` | `approvalPolicy` | `'never' \| 'on-request' \| 'on-failure' \| 'untrusted'`（`loop.ts:29-34`） | 无（跟随会话旋钮） | 钉死每个线程的审批策略 |
 | `env` | `env` | `z.dict(z.string()).default({})` | `{}` | **当前未被消费**（见 §9.3 第 2 条） |
-| `model` | `model` | `z.string()` | 无 | 透传给 `thread/start` 与 `turn/start` 的 `model`，并作为 header/消息 source 的模型标签；缺省时标签为 `codex-native`，模型由 codex 原生设置决定 |
+| `model` | `model` | `z.string()` | 无 | **回落值**：每个 step 取 `sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`），会话选的真实 dsh 模型优先，透传给 `thread/start` 与 `turn/start` 的 `model`（`src/engine-codex/agent.ts:638`、`:646`）；同时作为 header/消息 source 的模型标签，缺省时标签为 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/engine-codex/agent.ts:572-574`），模型由 codex 原生设置决定 |
 
 `resolveConfig`（`src/engine-codex/loop.ts:67-74`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:574-581` 验证）。
 

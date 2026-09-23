@@ -186,6 +186,19 @@ export class AcpClient {
     return sessionId
   }
 
+  /**
+   * Select the model for one ACP session. The agent answers with an error frame
+   * when it cannot serve the id, and {@link request} rejects on that frame — so
+   * an engine that refuses the model fails the step loud rather than silently
+   * running its own default.
+   * @param sessionId - the ACP session the model applies to.
+   * @param modelId - the model id to select.
+   * @returns the agent's response to `session/set_model`.
+   */
+  setModel(sessionId: string, modelId: string): Promise<unknown> {
+    return this.request('session/set_model', { sessionId, modelId })
+  }
+
   /** Prompt the agent in a session and resolve when the turn completes. */
   prompt(sessionId: string, text: string): Promise<unknown> {
     return this.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })

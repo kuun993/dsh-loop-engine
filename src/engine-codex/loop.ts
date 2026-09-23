@@ -51,7 +51,7 @@ export interface Config {
   approvalPolicy?: CodexApprovalPolicy
   /** Explicit environment entries layered over the credential-scrubbed parent environment. */
   env?: Record<string, string>
-  /** Model override for the SDK; Codex native settings own the model when omitted. */
+  /** Fallback model for the app-server thread, used when the session selects none; Codex native settings own the model when omitted. */
   model?: string
 }
 

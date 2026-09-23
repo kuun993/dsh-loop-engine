@@ -42,7 +42,7 @@ export interface Config {
   permissionMode?: ClaudeCodePermissionMode
   /** Explicit environment entries layered over the credential-scrubbed parent environment. */
   env?: Record<string, string>
-  /** Model label for the logged request header; Claude Code native settings own the actual model. */
+  /** Model passed to each query (`Options.model`, overridden by the session's own pick); also the request-header label. Claude Code native settings own the model when omitted. */
   model?: string
   /** Grace in milliseconds for Claude Code process-tree termination. */
   disposeGraceMs?: number

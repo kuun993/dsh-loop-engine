@@ -80,7 +80,7 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 - **唤醒**：`wakeDriver` 只在 idle 时开新 driver；非 idle 时若原因是 maintenance 或"abort 后唤醒"则 latch `wakeRequested`，driver 退出时若收件箱仍有消息会接力唤醒（`src/engine-claude/agent.ts:219-237`、`254-268`）。一个细节：abort 之后收到的 wakeup 会被 `send` 重分类为 `next-turn`（`src/engine-claude/agent.ts:146-148`），保证它开启新 turn 而不是混入已死的 step。
 - **turn**：`turn/start` 落盘 → 循环 `preStep`（claim 消息 → `agent/pre-step` waterfall，可被拦截 reject → 技能注入）→ `step/start` → 每条用户消息落 `user/message` → `step()` → `step/end`。turn 结束原因在 `turn/end` 落盘：`completed` / `blocked` / `aborted` / `error`。`agent/turn-stopping` serial 事件给拦截器最后一次注入输入的机会。
   两个关键点：① `step()` 内部会在助手片段边界轮转 step（§4.1），所以收尾的 `step/end` 关的是 `phase.step` 而非本次迭代开头开的 step；② **轮转出来的 step 不重跑 `preStep`**——只有 turn 的第一个 step 走 inbox claim / waterfall / 技能注入，因为一次 query 是原子的、中途也无法投递 steer/inject。
-- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:447-458`）。header 的 model 标签是 `config.model ?? 'claude-code-native'`——**故意不镜像** web 会话的模型选择，因为那个选择从不驱动 query（`src/engine-claude/agent.ts:51-56`；背景见 `docs/proposals/model-selection-disable.md`）。provider 标签 `'claude-code'` 由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:510-521`）。header 的 model 标签是 `config.model ?? 'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts:71`）——**不镜像** web 会话的模型选择：header 记的是引擎自己的**座位**标签（模型没被部署钉死时就是 `default`），而会话选的真实模型是每步经 `Options.model` 传给 query 的（见 §8），两者是两件事（背景见 `docs/proposals/per-session-model-for-hosted-engines.md`）。这个 `'default'` 也正是本插件给共享占位 provider 路由**唯一**广告的模型条目（`{ provider: 'external', id: 'default', name: 'default' }`，`src/provider-route.ts`）——菜单按 `model.id` 解析会话的 `(provider, model)`，所以两边同串才能让那一格显示成「default」，而不是拼出一个不存在的 `external/...`。provider 标签是四个引擎**共用**的 `'external'`（`PROVIDER = HOSTED_ROUTE_LABEL`，`src/engine-claude/agent.ts`），由插件**常驻**注册为**一条**占位 provider 路由（`src/index.ts` 的 `mountProviderRoutes`、`src/provider-route.ts`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。早期版本写下的 `'claude-code'` 标签不再注册，但仍被 `isHostedProviderRoute` 判为托管路由以便重置老会话。
 
 ### 3.4 中断与销毁
 
@@ -100,7 +100,7 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 
 1. provider 把 thinking 拆成独立的 reasoning-only assistant 消息：按住不落盘，折进下一条消息（否则"最后一条 assistant 消息生效"的 step 投影会丢掉 thinking）；其 usage stash 到 `pendingUsage`。
 2. provider 流式发了 thinking delta 但完整消息里没有 thinking block：用 chunk 累积的 reasoning 合成 block 补在内容前面；完整消息自带 thinking 时丢弃累积，防止重复。
-3. step 以 reasoning-only 消息结束（`result` 到达时仍按着）：作为独立 durable 消息 flush，模型标签记 `claude-code-native`。
+3. step 以 reasoning-only 消息结束（`result` 到达时仍按着）：作为独立 durable 消息 flush，模型标签记 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/engine-claude/agent.ts:727`）。
 
 ### 4.1 一段一步（step 轮转）
 
@@ -188,7 +188,7 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 |---|---|---|
 | `permissionMode` | 五选一，缺省 = 跟随会话旋钮 | 每个 query 的权限裁决，见第 5 节 |
 | `env` | `Record<string,string>`，默认 `{}` | 叠加在 scrubbed 父环境之上传给 SDK（`src/engine-claude/sdk.ts:87-90`） |
-| `model` | 缺省 = 原生模型 | **双重作用**：request header 的模型标签（`src/engine-claude/agent.ts:442-444`），且作为 SDK `model` override 传给 query（`src/engine-claude/agent.ts:505`、`src/engine-claude/sdk.ts:102`） |
+| `model` | 缺省 = 不钉模型（标签记 `'default'`，实际模型由 Claude Code 原生设置决定） | **双重作用**：request header 与消息 source 的模型标签（`src/engine-claude/agent.ts:504-506`、`:727`），且作为 SDK `model` override 传给 query（`src/engine-claude/agent.ts:574`、`src/engine-claude/sdk.ts:102`）——**但会话选择优先**：每个 step 取 `sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`），会话选了一条真实 dsh 模型时用它作 `Options.model`（Claude Code 收裸 model id/alias，不带 provider），`config.model` 只是会话没选时的回落 |
 | `disposeGraceMs` | 默认 3000，须为正有限数且 ≤ `MAX_TIMER_DELAY_MS` | 子进程树终止宽限（`src/engine-claude/process.ts:59`） |
 | `maxTurns` | 正整数，缺省不限 | SDK `maxTurns`（`src/engine-claude/sdk.ts:103`） |
 

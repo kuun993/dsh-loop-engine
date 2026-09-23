@@ -14,7 +14,7 @@
 
 /** Driver configuration after defaults and load-time validation. */
 export interface ResolvedConfig {
-  /** Model alias the `kimi` child is launched with (`--model`); Kimi native config owns the model when omitted. */
+  /** Model sent per ACP session (`session/set_model`) when the session selects none; Kimi native config owns the model when omitted. */
   readonly model: string | undefined
   /** Explicit environment entries layered over the credential-scrubbed parent environment. */
   readonly env: Record<string, string>

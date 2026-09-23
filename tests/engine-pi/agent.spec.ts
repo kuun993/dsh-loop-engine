@@ -4,18 +4,16 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { Readable, Writable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
-import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
-import type { PiModelEntry } from '../../src/engine-pi/probe.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 
 const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -110,7 +108,12 @@ function turnEnd(message?: PiMessage, toolResults?: readonly PiToolResult[]): Re
 }
 
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  return await mountHarness(loopPlugin, config)
+  const ctx = await mountHarness(loopPlugin, config)
+  // The host's `modelSelection` fold, so a `model/selection` appended to the
+  // session is read back as the pending selection the driver resolves a model
+  // from — the same read the host's own `selectionFor` makes.
+  ctx.provide('sessionProjections', modelSelectionProjections(ctx))
+  return ctx
 }
 
 /** Run a happy-path step (text assistant message + settled). */
@@ -186,7 +189,7 @@ describe('PiAgent turn mapping', () => {
         data: {
           message: {
             role: 'assistant',
-            source: { kind: 'model', provider: 'pi' },
+            source: { kind: 'model', provider: 'external' },
             content: [{ type: 'text', text: 'hello world' }],
           },
           usage: { inputTokens: 12, outputTokens: 7, cacheReadTokens: 5 },
@@ -632,7 +635,7 @@ describe('PiAgent turn mapping', () => {
       const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
-        data: { header: { config: { provider: 'pi', model: 'pi-native' } }, reason: 'initial' },
+        data: { header: { config: { provider: 'external', model: 'default' } }, reason: 'initial' },
       })
     } finally {
       await ctx.fiber.dispose()
@@ -819,7 +822,7 @@ describe('PiAgent deployment pinning', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
-        data: { header: { config: { provider: 'pi', model: 'pi-deployment-model' } } },
+        data: { header: { config: { provider: 'external', model: 'pi-deployment-model' } } },
       })
     } finally {
       await ctx.fiber.dispose()
@@ -827,26 +830,75 @@ describe('PiAgent deployment pinning', () => {
   })
 })
 
-describe('PiAgent session model selection override', () => {
-  it('uses the last model/selection event model over the pinned config model', async () => {
-    const ctx = await harness({ model: 'deployment-pinned' })
+describe('PiAgent model selection', () => {
+  it('hands the session-selected dsh model to the child, over the deployment pin', async () => {
+    const ctx = await harness({ provider: 'anthropic', model: 'deployment-pinned' })
     try {
       mock.eventsYield.mockReturnValue(okStream('ok'))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('model-sel-s'),
         meta: { cwd: process.cwd() },
       })
-      // Simulate a harness session.selectModel by appending a model/selection event.
+      // A harness `session.selectModel` appends a model/selection event.
       agent.session.append('model/selection', {
-        provider: 'pi',
-        model: 'anthropic/claude-sonnet-4-6',
+        provider: 'meicloud',
+        model: 'deepseek-flash',
       })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // Pi's `--model` is `"provider/id"`-qualified, so the session pick travels
+      // as the composite (which carries the provider); the deployment's pinned
+      // `--model` and `--provider` both give way, because the session wins.
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('--model')
+      expect(argv).toContain('meicloud/deepseek-flash')
+      expect(argv).not.toContain('deployment-pinned')
+      expect(argv).not.toContain('--provider')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('appends the deployment thinking level to a session-selected model', async () => {
+    const ctx = await harness({ thinkingLevel: 'high' })
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-thinking-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'deepseek-flash' })
       agent.followup(message('go'))
       await agent.whenIdle()
 
       const argv = mock.created[0]?.spec.argv as string[]
       expect(argv).toContain('--model')
-      expect(argv).toContain('anthropic/claude-sonnet-4-6')
+      expect(argv).toContain('meicloud/deepseek-flash:high')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends no --model for the hosted seat, falling back to the deployment pin', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-hosted-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // The hosted seat: the menu's one `default` entry under the shared label.
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // `external` means "the engine decides": nothing is handed over, so the
+      // deployment's pin (Pi's own configuration when there is none) governs.
+      const argv = mock.created[0]?.spec.argv as string[]
+      expect(argv).toContain('--model')
+      expect(argv).toContain('deployment-pinned')
+      expect(argv).not.toContain('external/default')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -871,7 +923,7 @@ describe('PiAgent session model selection override', () => {
     }
   })
 
-  it('prefers the most recent model/selection event over an earlier one', async () => {
+  it('passes no --model at all when the deployment pins none and no real model is selected', async () => {
     const ctx = await harness()
     try {
       mock.eventsYield.mockReturnValue(okStream('ok'))
@@ -879,95 +931,58 @@ describe('PiAgent session model selection override', () => {
         sessionId: SessionId('model-sel-latest-s'),
         meta: { cwd: process.cwd() },
       })
+      // Both an earlier build's per-engine label and the shared hosted label:
+      // neither is a real dsh model, so neither reaches the child.
       agent.session.append('model/selection', { provider: 'pi', model: 'old/model' })
-      agent.session.append('model/selection', { provider: 'pi', model: 'new/model' })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
       agent.followup(message('go'))
       await agent.whenIdle()
 
+      // Unpinned deployment: the child decides, which is what Pi's own
+      // configuration is for.
       const argv = mock.created[0]?.spec.argv as string[]
-      expect(argv).toContain('new/model')
+      expect(argv).not.toContain('--model')
+      expect(argv).not.toContain('external/default')
+      expect(argv).not.toContain('old/model')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the model on every step, so a mid-session change reaches the next child', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-change-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-a' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(mock.created[0]?.spec.argv as string[]).toContain('meicloud/model-a')
+
+      // A model picked mid-conversation is read again at the next step rather
+      // than frozen when the agent was built.
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-b' })
+      agent.followup(message('again'))
+      await agent.whenIdle()
+
+      const second = mock.created[1]?.spec.argv as string[]
+      expect(second).toContain('--model')
+      expect(second).toContain('meicloud/model-b')
+      expect(second).not.toContain('meicloud/model-a')
     } finally {
       await ctx.fiber.dispose()
     }
   })
 })
 
-describe('PiAgent model catalog validation', () => {
-  /** The aligned `pi --list-models` table the stubbed probe child emits. */
-  const CATALOG_TABLE = 'provider   model\nanthropic  claude-sonnet-4-6\n'
-  /** The catalog that table parses to, i.e. what the probe publishes. */
-  const CATALOG: readonly PiModelEntry[] = [{ provider: 'anthropic', model: 'claude-sonnet-4-6' }]
-
-  /** A subprocess handle for a probe child that emits `output`, closes both streams, and exits 0. */
-  function probeHandle(output: string): SubprocessHandle {
-    const stdout = new Readable({ read: () => {} })
-    const stderr = new Readable({ read: () => {} })
-    queueMicrotask(() => {
-      stdout.push(output)
-      stdout.push(null)
-      stderr.push(null)
-    })
-    return {
-      pid: 1,
-      stdin: new Writable({ write: (_chunk, _encoding, callback) => { callback() } }),
-      stdout,
-      stderr,
-      collected: {} as SubprocessHandle['collected'],
-      done: Promise.resolve({ exitCode: 0, signal: null }),
-      terminate: vi.fn(),
-      waitForExit: vi.fn(async () => true),
-    } as SubprocessHandle
-  }
-
-  /**
-   * Harness whose subprocess seam serves only the `pi --list-models` probe
-   * child (the RPC client is mocked, so a step never spawns), making the
-   * catalog deterministic instead of dependent on a real pi install.
-   */
-  async function harnessWithCatalog(config: Record<string, unknown>): Promise<Context> {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-    await ctx.plugin(AgentRegistry)
-    ctx.provide('subprocess', { spawn: () => probeHandle(CATALOG_TABLE) })
-    await ctx.plugin(loopPlugin, config)
-    return ctx
-  }
-
-  it('keeps a session-selected model the catalog matches as provider/model', async () => {
-    const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
-    const ctx = await harnessWithCatalog({ piCatalogHolder: holder })
+describe('PiAgent model pinning', () => {
+  it('passes a model the deployment pins without consulting any catalog', async () => {
+    const ctx = await harness({ model: 'anyai-v1' })
     try {
-      // The probe is advisory and async: let it publish before the step spawns.
-      await vi.waitFor(() => { expect(holder.entries).toEqual(CATALOG) })
-      mock.eventsYield.mockReturnValue(okStream('ok'))
-      const { agent } = await ctx.agents.create({
-        sessionId: SessionId('catalog-match-s'),
-        meta: { cwd: process.cwd() },
-      })
-      // The catalog splits the identity into `provider` + `model`, while the
-      // session selection names the pair as one `provider/model` string; the
-      // second operand of pickModel's match is what keeps this candidate.
-      agent.session.append('model/selection', {
-        provider: 'anthropic',
-        model: 'anthropic/claude-sonnet-4-6',
-      })
-      agent.followup(message('go'))
-      await agent.whenIdle()
-
-      const argv = mock.created[0]?.spec.argv as string[]
-      expect(argv).toContain('--model')
-      expect(argv).toContain('anthropic/claude-sonnet-4-6')
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('drops a candidate the populated catalog does not list, leaving no --model', async () => {
-    const holder: { entries: readonly PiModelEntry[] } = { entries: [] }
-    const ctx = await harnessWithCatalog({ model: 'anyai-v1', piCatalogHolder: holder })
-    try {
-      await vi.waitFor(() => { expect(holder.entries).toEqual(CATALOG) })
       mock.eventsYield.mockReturnValue(okStream('ok'))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('catalog-unknown-s'),
@@ -976,11 +991,12 @@ describe('PiAgent model catalog validation', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
 
-      // `anyai-v1` is another provider's model, which pi cannot serve: with a
-      // concluded catalog it is dropped rather than passed to the child.
+      // A pinned model is the deployment's decision, and there is no catalog to
+      // second-guess it with: the driver used to drop a model pi's own probe did
+      // not list, which silently ignored the deployment's own configuration.
       const argv = mock.created[0]?.spec.argv as string[]
-      expect(argv).not.toContain('--model')
-      expect(argv).not.toContain('anyai-v1')
+      expect(argv).toContain('--model')
+      expect(argv).toContain('anyai-v1')
     } finally {
       await ctx.fiber.dispose()
     }

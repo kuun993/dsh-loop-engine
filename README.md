@@ -286,11 +286,35 @@ actually strips `/goal` from a hosted session is the managed preset
 surface: Kimi's ACP surface implements no `/goal`, so its bridge registers none
 (`src/engine-kimi/commands.ts:11-27`).
 
-Every hosted engine's provider label is served in the llm registry at once
-(`src/provider-route.ts:27`): an engine logs its own label into its sessions'
-`request/header`, and the web host refuses a turn whose session selection names a
-provider no adapter serves. The placeholders advertise no models — only Pi
-injects its probed catalog — so the model catalog is otherwise unchanged.
+All four engines share ONE provider label (`external`), served in the llm
+registry as a single placeholder route (`src/provider-route.ts`): every engine
+logs that same label into its sessions' `request/header`, and the web host
+refuses a turn whose session selection names a provider no adapter serves. Why
+not one label per engine: the browser model catalog is shared across the whole
+Host generation, not scoped to a session
+(`packages/api/session-controller/src/catalog.ts`), so a per-engine label would
+put four identical `default` entries in every session's menu. The placeholder
+advertises exactly ONE model entry — `{ provider: 'external', id: 'default',
+name: 'default' }` (its group display name comes from `providerInfo().name`,
+`external`; the wire id is the same ASCII `external`) — and that same `default` is the
+model label the engine logs when the deployment pins none, because the model
+menu resolves a session's `(provider, model)` against the catalog by `model.id`:
+the two must be one string for the seat to show `default` rather than a raw
+composite string naming a model no adapter serves. The per-engine labels earlier
+builds logged (`claude-code`/`codex`/`pi`/`kimi`) are no longer registered, but
+`isHostedProviderRoute` still recognizes them so an old session carrying one is
+reset to `external/default` (or the deployment default). A session's own pick IS
+handed to the engine: every driver re-reads the session's selection each step
+(`src/driver-core/session-model.ts`) and passes a real dsh model through — Pi's
+`--model <provider>/<model>`, Claude Code's `Options.model`, Codex's
+`thread/start` `model`, Kimi's ACP `session/set_model` — while `external/default`
+(or no selection at all) sends nothing and leaves the engine to its own default
+or the deployment's pinned `config.model` (session pick wins; the pin falls back).
+Whether the engine can serve that model is the engine's business: it is used with
+the engine's own credentials and provider configuration, and a refusal is
+reported rather than swallowed. The plugin also gives a session the harness loop
+drives a real selection instead (`src/model-selection-reset.ts`). Outside those
+`default` entries the model catalog is otherwise unchanged.
 
 The same projection covers the tool surface: a hosted engine's calls are projected
 onto dsh's tool vocabulary in the durable `tool/call` event, so the Web GUI
@@ -389,10 +413,32 @@ stays generic rather than mis-rendering.
   label in that header reads the session list's cached projection instead, so on a
   session that has been moved that label can still name the agent preset the
   session was CREATED with; the chip does not.
-- **Under a hosted engine the page's model selector does nothing.** The engine
-  owns its model natively, so what the session sends is what the engine's CLI
-  decides; dsh's `/plan`, `/compact`, `/goal`, goal tool, and dsh skill catalog
-  are absent from that session for the same reason (`src/preset.ts:79`).
+- **Under a hosted engine a model pick is HANDED to the engine.** By default the
+  engine owns its model natively, and dsh's `/plan`, `/compact`, `/goal`, goal
+  tool, and dsh skill catalog are absent from that session (`src/preset.ts:79`).
+  All hosted engines share one `external` provider group in the model menu,
+  holding exactly one entry, `default` (`src/provider-route.ts`), which stands
+  for "the engine decides". Picking a REAL dsh model there is not inert: every
+  driver re-reads the session's selection each step
+  (`src/driver-core/session-model.ts`) and passes it to the engine through its
+  own interface — Pi's `--model <provider>/<model>`, Claude Code's
+  `Options.model`, Codex's `thread/start` `model`, Kimi's ACP
+  `session/set_model`. It is used with the engine's own credentials and provider
+  configuration, so whether it works depends on the engine, and a model the
+  engine refuses reports an error rather than silently falling back. Selecting
+  `external/default` — or having no selection at all — sends nothing and leaves
+  the engine to its own default or the deployment's pinned `config.model` (a
+  session pick wins; the pin falls back). Worth
+  knowing where a pick made there lands: the host saves it as the DEPLOYMENT
+  default, and the plugin keeps each session's model SEAT on the engine that owns
+  it — `external/default` for a session built on a hosted engine, the deployment
+  default for one the harness loop drives (`ModelSelectionReset` — `resetFor` at
+  an engine change, `guardFor` at a build, `src/model-selection-reset.ts:171-174`,
+  `:191-194`; user-visible semantics in `docs/per-session-engine.md` §5.2). A
+  session whose log already names a real dsh model keeps it — that pick is what
+  the engine is now handed. There is no per-engine model probe or catalog
+  validation: Pi's `pi --list-models` probe stays deleted, and the engine itself
+  reports a model it cannot serve.
 - **Sessions do not share engine processes.** Each session owns its own engine
   child — a `codex app-server`, a `kimi acp`, a Pi RPC child, a Claude query per
   step — released when that agent's scope unwinds

@@ -63,7 +63,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 - **step**：每个 step 重置块/工具累积器与产出台账（agent.ts:513-518）→ 校验 cwd（无 cwd 直接抛错，519-521）→ `deriveMessages`，再 `engineSlashPrompt(history) ?? serializeHistory(history)` 造 prompt（525-528，见 §7.1）→ 写一次 request/header（agent.ts:534，见下）→ 取/建 ACP 客户端 → 注册权限回调（540）→ `session/new`（541）→ 挂 `onUpdate`（549）→ `raceAbort(client.prompt(...))`，abort 时先发 `session/cancel`（553-556）→ 收尾：`flushSegment`（756）把尾段块与「公告了但从未给出输入」的调用合成一条消息并落 `tool/call`（567-571）→ 无产出则抛 `KIMI_NO_RESULT`（571）。
 - **一次 prompt ≠ 一个 step**：`session/prompt` 跑完 Kimi 的整个内部 loop（实测一次 prompt 内可以连续 60+ 次工具调用），但 dsh 的 **step 是在流处理中途轮转的**——每个助手片段各自一个 step，见 §5「一段一步」。`beginSegment`（agent.ts:636-642）在片段边界补 `step/end` + `step/start` 并就地 `phase.step += 1`；`turn()` 的 finally 关的是 `phase.step`（当前真正打开的那个），不是本次迭代开头开的那个（agent.ts:400-406）。
   因此 `phase` 被当作「当前打开的 step」的载体：轮转就地改它，`agent/error` 上报和 `turn()` 的兜底关闭都读到正确的编号（`RunningPhase`，agent.ts:92）。
-- **request/header**：每个 loop 实例只写一次，provider 恒为 `'kimi'`，model 标签为 `config.model ?? 'kimi-native'`——未钉模型时刻意不把 web 会话的建议模型选择镜像进 header（它从不驱动查询）（agent.ts:59-70,446-448）。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`（agent.ts:459）。provider 标签 `'kimi'` 由插件**常驻**注册为占位 provider 路由——四个托管标签（`claude-code`/`codex`/`pi`/`kimi`）同时在场，因为任何会话都可能选中任一引擎（`src/index.ts:362-389` 的 `mountProviderRoutes`、`src/provider-route.ts:27-33`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。
+- **request/header**：每个 loop 实例只写一次，provider 恒为四个引擎**共用**的 `'external'`（`PROVIDER = HOSTED_ROUTE_LABEL`），model 标签为 `config.model ?? 'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts`）——header 是引擎自己的座位标签，**不镜像** web 会话的模型选择；会话选的真实模型是每步经 ACP `session/set_model` 下发的（§8），两者是两件事。这个 `'default'` 也正是本插件给共享占位 provider 路由**唯一**广告的模型条目（`{ provider: 'external', id: 'default', name: 'default' }`，`src/provider-route.ts`）：菜单按 `model.id` 解析会话的 `(provider, model)`，两边同串才能让那一格显示成「default」，而不是拼出一个没有任何适配器能服务的 `external/...`。已有 baseline 时 reason 记为 `'resume'`，否则 `'initial'`。该共享标签由插件**常驻**注册为**一条**占位 provider 路由（`src/index.ts` 的 `mountProviderRoutes`、`src/provider-route.ts`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。早期版本写下的 `'kimi'` 标签不再注册，但仍被 `isHostedProviderRoute` 判为托管路由以便重置老会话。
 
 ### 3.4 ACP 客户端缓存
 
@@ -84,7 +84,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 - **通知分发**：`session/update` 通知同时走 `onUpdate` 回调、内部 buffer 和 `updates()` 异步生成器三路（client.ts:262-268,205-215）。agent 实际只用 `onUpdate` 回调路径（agent.ts:546），生成器是保留接口。
 - **反向 RPC**：`session/request_permission` 交给注册的 handler 取布尔裁决，再由 `permissionResponse(approved, options)` 编码成 **ACP `RequestPermissionResponse`**——批准选中 `kind === 'allow_once'` 的那条 option 回填 `optionId`，拒绝选中 `reject_once`（client.ts:31-63,287-294）。**候选不唯一（0 条或多条）时答 `{ outcome: { outcome: 'cancelled' } }`**，因为无头运行时没有人类能在多选里挑一个：Kimi 把 question 桥（`q0_opt_*`）和 plan_review 桥都塞进这同一个 RPC，默认批准会替用户答题，默认拒绝才是 fail-closed（client.ts:40-55 注释）。**未注册 handler 时同样 fail-closed 走拒绝**（client.ts:292）。未知反向 RPC 回 `-32601 Method not found`，防止对端悬挂（client.ts:270-272）。
 - **协议握手**：`initialize` 发 `protocolVersion: 1.0`、`clientInfo: { name: 'dsh-loop-engine', version: '1.0.0' }`（client.ts:175-177；版本号是硬编码字符串，与包版本无关）。
-- **会话操作**：`newSession` 校验返回里的 `sessionId` 非空字符串（client.ts:180-187）；`prompt` 体为 `{ sessionId, prompt: [{ type: 'text', text }] }`（190-192）；`cancel` 是 fire-and-forget，吞掉 rejection（195-197）。
+- **会话操作**：`newSession` 校验返回里的 `sessionId` 非空字符串（client.ts:180-187）；`setModel` 发 `session/set_model { sessionId, modelId }`，走同一条 `request`，所以引擎用错误帧拒绝模型时该 Promise 直接 reject（client.ts:189-199）；`prompt` 体为 `{ sessionId, prompt: [{ type: 'text', text }] }`；`cancel` 是 fire-and-forget，吞掉 rejection。
 - **生命周期**：`dispose()` 封口、请求进程树终止、以 `'kimi acp client is sealed'` 拒掉所有 pending（218-226）；子进程 `done` 正常落定（exit）时以 `'kimi acp process exited unexpectedly'` 拒掉 pending 并封口（124-129）。**注意 done 以 rejection 落定的分支只封口、不拒 pending**（130-133）——此时在飞的 prompt 永不结算（测试 `client.spec.ts:413-427` 显式覆盖了该行为，改这里要先想清楚语义）。
 - `AcpClient.create(spec, spawn?)`：给了 spawn capability 就用它（生产路径，subprocess 接缝）；没给就退回 `node:child_process` 裸 spawn（client.ts:73-80,143-146）——后者只在无接缝环境（测试）出现。
 
@@ -170,7 +170,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 | 组合字段 | KimiLoop 字段 | 含义 |
 |---|---|---|
-| `model` | `model?: string` | **只作 request/header 与消息 provenance 的模型标签**（agent.ts:446-448,802）。不进 argv——`kimiAcpArgv` 无模型旗标（process.ts:74-76），模型由 Kimi 原生配置持有。⚠️ `Config` 与 `ResolvedConfig` 的 JSDoc 仍写着"传给子进程的 `-m`/`--model`"（loop.ts:33、types.ts:17），与实际行为不符，见第 9 节 |
+| `model` | `model?: string` | **两个去向**：(1) request/header 与消息 provenance 的模型标签（agent.ts:457-458、825），未钉时为 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts:71`）；(2) 作为**回落值**经 ACP `session/set_model` 下发——每个 step 取 `sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`），会话选的真实 dsh 模型优先，`config.model` 是会话没选时的回落。仍**不进 argv**（`kimiAcpArgv` 无模型旗标，process.ts:74-76）：`kimi acp` 只有 `--login`/`--region`，模型只能走 ACP。JSDoc（loop.ts:33、types.ts:17）写着"`-m`/`--model`"仍不准确——现在传的是 `session/set_model`，见第 9 节 |
 | `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:36、52；spawn spec 原样带，agent.ts:487） |
 | `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:37-38、53） |
 
@@ -201,9 +201,9 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
   **中间走过一次弯路值得记下来**：第一版修法只把消息拆成「一段一条」，没拆 step。结果更糟——chat 的助手节点按 `${turn}:${step}` 建键且 `settleMessage` 整体替换 blocks，一个 step 里 N 条消息只渲染最后一条，于是屏幕上只剩最后一段的 `思考`，前面的全被覆盖。正确做法是连同 step 一起拆（`beginSegment`，agent.ts:636-642），复刻 in-process 的「一步一消息、消息在工具之前」形状。教训：**判断渲染问题的根因必须同时看日志形状和 UI 的节点建键/替换规则**，只盯日志顺序会得出错的方向。
   **同一个坑的第二形态（2026-09-19 修）**：拆 step 之后，同一模型轮次里**并行公告的多个工具调用**仍会在同一个 step 内各发一条 `assistant/message`（每条消息只带一个 `tool-call` 块），于是 chat 节点仍按 `${turn}:${step}` 替换 blocks——最后一条裸 `tool-call` 消息把前面的 reasoning/text 和其余工具头全盖掉，屏幕上只剩「冷冷清清的工具调用」。修复：拿到 `rawInput` 的调用不再立即落日志，而是累积进 `segmentCalls`，段内第一个 settled 结果才由 `flushSegment` 把 reasoning/text + 全部 `tool-call` 块合成**一条**消息再逐个落 `tool/call`（agent.ts:698-722,753-764）。教训与上面同一条：**日志里一个 step 多条消息 = UI 只渲染最后一条**，修渲染必须保证「一步一消息」。
 - **ACP 会话的粒度是「一次 prompt / 一个 turn-loop 迭代」，不是轮转后的 step**：`session/new` 每次调用 `step()` 一次（agent.ts:538），而 `beginSegment` 轮转出来的 step 共用同一次 ACP prompt 与同一个 ACP 会话——轮转只发生在 dsh 的持久日志层，不重开子进程侧的会话。
-- **每步全新 ACP 会话**：`session/new` 每步一次（agent.ts:538），Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量的代价，与 claude/codex 驱动一致。
+- **每步全新 ACP 会话**：`session/new` 每步一次，Kimi 侧无跨步记忆；prompt 体积随会话历史线性增长，长会话的每步成本会升高——这是 "log ⟺ model-visible" 不变量代价，与 claude/codex 驱动一致。
+- **每步按需 `session/set_model`**：`session/new` 之后、`prompt` 之前，若本步解析出的模型（会话选择 ?? `config.model`）非空就发一次 `session/set_model { sessionId, modelId }`（agent.ts）。模型由 Kimi 用错误帧拒绝时 `request` reject，那一步直接失败、prompt 不会跑——错误浮上来，不静默退回原生默认。粒度是每个 step（每步新会话），所以中途 `/model` 下一步生效。
 - **done-rejection 分支不拒 pending**：`done` 以 rejection 落定时在飞请求永不结算（client.ts:130-133），见 4.2。
-- **`config.model` 不进子进程**：想真正钉模型只能靠 Kimi 自己的配置；插件的 `model` 只是日志标签。
 - **撞名命令被跳过**：见 7.1。
 - **~~审批被拒的 `tool/result` 文本会被 Kimi 的输入回显撑爆~~**：已修（2026-09-18）。`tool_call_update.content` 是**累计快照**而非增量，旧实现逐条追加（`toolText` accumulator），一次被拒的 Bash 调用会留下 6.6KB 的 `{{"command{"command"...` 嵌套垃圾并被喂回模型上下文。现在改为一律**替换**最新快照（见 §5 表与 `mapping.ts:95-113`）。教训：Kimi 的 chunk 类字段（`agent_message_chunk`/`agent_thought_chunk`）是增量，工具卡字段是快照——两类字段不能按同一套假设折叠。
 - **Kimi 的 question / plan_review 桥未被利用**：Kimi 把 `AskUserQuestion` 和 plan_review 也塞进 `session/request_permission`（选项 id 形如 `q0_opt_*`、`plan_*`）。当前实现只按 `kind` 找唯一的 `allow_once`/`reject_once`，多候选一律 `cancelled`（fail-closed、诚实但不作答）。dsh 有 `ctx.userQuestions`（codex 驱动已接，见 `docs/engine-codex.md` §6.4），理论上可把这类请求转过去真答；需要先把 ACP 选项 id 空间映射回问题/选项，属于**新功能**而非修 bug。
@@ -212,7 +212,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 
 1. **`process.ts` 模块头过时**（process.ts:2-8）：描述的是"`kimi -p --output-format stream-json`、每步一个一次性子进程"，实际实现是常驻 `kimi acp` + JSON-RPC。`KimiSpawnSpec` 的 JSDoc（process.ts:19"one `kimi -p` child"）同样过时。
 2. **`types.ts` 模块头过时**（types.ts:4-10）：仍在讲 `-p` 面自动批准、无 `--tools` 旗标，与 ACP 驱动模型不符。
-3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:33"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会传给子进程，实际 argv 无任何模型旗标，`model` 只作日志标签。
+3. **模型旗标 JSDoc 失实**：`Config.model`（loop.ts:33"(`-m`)"）与 `ResolvedConfig.model`（types.ts:17"(`--model`)"）声称模型会经命令行旗标传给子进程，实际 argv 无任何模型旗标——现在模型经 ACP `session/set_model` 下发（§8、§9 上一条）。
 4. **客户端生命周期注释**：client.ts:11 说子进程"long-lived (one per factory)"，实际客户端按 **agent** 缓存（agent.ts:115-118），一个工厂下多个会话各有自己的子进程。client.ts:53"once per driver scope"才是准确说法。
 5. **块序注释内部张力**：agent.ts:618-619 先说"Reasoning leads the assistant message; text follows"，又接"Indexes stay contiguous in the order blocks first appear"——代码实现的是后者（按首次出现排序），若 text 先到则 text 在前，前一句不是保证。
 6. **permission.ts 模块头易误导**（permission.ts:9-13）：大段谈论 full-access/workspace-write 沙箱如何自动批准，但函数根本不读沙箱旋钮（permission.ts:24-27 的函数 JSDoc 才是准的）。
@@ -231,4 +231,4 @@ Kimi 相关 spec 共 9 个文件（约 3100 行），仓库覆盖门槛为 `src/
 - `tests/engine-kimi/skills.spec.ts`（254 行）：`kimiAgentDir` 覆盖；AGENTS.md 发现/空文件忽略/cwd→git root 合并；项目与用户 SKILL.md 发现（含 `KIMI_CODE_HOME` 覆盖、扁平 .md、垃圾条目跳过、目录缺 SKILL.md、abort 返回空）；get 的内容加载与文件消失 → undefined。
 - `tests/engine-kimi/commands.spec.ts`（50 行）：转发 handler 的原文行拼装（带/不带参数）与 `KIMI_COMMANDS` 每条都有转发 handler。
 
-另：`tests/index.spec.ts` 覆盖插件入口层（managed block 的写入/legacy 迁移、per-engine preset 的 authoring、四个 provider 占位路由、settings 的 default-engine 转向），改 `src/index.ts` 的 kimi 部分时一并跑；引擎自己的命令/技能注册由 `src/engine-surface.ts` 承载，见 §7.1 与 `tests/engine-kimi/index.spec.ts`。
+另：`tests/index.spec.ts` 覆盖插件入口层（managed block 的写入/legacy 迁移、per-engine preset 的 authoring、共享 provider 占位路由、settings 的 default-engine 转向），改 `src/index.ts` 的 kimi 部分时一并跑；引擎自己的命令/技能注册由 `src/engine-surface.ts` 承载，见 §7.1 与 `tests/engine-kimi/index.spec.ts`。

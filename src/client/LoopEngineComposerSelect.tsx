@@ -81,6 +81,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
 import type { LoopEngineId } from '../agent-preset-ids.ts'
+import { isHostedEngine } from '../agent-preset-ids.ts'
 import { useEngineOfSession } from './use-session-engine.ts'
 import {
   engineSwitchReady, switchNeedsReload,
@@ -365,13 +366,14 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
   // runs and states the one the record holds rather than showing that one as if
   // it had already taken over.
   const pendingText = pending === undefined ? undefined : ` · ${pendingEngineText(t, pending)}`
-  // The hint a user needs at a glance: what this control does (and, for the
-  // Claude Code engine, that the model seat in this session is inert). A session
-  // whose record names another engine gets the hint that says what that means.
+  // The hint a user needs at a glance: what this control does (and, while a
+  // hosted engine drives the session, that the model seat belongs to that
+  // engine). A session whose record names another engine gets the hint that
+  // says what that means.
   const title = pending !== undefined
     ? t('pendingComposerHint')
-    : engine === 'claude-code'
-      ? t('claudeModelNotice')
+    : isHostedEngine(engine)
+      ? t('hostedEngineModelNotice')
       : sessionId === undefined ? t('description') : t('composerHint')
 
   // A pick commits as soon as the host will take it. Whether this session can be

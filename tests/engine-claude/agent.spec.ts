@@ -19,6 +19,7 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { loopPluginFor, mountHarness } from '../helpers/agent-harness.ts'
+import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 
 const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -202,8 +203,13 @@ function streamEvent(event: unknown): SDKMessage {
   } as unknown as SDKMessage
 }
 
-async function harness(): Promise<Context> {
-  return await mountHarness(loopPlugin)
+async function harness(config: Record<string, unknown> = {}): Promise<Context> {
+  const ctx = await mountHarness(loopPlugin, config)
+  // The host's `modelSelection` fold, so a `model/selection` appended to the
+  // session is read back as the pending selection the driver resolves a model
+  // from — the same read the host's own `selectionFor` makes.
+  ctx.provide('sessionProjections', modelSelectionProjections(ctx))
+  return ctx
 }
 
 describe('ClaudeCodeLoop factory registration', () => {
@@ -265,7 +271,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
         data: {
           message: {
             role: 'assistant',
-            source: { kind: 'model', provider: 'claude-code' },
+            source: { kind: 'model', provider: 'external' },
             content: [{ type: 'text', text: 'hello world' }],
           },
           usage: { inputTokens: 12, outputTokens: 7, cacheReadTokens: 5 },
@@ -907,10 +913,99 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: {
-          header: { config: { provider: 'claude-code', model: 'claude-code-native' } },
+          header: { config: { provider: 'external', model: 'default' } },
           reason: 'initial',
         },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('ClaudeCodeAgent model selection', () => {
+  /** The `Options` the Nth query ran with. */
+  function queryOptionsAt(index: number): Record<string, unknown> {
+    const args = queryMock.mock.calls[index]?.[0] as { options: Record<string, unknown> } | undefined
+    if (args === undefined) throw new Error(`no query ran at index ${index}`)
+    return args.options
+  }
+
+  it('hands the session-selected dsh model to the SDK, over the deployment pin', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // A harness `session.selectModel` appends a model/selection event.
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'deepseek-flash' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // Claude Code takes a bare model id/alias, so the model half of the
+      // override travels and the session wins over the deployment's pin.
+      expect(queryOptionsAt(0).model).toBe('deepseek-flash')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends no model for the hosted seat, falling back to the deployment pin', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-hosted-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // `external` means "the engine decides": the pin governs instead of the
+      // routed label being handed to the SDK.
+      expect(queryOptionsAt(0).model).toBe('deployment-pinned')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends no model at all when the deployment pins none and no real model is selected', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-none-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      expect('model' in queryOptionsAt(0)).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the model on every step, so a mid-session change reaches the next query', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-change-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-a' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryOptionsAt(0).model).toBe('model-a')
+
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-b' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryOptionsAt(1).model).toBe('model-b')
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1182,7 +1277,7 @@ describe('configuration validation', () => {
         disallowedTools: ['AskUserQuestion', 'ExitPlanMode'],
       })
       expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
-        data: { header: { config: { provider: 'claude-code', model: 'claude-opus-4-6' } } },
+        data: { header: { config: { provider: 'external', model: 'claude-opus-4-6' } } },
       })
     } finally {
       await fresh.fiber.dispose()

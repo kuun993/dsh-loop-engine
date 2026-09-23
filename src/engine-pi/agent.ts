@@ -29,10 +29,11 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
+import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
-import type { PiModelEntry } from './probe.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import { resolveSessionPermission, toolsForSandbox, type PiPermission } from './permission.ts'
@@ -51,14 +52,23 @@ import {
   type SkillsService,
 } from '../driver-core/skill-inject.ts'
 
-/** Provider route label used for logged header snapshots and message provenance. */
-export const PROVIDER = 'pi'
+/**
+ * Provider route label this driver logs into request/header snapshots and
+ * message provenance — the ONE route every hosted engine shares
+ * ({@link HOSTED_ROUTE_LABEL}), so all four engines select `external/default`
+ * and the model menu carries a single group instead of one per engine.
+ */
+export const PROVIDER = HOSTED_ROUTE_LABEL
 /**
  * Model label logged when the deployment pins no model: Pi owns its model
- * natively, so the web session's advisory model selection is deliberately not
- * mirrored into the header (it never drives a query).
+ * natively, so the web session's model selection is deliberately not mirrored
+ * into the header — it reaches the child separately, as the `--model` the driver
+ * resolves each step (`sessionModelOverrideOf`). It is
+ * {@link HOSTED_DEFAULT_MODEL} — the one entry this engine's provider route
+ * advertises (`provider-route.ts`) — so the session's `(provider, model)`
+ * resolves to that entry and the model seat renders "default" instead of a
+ * composite string naming a model no adapter serves.
  */
-const NATIVE_MODEL_LABEL = 'pi-native'
 
 /** CLI flag for the tool allowlist, derived from the resolved sandbox stance. */
 const TOOLS_FLAG = '--tools'
@@ -148,7 +158,6 @@ export class PiAgent implements Agent {
     private readonly config: ResolvedConfig,
     private readonly spawn: PiSpawnCapability,
     private readonly bin: string,
-    private readonly catalog: { readonly entries: readonly PiModelEntry[] },
   ) {
     this.dispatch = agentEvents(loopCtx, this)
     this.inbox = new DriverInbox(session, {
@@ -478,7 +487,7 @@ export class PiAgent implements Agent {
 
   /** Model label recorded in the request header for one lifecycle. */
   private modelLabel(): string {
-    return this.config.model ?? NATIVE_MODEL_LABEL
+    return this.config.model ?? HOSTED_DEFAULT_MODEL
   }
 
   /** Append the request header snapshot once per loop instance. */
@@ -496,48 +505,22 @@ export class PiAgent implements Agent {
   }
 
   /**
-   * The harness Session's web-side model selection, if any was stored. The
-   * durable `model/selection` event carries `{ provider, model, ... }`; when a
-   * user picked a model via `/model`, this is the newest pick, and it overrides
-   * the deployment config (which stays the fallback). Returns `undefined` when
-   * no selection was stored, so the deployment config governs.
+   * Build the `pi --mode rpc` argv/cwd/env for one step's child process.
+   *
+   * The model comes from the session's own selection when it names a real dsh
+   * model, else from the deployment's pinned configuration
+   * ({@link sessionModelOverrideOf}). Pi's `--model` flag is
+   * `"provider/id"`-qualified, so a session pick travels as the composite —
+   * which also carries the provider, leaving the deployment's `--provider` out
+   * of the argv for that step. A step with neither a selection nor a pin sends
+   * no `--model` at all and lets Pi's own configuration decide. Read every step,
+   * so a model picked mid-conversation lands on the next child.
    */
-  private dynamicModel(): string | undefined {
-    for (const event of [...this.session.snapshotEvents()].reverse()) {
-      const type = event.type as string
-      if (type !== 'model/selection') continue
-      const data = event.data as { provider?: string; model?: string } | undefined
-      const model = data?.model
-      if (typeof model === 'string' && model.length > 0) return model
-    }
-    return undefined
-  }
-
-  /** Build the `pi --mode rpc` argv/cwd/env for one step's child process. */
-  /**
-   * Resolve the `--model` for the RPC child. The session-selected model (last
-   * `model/selection` event) is honored only when it is one of pi's discovered
-   * models; an unknown harness model (e.g. another provider's model such as
-   * `anyai-v1`, which pi cannot serve) is dropped so the child falls back to pi's
-   * own default instead of exiting with "Model ... not found". An empty catalog
-   * (probe not concluded) keeps the candidate, matching prior behavior.
-   */
-  private pickModel(): string | undefined {
-    const candidate = this.dynamicModel() ?? this.config.model
-    if (candidate === undefined) return undefined
-    if (this.catalog.entries.length > 0) {
-      const known = this.catalog.entries.some(
-        entry => entry.model === candidate || `${entry.provider}/${entry.model}` === candidate,
-      )
-      if (!known) return undefined
-    }
-    return candidate
-  }
-
   private spawnSpec(cwd: string): PiSpawnSpec {
     const argv: string[] = []
-    const model = this.pickModel()
-    if (this.config.provider !== undefined) argv.push('--provider', this.config.provider)
+    const override = sessionModelOverrideOf(this.loopCtx, this.session)
+    const model = override === undefined ? this.config.model : `${override.provider}/${override.model}`
+    if (override === undefined && this.config.provider !== undefined) argv.push('--provider', this.config.provider)
     if (model !== undefined && this.config.thinkingLevel !== undefined) {
       argv.push('--model', `${model}:${this.config.thinkingLevel}`)
     } else if (model !== undefined) {

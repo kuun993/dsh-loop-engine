@@ -19,8 +19,6 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { PiAgent } from './agent.ts'
-import { probePiModels } from './probe.ts'
-import type { PiModelEntry } from './probe.ts'
 import type { PiProcess, PiSpawnSpec } from './rpc/client.ts'
 import type { PiSandboxMode, ResolvedConfig } from './types.ts'
 import { HostedEngineRuntime } from '../driver-core/hosted-engine-runtime.ts'
@@ -47,14 +45,12 @@ export interface Config {
   sandboxMode?: PiSandboxMode
   /** LLM provider for the `pi` child (`--provider`), when the deployment pins one. */
   provider?: string
-  /** Model pattern for the `pi` child (`--model`); Pi native settings own the model when omitted. */
+  /** Fallback model for the `pi` child (`--model`), used when the session selects none; Pi native settings own the model when omitted. */
   model?: string
   /** Thinking/reasoning level, appended to the `--model` pattern when pinned. */
   thinkingLevel?: string
   /** Explicit environment entries passed to the `pi` child. */
   env?: Record<string, string>
-  /** Shared Pi model catalog holder; the loop writes its `pi --list-models` probe result here. */
-  piCatalogHolder?: { entries: readonly PiModelEntry[] }
 }
 
 /** Schema of the Pi loop plugin configuration. */
@@ -64,7 +60,6 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   thinkingLevel: z.string(),
   env: z.dict(z.string()).default({}),
-  piCatalogHolder: z.any(),
 })
 
 /** Resolve the driver configuration at the plugin config boundary. */
@@ -121,11 +116,10 @@ function fromSubprocess(handle: SubprocessHandle): PiProcess {
     stdout,
     stderr,
     onExit: (handler) => {
-      // `PiProcess.onExit` types its handler as zero-arg, but the probe's
-      // waitForExit structural-cast registers a code-bearing handler; unwrap the
-      // SubprocessOutcome to deliver the bare exit code as that cast expects.
-      const onExit = handler as (code: number | null) => void
-      void handle.done.then((outcome) => onExit(outcome.exitCode), handler)
+      // `PiProcess.onExit` is a zero-arg notification, while the seam reports a
+      // child exit as an outcome: reconcile the outcome into that notification,
+      // on a clean exit and on a failed wait alike.
+      void handle.done.then(handler, handler)
     },
     terminate: () => handle.terminate(),
   }
@@ -150,8 +144,6 @@ export class PiLoop extends HostedEngineRuntime<ResolvedConfig, PiAgent> {
   readonly spawn: (spec: PiSpawnSpec) => PiProcess
   /** Resolved Pi CLI entrypoint; `argv[0]` of every Pi RPC child. */
   readonly bin: string
-  /** Discovered Pi model catalog, forwarded to each agent so it can validate the session-selected model against what pi can actually serve. */
-  private readonly catalog: { readonly entries: readonly PiModelEntry[] }
 
   constructor(
     ctx: Context,
@@ -166,25 +158,13 @@ export class PiLoop extends HostedEngineRuntime<ResolvedConfig, PiAgent> {
       throw new Error('loop-engine: the pi engine needs the dsh subprocess service on this context')
     }
     this.bin = piCliEntrypoint()
-    this.catalog = config.piCatalogHolder ?? { entries: [] }
     this.spawn = (spec) => fromSubprocess(subprocess.spawn(piSubprocessSpec(spec, PI_DISPOSE_GRACE_MS)))
-    // Probe discoverable Pi models once per engine instance and publish into the
-    // shared holder so the route adapter /model directory reflects the catalog.
-    // Failure leaves the holder empty (advisory): /model shows "no models", the
-    // engine still runs.
-    const holder = config.piCatalogHolder
-    if (holder !== undefined) {
-      void probePiModels(this.bin, (spec) => this.spawn(spec))
-        .then((models) => { holder.entries = [...models] })
-        .catch(() => { holder.entries = [] })
-    }
   }
 
   /** Construct the Pi RPC driver for one prepared session. */
   protected override buildAgent(loopCtx: Context, id: SessionId, options: AgentOptions, session: Session): PiAgent {
     return new PiAgent(
       loopCtx, id, options, session, this.config, this.spawn, this.bin,
-      this.catalog,
     )
   }
 }

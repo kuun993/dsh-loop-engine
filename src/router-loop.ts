@@ -62,6 +62,7 @@ import type {
   ResumeAgentOptions,
 } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { HOSTED_DEFAULT_MODEL } from './agent-preset-ids.ts'
 import type { LoopEngineRefusalCode, LoopEngineSelectResult, SessionEngineReport } from './agent-preset-ids.ts'
 import type { HostedAgent, HostedAgentHandle, HostedEngineRuntime } from './driver-core/hosted-engine-runtime.ts'
 import type { SessionLifetime } from './driver-core/session-lifetime.ts'
@@ -69,6 +70,7 @@ import type { SessionProjectionsService } from './driver-core/host-servers.ts'
 import { engineOfSession, engineReportOfSession } from './engine-of-session.ts'
 import { ModelSelectionReset } from './model-selection-reset.ts'
 import { engineOfPreset, hostedEngineOf } from './preset.ts'
+import { hostedRouteLabelOf } from './provider-route.ts'
 import { registerEngineSurface } from './engine-surface.ts'
 import type { EngineRecordStore } from './session-engine-store.ts'
 import type { HostedEngineId, LoopEngineId } from './settings.ts'
@@ -176,9 +178,10 @@ export class RouterLoop extends AgentLoop {
   private readonly records: EngineRecordStore
   private readonly warn: (message: string) => void
   /**
-   * The model-selection half of a switch back onto the harness loop
-   * ({@link RouterLoop.restoreDefaultModel}), owned here rather than built per
-   * switch because its one warning is owed once per process.
+   * The model-selection half of routing: the seat a session's engine owns, moved
+   * at a switch ({@link RouterLoop.moveModelSelection}) and written at a build
+   * ({@link RouterLoop.engineOptions}). Owned here because each warning it owes
+   * is owed once per process, not once per session.
    */
   private readonly selectionReset: ModelSelectionReset
 
@@ -283,9 +286,9 @@ export class RouterLoop extends AgentLoop {
     const engine = this.records.engineOf(options.sessionId)
       ?? await this.engineFor(options.meta?.agentPreset, options.parentAgent)
     if (engine === 'in-process') {
-      return this.adopt(engine, await super.createAgent(ownerCtx, options), recipe)
+      return this.adopt(engine, await super.createAgent(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
-    const handle = await this.runtimeOf(engine).createAgent(ownerCtx, options)
+    const handle = await this.runtimeOf(engine).createAgent(ownerCtx, this.engineOptions(options, engine))
     return this.adopt(engine, handle, recipe, handoverOf(handle))
   }
 
@@ -299,6 +302,13 @@ export class RouterLoop extends AgentLoop {
    * answer for a session that switched engine while it was blank — and the
    * record is the only answer for one that switched after it started, which no
    * preset can express.
+   *
+   * A resume is not a create: the session's seat is one a previous build already
+   * put in its log (`model-selection-reset.ts`, the switch and build triggers), so
+   * a hosted engine's resume leaves the selection exactly as it finds it. Only
+   * the harness loop's own resume is wrapped, with the narrower trigger that
+   * applies to it — it makes real model calls, so it must not be left selecting a
+   * placeholder route.
    * @param ownerCtx - caller context that owns load, setup, and the lifecycle.
    * @param options - persisted identity, loop options, and setup.
    * @returns the published handle.
@@ -310,10 +320,49 @@ export class RouterLoop extends AgentLoop {
     )
       ?? await this.engineFor(undefined, options.parentAgent)
     if (engine === 'in-process') {
-      return this.adopt(engine, await super.resume(ownerCtx, options), recipe)
+      return this.adopt(engine, await super.resume(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
     const handle = await this.runtimeOf(engine).resume(ownerCtx, options)
     return this.adopt(engine, handle, recipe, handoverOf(handle))
+  }
+
+  /**
+   * Wrap the caller's setup so the session's ENGINE gets its model seat written
+   * before the host installs the session's selection, and hand a hosted engine
+   * the `agentOptions` that seat names.
+   *
+   * The wrap is what makes the write land at all: the host installs the session's
+   * model selection from INSIDE the caller's own setup
+   * (`ApiSessionAgentController.selectionFor`), and that read takes the log's
+   * pending `model/selection` — so the write has to happen before it, and the
+   * caller's setup has to run unchanged afterwards. Both of the router's engines
+   * are wrapped, each with its own trigger: the harness loop's build keeps the
+   * narrow one (only a session that would otherwise select a placeholder route),
+   * while a hosted engine's build is where a NEW session gets its seat. The
+   * resume path calls this with `in-process` alone (see {@link resume}).
+   *
+   * The `agentOptions` half keeps the two answers consistent: a hosted engine is
+   * handed the very selection written into the session (`external/default`), not
+   * the deployment default that seat replaced. In-process keeps the caller's own
+   * options, which ARE its route.
+   *
+   * The caller's setup is copied, never mutated: the same options object is the
+   * router's rebuild recipe, which replays the caller's own closure.
+   * @param options - the create or resume options the caller supplied.
+   * @param engine - the engine building this session.
+   * @returns a copy whose setup writes the seat first, then the caller's own.
+   */
+  private engineOptions<T extends CreateAgentOptions | ResumeAgentOptions>(options: T, engine: LoopEngineId): T {
+    const setup = options.setup
+    const guarded: AgentSetup = async (agentCtx, agent) => {
+      this.selectionReset.guardFor(agent.session, engine)
+      return await setup?.(agentCtx, agent)
+    }
+    return {
+      ...options,
+      setup: guarded,
+      ...engine === 'in-process' ? {} : { agentOptions: engineRouteOptions(engine) },
+    }
   }
 
   /**
@@ -355,7 +404,10 @@ export class RouterLoop extends AgentLoop {
    *  2. the record, because it is the answer the router, the Remote, and the
    *     host's next resolve all read — and a record that could not be written
    *     must leave the session where it is;
-   *  3. the move itself: an in-place swap between two hosted engines, or — when
+   *  3. the session's model seat, which moves with the choice
+   *     ({@link moveModelSelection}) — before the move below, because the move is
+   *     what detaches (or re-installs) the agent that reads it;
+   *  4. the move itself: an in-place swap between two hosted engines, or — when
    *     the harness loop is on either side — a release of the session's agent
    *     plus a request that the page reload (`reload: true`), which is what
    *     makes the host build the session again on the recorded engine.
@@ -404,12 +456,13 @@ export class RouterLoop extends AgentLoop {
       return refuse('record-failed', `could not record the engine of session "${sessionId}": ${String(error)}`)
     }
     // The model selection moves with the choice, right after the record and
-    // before any outcome is returned: a switch onto the harness loop hands the
-    // session back to a real model, and the selection the host reads for this
-    // session belongs to its next build — which the move below triggers. A cold
-    // session never reaches here (the checks above refuse it), which is also the
-    // only session that could have no stale selection to replace.
-    if (engine === 'in-process') this.restoreDefaultModel(entry)
+    // before any outcome is returned, because the selection the host reads for
+    // this session is the one its NEXT build installs — and every move below
+    // (the in-place swap's `setup`, or the re-resolve the reload triggers) reads
+    // it back. A cold session never reaches here (the checks above refuse it),
+    // which is also the only session that could have no stale selection to
+    // replace.
+    this.moveModelSelection(entry, engine)
     if (entry.engine === engine) return { ok: true, engine }
     return await this.move(entry, engine)
   }
@@ -576,6 +629,10 @@ export class RouterLoop extends AgentLoop {
    * its record both stay where they are, so the router and the Remote keep
    * agreeing about it. (A started session cannot reach here through the
    * harness's picker anyway: the roster refuses with `agent-preset/locked`.)
+   *
+   * The session's model seat moves with the choice, before the release
+   * ({@link moveModelSelection}) — the picker is an engine change like the
+   * picker's own switcher, and this is the one place the harness can make it.
    */
   private rebuildOnEngineChange(): void {
     this.ctx.on('agent-preset/selected', (sessionId, preset) => {
@@ -595,39 +652,63 @@ export class RouterLoop extends AgentLoop {
           this.warn(`loop-engine: could not record the engine of "${sessionId}": ${String(error)}`)
         }
       }
-      // The same defect this path's own entry point fixes, in the same place:
-      // a preset that maps to the harness loop hands the session back to a real
-      // model, so it must stop selecting the engine label its log records. Done
-      // BEFORE the release, because the release is what detaches this agent.
-      if (next === 'in-process') this.restoreDefaultModel(entry)
+      // The same write this path's own entry point makes, in the same place: the
+      // session is being handed to another engine, so its model seat moves with
+      // it. Done BEFORE the release, because the release is what detaches this
+      // agent — the host's next resolve reads the selection then, and the
+      // successor's own build installs it in place.
+      this.moveModelSelection(entry, next)
       void this.release(entry)
     })
   }
 
   /**
-   * Hand one session's model selection back to the deployment default, because
-   * the switch under way is putting it onto the harness loop.
+   * Hand one session's model seat to the engine it is being switched to.
    *
-   * A session's selection follows its engine — a hosted engine logs its own
-   * provider label into `request/header`, and the host derives the selection
-   * from there — and that label is served only by this plugin's placeholder
-   * route, which fails loud (`HOSTED_ENGINE_ROUTE`) when a real model call
-   * reaches it. The harness loop does make real calls, so the switch writes the
-   * deployment default instead. The write, its trigger-agnostic rationale, and
-   * why a switch ONTO a hosted engine is left alone are in
-   * `model-selection-reset.ts`; this method is only the router's half.
+   * A session's selection follows its engine: a hosted engine owns its model
+   * natively and the shared provider label it logs is served only by this
+   * plugin's placeholder route (which fails loud, `HOSTED_ENGINE_ROUTE`, when a
+   * real model call reaches it), while the harness loop DOES make real calls and therefore needs
+   * a real model selected. So a switch moves the seat — the shared
+   * `external/default` for a hosted engine, the deployment default for the
+   * harness loop. A selection that
+   * names a real model of its own is never touched: the model notice the browser
+   * half shows beside a hosted engine says that selection is inert there, not
+   * that it is gone. The write itself, its judgements, and why an engine change
+   * with no logged selection writes nothing are in `model-selection-reset.ts`;
+   * this method is only the router's half.
    *
    * The selection is written at the moment of the switch, not at the moment the
-   * engine changes: the switch releases the session's agent and the page reloads
-   * ({@link move}), so the engine really does change at the session's next build
-   * — and this write is what that build reads.
-   * @param entry - the live session being switched onto the harness loop.
+   * engine changes. Between two hosted engines the move is an in-place swap whose
+   * `setup` installs the selection onto the successor, and for anything involving
+   * the harness loop the switch releases the session's agent and the page reloads
+   * ({@link move}) — either way the write has to be in the log before the move
+   * runs, which is what this ordering buys.
+   * @param entry - the live session being switched.
+   * @param engine - the engine it is being switched to.
    * @returns nothing; a selection this process cannot name is skipped with one
    *   warning, and the session keeps what its log records.
    */
-  private restoreDefaultModel(entry: LiveSession): void {
-    this.selectionReset.resetFor(entry.agent.session)
+  private moveModelSelection(entry: LiveSession, engine: LoopEngineId): void {
+    this.selectionReset.resetFor(entry.agent.session, engine)
   }
+}
+
+/**
+ * The `agentOptions` a hosted engine's session is handed: the seat that session
+ * selects.
+ *
+ * The engines do not read it — each owns its model natively — but the two
+ * answers travel together, so a hosted agent's options name the same route its
+ * session's log does (`external/default`, the one label all four engines share)
+ * instead of the deployment default that seat replaced. In-process sessions
+ * keep the caller's own options, which ARE their route (`agent-loop/src/agent.ts`
+ * `prepareRequest`).
+ * @param engine - the hosted engine building the session.
+ * @returns the loop options for one of its sessions.
+ */
+function engineRouteOptions(engine: HostedEngineId): AgentOptions {
+  return { provider: hostedRouteLabelOf(engine), model: HOSTED_DEFAULT_MODEL }
 }
 
 /** One refusal a session's engine switch produced, as data. */

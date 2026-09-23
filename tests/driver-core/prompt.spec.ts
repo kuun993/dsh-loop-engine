@@ -19,7 +19,7 @@ function user(text: string): UserMessage {
 
 /** One assistant message carrying `text`. */
 function assistant(text: string): Message {
-  return createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'kimi', model: 'kimi-native' } }) as Message
+  return createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'kimi', model: 'default' } }) as Message
 }
 
 describe('engineSlashPrompt', () => {

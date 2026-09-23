@@ -66,8 +66,8 @@ export function kimiBinResolver(configBin?: string): string {
 /**
  * Build the persistent `kimi acp` argv. The ACP child stays alive across steps
  * and is spoken to over JSON-RPC on stdio — the prompt is a request body, not an
- * argv positional — so there is no command-line length ceiling and no model flag
- * (Kimi owns model selection natively via its own config).
+ * argv positional — so there is no command-line length ceiling and no model flag:
+ * a model is selected per ACP session through `session/set_model`, not argv.
  * @param bin - the Kimi executable.
  * @returns the argv, `argv[0]` being the executable.
  */

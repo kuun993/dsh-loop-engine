@@ -11,9 +11,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { Readable, Writable } from 'node:stream'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -37,6 +35,7 @@ import {
   MANAGED_BLOCK_BEGIN,
   MANAGED_BLOCK_END,
 } from '../src/patch-manager.ts'
+import { HOSTED_ROUTE_LABEL } from '../src/agent-preset-ids.ts'
 import { HostedEngineRouteAdapter } from '../src/provider-route.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
@@ -709,17 +708,22 @@ describe('apply provider routes', () => {
   const providerIds = (ctx: Context): string[] =>
     (ctx.get('llm') as LlmRuntime).listProviders().map(provider => provider.id).sort()
 
-  it('serves every hosted engine label and withdraws them on unload', async () => {
+  it('serves the one shared label and withdraws it on unload', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const { ctx } = await boot({ [NS]: { engine: 'in-process' } })
     const fiber = await mountPlugin(ctx, { patchPath: path })
 
-    // Registration is synchronous once the llm registry is up: every session
-    // may select any engine, so all four labels are served at once.
-    expect(providerIds(ctx)).toEqual(['claude-code', 'codex', 'kimi', 'pi'])
-    // The placeholders advertise no models, so the picker catalog is unchanged.
-    await expect((ctx.get('llm') as LlmRuntime).listModels('kimi')).resolves.toEqual([])
+    // Registration is synchronous once the llm registry is up. ONE route, not
+    // four: all engines log the same label, and the model catalog is per Host
+    // generation, so a route per engine would show four identical groups.
+    expect(providerIds(ctx)).toEqual([HOSTED_ROUTE_LABEL])
+    // The placeholder advertises the one `default` entry every engine logs into
+    // a session's request/header — the pair the picker resolves
+    // (`tests/provider-route.spec.ts`).
+    await expect((ctx.get('llm') as LlmRuntime).listModels(HOSTED_ROUTE_LABEL)).resolves.toEqual([
+      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default' },
+    ])
 
     await fiber.dispose()
     expect(providerIds(ctx)).toEqual([])
@@ -730,16 +734,16 @@ describe('apply provider routes', () => {
     const path = join(dir, 'cordis.patch.yml')
     const { ctx } = await boot({ [NS]: { engine: 'in-process' } })
     // A deployment adapter already serving the label needs no placeholder.
-    ;(ctx.get('llm') as LlmRuntime).registerAdapter(['kimi'], new HostedEngineRouteAdapter('kimi'))
+    ;(ctx.get('llm') as LlmRuntime).registerAdapter([HOSTED_ROUTE_LABEL], new HostedEngineRouteAdapter())
     const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     const fiber = await mountPlugin(ctx, { patchPath: path })
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('provider route "kimi" is already served'))
-    expect(providerIds(ctx)).toEqual(['claude-code', 'codex', 'kimi', 'pi'])
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`provider route "${HOSTED_ROUTE_LABEL}" is already served`))
+    expect(providerIds(ctx)).toEqual([HOSTED_ROUTE_LABEL])
 
     // Unloading must not withdraw a route the plugin does not own.
     await fiber.dispose()
-    expect(providerIds(ctx)).toEqual(['kimi'])
+    expect(providerIds(ctx)).toEqual([HOSTED_ROUTE_LABEL])
   })
 
   it('treats a duplicate adapter by its error code when the message has been reworded', async () => {
@@ -754,7 +758,7 @@ describe('apply provider routes', () => {
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('provider route "kimi" is already served'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`provider route "${HOSTED_ROUTE_LABEL}" is already served`))
     expect(errorSpy.mock.calls.some(call => String(call[0]).includes('registration failed'))).toBe(false)
   })
 
@@ -767,7 +771,7 @@ describe('apply provider routes', () => {
     await mountPlugin(ctx, { patchPath: path })
 
     expect(errorSpy)
-      .toHaveBeenCalledWith(expect.stringContaining('provider route "kimi" registration failed: Error: registry read-only'))
+      .toHaveBeenCalledWith(expect.stringContaining(`provider route "${HOSTED_ROUTE_LABEL}" registration failed: Error: registry read-only`))
   })
 
   it('registers once the llm service appears within the retry window', async () => {
@@ -780,7 +784,7 @@ describe('apply provider routes', () => {
 
     await ctx.plugin(LlmRuntime)
     await vi.waitFor(() => {
-      expect(providerIds(ctx)).toEqual(['claude-code', 'codex', 'kimi', 'pi'])
+      expect(providerIds(ctx)).toEqual([HOSTED_ROUTE_LABEL])
     })
   })
 
@@ -1247,50 +1251,29 @@ describe('apply router mount', () => {
     expect(ctx.get('agentLoopKimi')!.config.bin).not.toBe('/fake/kimi')
   })
 
-  it('serves the probed Pi catalog through the pi provider route', async () => {
+  it('mounts the pi engine without probing for models', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const { ctx } = await boot({ [NS]: { engine: 'in-process' } }, { projections: true })
-    // The Pi runtime's `pi --list-models` probe runs through the subprocess
-    // seam; serving a canned child keeps the catalog independent of a real pi
-    // install while still exercising the catalog holder → route wiring.
-    vi.spyOn(ctx.subprocess, 'spawn').mockImplementation(() => {
-      const stdout = new Readable({ read: () => {} })
-      const stderr = new Readable({ read: () => {} })
-      queueMicrotask(() => {
-        stdout.push('provider   model\nanthropic  claude-opus-4-7\n')
-        stdout.push(null)
-        stderr.push(null)
-      })
-      return {
-        pid: 1,
-        stdin: new Writable({ write: (_chunk, _encoding, callback) => { callback() } }),
-        stdout,
-        stderr,
-        collected: {} as SubprocessHandle['collected'],
-        done: Promise.resolve({ exitCode: 0, signal: null }),
-        terminate: vi.fn(),
-        waitForExit: vi.fn(async () => true),
-      } as SubprocessHandle
-    })
+    // The pi engine used to spawn `pi --list-models` on construction, to fill the
+    // route adapter's catalog with pi's own models. The route advertises the
+    // engine's single `default` entry instead — the label the driver logs — so
+    // mounting the engine starts no child of its own.
+    const spawnSpy = vi.spyOn(ctx.subprocess, 'spawn')
     await mountPlugin(ctx, { patchPath: path })
     await vi.waitFor(() => {
       expect(ctx.get('agentLoop')).toBeDefined()
     })
 
     const handle = await ctx.agents.create({
-      sessionId: SessionId('hosted-pi-catalog'),
+      sessionId: SessionId('hosted-pi-no-probe'),
       meta: { agentPreset: enginePresetId('pi') },
     })
-    // The route adapter reads the holder through a live closure, so the probe's
-    // asynchronous result reaches the picker without a re-registration.
-    const llm = ctx.get('llm') as LlmRuntime
-    await vi.waitFor(async () => {
-      const models = await llm.listModels('pi')
-      expect(models.map(model => model.id)).toEqual(['anthropic/claude-opus-4-7'])
-    })
-    const spawnSpec = vi.mocked(ctx.subprocess.spawn).mock.calls[0]?.[0]
-    expect(spawnSpec?.argv).toEqual(expect.arrayContaining(['--list-models', '--mode', 'rpc']))
+    expect(spawnSpy).not.toHaveBeenCalled()
+    // The route still serves the shared label, with exactly its one entry.
+    await expect((ctx.get('llm') as LlmRuntime).listModels(HOSTED_ROUTE_LABEL)).resolves.toEqual([
+      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default' },
+    ])
 
     await handle.dispose()
   })

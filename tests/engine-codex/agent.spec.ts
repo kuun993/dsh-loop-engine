@@ -12,6 +12,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 
 const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
 
@@ -167,7 +168,12 @@ function turnCompleted(usage: typeof TURN_USAGE = TURN_USAGE): AppServerEvent {
 }
 
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  return await mountHarness(loopPlugin, config, 'none')
+  const ctx = await mountHarness(loopPlugin, config, 'none')
+  // The host's `modelSelection` fold, so a `model/selection` appended to the
+  // session is read back as the pending selection the driver resolves a model
+  // from — the same read the host's own `selectionFor` makes.
+  ctx.provide('sessionProjections', modelSelectionProjections(ctx))
+  return ctx
 }
 
 /** One durable assistant message event, narrowed from the session event union. */
@@ -241,7 +247,7 @@ describe('CodexAgent turn mapping', () => {
         data: {
           message: {
             role: 'assistant',
-            source: { kind: 'model', provider: 'codex' },
+            source: { kind: 'model', provider: 'external' },
             content: [{ type: 'text', text: 'hello world' }],
           },
           usage: {
@@ -1270,7 +1276,7 @@ describe('CodexAgent turn mapping', () => {
       expect(headers).toHaveLength(1)
       expect(headers[0]).toMatchObject({
         data: {
-          header: { config: { provider: 'codex', model: 'codex-native' } },
+          header: { config: { provider: 'external', model: 'default' } },
           reason: 'initial',
         },
       })
@@ -1459,8 +1465,99 @@ describe('CodexAgent deployment pinning', () => {
       })
 
       expect(agent.session.snapshotEvents().filter(e => e.type === 'request/header')[0]).toMatchObject({
-        data: { header: { config: { provider: 'codex', model: 'gpt-5.2-codex' } } },
+        data: { header: { config: { provider: 'external', model: 'gpt-5.2-codex' } } },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('CodexAgent model selection', () => {
+  /** The `params` the Nth turn ran with. */
+  function turnParamsAt(index: number): Record<string, unknown> {
+    const turnOptions = mock.runStreamed.mock.calls[index]?.[1] as { params: Record<string, unknown> } | undefined
+    if (turnOptions === undefined) throw new Error(`no turn ran at index ${index}`)
+    return turnOptions.params
+  }
+
+  it('hands the session-selected dsh model to the thread and turn, over the deployment pin', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // A harness `session.selectModel` appends a model/selection event.
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'deepseek-flash' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // Codex takes a bare model slug, so the model half of the override
+      // travels and the session wins over the deployment's pin.
+      expect(mock.constructed[0]?.threadParams.model).toBe('deepseek-flash')
+      expect(turnParamsAt(0).model).toBe('deepseek-flash')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends no model for the hosted seat, falling back to the deployment pin', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-hosted-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // `external` means "the engine decides": the pin governs instead of the
+      // routed label being handed to the app-server.
+      expect(mock.constructed[0]?.threadParams.model).toBe('deployment-pinned')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends no model at all when the deployment pins none and no real model is selected', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-none-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect('model' in (mock.constructed[0]?.threadParams ?? {})).toBe(false)
+      expect('model' in turnParamsAt(0)).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the model on every step, so a mid-session change reaches the next thread', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('model-sel-change-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-a' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(mock.constructed[0]?.threadParams.model).toBe('model-a')
+
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-b' })
+      agent.followup(message('again'))
+      await agent.whenIdle()
+      expect(mock.constructed[1]?.threadParams.model).toBe('model-b')
     } finally {
       await ctx.fiber.dispose()
     }

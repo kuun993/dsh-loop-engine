@@ -89,7 +89,7 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
    槽位仍被基础 loop 占着时**有界重试**（常量 `:299-300`，判定与重挂 `:605-609`，语义与测试见 §3.8）：受管理块是插件在本次 `apply()` 里才写下的，要到**下一次** composition 才被读到，所以全新安装的第一次启动里基础 `agent-loop` 行还在，`agentLoop` 这个名字也还被它占着——路由器注册的正是这个名字，于是撞出来的是 duplicate service、而不是 factory 错误。判定条件是结构性的（`ctx.get('agentLoop') !== undefined`）；**其他**失败不重试，只 loud 记一条 error，插件其余部分继续活着。每次重试都换一个**新的 inject fiber**（`:607-609`）：失败那次的构造已经占住了 `agentLoop` 名字并挂上了自己的 effects，复用同一个 fiber 只会一直撞自己。窗口（40 × 50ms）耗尽同样 loud 报错。
    插件的 `inject` 本身是空数组（`src/index.ts:89`），可选宿主服务一律 `ctx.get` 惰性读取。
 8. `mountEngineRemote()`（`:638-646`）：构造本插件自己的 Remote（实现 `src/engine-remote.ts`），把**两个**端点一起注册——`loopEngine/engine`（报一条会话**实际**跑哪个引擎，外加它记下但还没采用的引擎）与 `loopEngine/select`（把一条会话换到另一个引擎），并把后备读 `engineOfSession(ctx, sessionId, engineRecords)`（`:641`）与第 6 步的持有者交给它（§4.6）。无条件注册：`TypertRemoteService` 只是注册一个带可见 `typertRemote` 绑定的 Cordis 服务，网关是在**调用时**才反射发现的，所以没有网关的 profile 一点代价都不付，卸载插件即随 fiber 撤下。
-9. `mountProviderRoutes()`：把四个 provider 标签一次性注册为占位路由（`:648`，实现 `:362-389`，见 §3.6）。
+9. `mountProviderRoutes()`：把唯一的共享 provider 标签（`external`）注册为占位路由（见 §3.6）。
 10. `authorEnginePresets()`：把四个寄宿引擎的 preset 写进用户 preset 根（`:649`，实现 `:435-454`，见 §3.5）。启动时就写而不是等第一次选中：插件在整个生命周期里持有槽位，任何会话随时可能要求任何引擎，而 roster 是从**磁盘**读 preset 的（`USER_PRESET_DIR` 的镜像常量在 `src/preset.ts:49-50`）。
 11. 注册清理 effect：置位 `disposed`、清掉各重试 timer、回收 provider 路由（`:650-657`）。
 12. `ctx.inject(['settings'], …)` 安装 `agent-loop-engine` 段，base 用 `{ engine: seedEngine, showInComposer: true }`（`:662-677`）——**settings 从 legacy seed 出发**，用户可见的默认引擎镜像升级前的选择（见 §4.2）。
@@ -98,7 +98,7 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 
 ### 3.2 为什么 `RouterLoop` 继承 `AgentLoop`
 
-`RouterLoop extends AgentLoop`（`src/router-loop.ts:172`，`AgentLoop` 是主仓 `@deepseek-ai/dsh-agent-loop` 的默认导出），构造时 `super(ctx, { agents: [] })`（`:200`）。继承而不是自己实现 `AgentFactory`，是为了**原样拿到 in-process 的全套语义**：
+`RouterLoop extends AgentLoop`（`src/router-loop.ts:174`，`AgentLoop` 是主仓 `@deepseek-ai/dsh-agent-loop` 的默认导出），构造时 `super(ctx, { agents: [] })`（`:203`）。继承而不是自己实现 `AgentFactory`，是为了**原样拿到 in-process 的全套语义**：
 
 | 被继承的东西 | 出处 |
 |---|---|
@@ -106,17 +106,17 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 | 三个 prompt 变量 `provider` / `model` / `cwd` | 主仓 `packages/core/agent-loop/src/index.ts:421-423` |
 | `agent-loop` settings 段（`maxParallelToolCalls`） | 主仓 `packages/core/agent-loop/src/index.ts:401`，namespace 常量 `:300` |
 | 工厂槽位注册（`ctx.agents.setFactory`） | 主仓 `packages/core/agent-loop/src/index.ts:420` |
-| in-process 的 create/resume 全文 | `src/router-loop.ts:282-284`、`:309-311` 的 `super.…` 调用 |
+| in-process 的 create/resume 全文 | `src/router-loop.ts:289`、`:323` 的 `super.…` 调用 |
 
-自己写一个"普通" factory 的话，这几样都得复制一遍，in-process 会话就会跑在一个与部署自带 loop 细节不同的实现上。继承让 router 只覆写两个入口点：`createAgent`（`src/router-loop.ts:278-287`）与 `resume`（`:303-314`），其余全部是主仓语义。两个入口都是**先读插件自己的记录**、再谈 preset（§3.3）。
+自己写一个"普通" factory 的话，这几样都得复制一遍，in-process 会话就会跑在一个与部署自带 loop 细节不同的实现上。继承让 router 只覆写两个入口点：`createAgent`（`src/router-loop.ts:284-292`）与 `resume`（`:316-324`），其余全部是主仓语义。两个入口都是**先读插件自己的记录**、再谈 preset（§3.3）。
 
 代价与边界：
 
 - 主仓 `agent-loop` 行的 `agents:` / `maxParallelToolCalls` **config** 随该行一起被禁用，路由器按 `{ agents: [] }` 构造（`:197`）——见 §7。
 - 引擎运行时是**普通类**，不是 cordis Service：`HostedEngineRuntime<TConfig, TAgent>`（`src/driver-core/hosted-engine-runtime.ts:132`，旧名 `HostedLoopFactory` 已不存在）实现 `AgentFactory` 的 create/resume 事务机制，但**不注册工厂、不注册投影、不注册 prompt 变量**。它仍在构造时 `ctx.reflect.provide(label, this)`（`:155`），所以 `ctx.agentLoopKimi` / `agentLoopCodex` / `agentLoopPi` / `agentLoopClaudeCode` 依旧可用（标签常量 `KIMI_ENGINE_LABEL`，`src/engine-kimi/loop.ts:58`，其余三个引擎同款），但那只是自省面，不是槽位。
-- 引擎运行时按**首次使用**构造并记忆化：`runtimeOf(engine)`（`src/router-loop.ts:223-229`），构造器由 `src/index.ts:557-568` 的 `buildEngine` 提供（把 composition 条目的旋钮转发给对应引擎）。四个引擎并发服务不同会话靠的正是这一点：agent、子进程、scope 都是按会话的，每个 runtime 只持有自己的 live agent。
+- 引擎运行时按**首次使用**构造并记忆化：`runtimeOf(engine)`（`src/router-loop.ts:226-232`），构造器由 `src/index.ts:549-560` 的 `buildEngine` 提供（把 composition 条目的旋钮转发给对应引擎）。四个引擎并发服务不同会话靠的正是这一点：agent、子进程、scope 都是按会话的，每个 runtime 只持有自己的 live agent。
 
-`RouterLoop` 内部状态只有两个 Map（`src/router-loop.ts:173-174`）：`engines`（引擎 id → runtime）与 `live`（sessionId → `LiveSession`，`:152-163`：`{ engine, agent, dispose, handover?, recipe }`）。`recipe`（`:129-138`）是"这条会话的 agent 是怎么建起来的"——`ownerCtx` / `agentOptions` / `setup` / `parentAgent`，原地换手时原样重放给继任者；`handover`（`:144-149`，只有托管引擎有）是"怎么把会话交出去"——`lifetime` + `retire`，来自 `HostedAgentHandle`（`src/driver-core/hosted-engine-runtime.ts:81-92`）。`adopt()` 每次发布后记账（`:242-261`），包一层 `dispose` 以便**先 forget 再释放**，保证陈旧句柄永远不会去拆掉重建后的 agent（`:256-258`、`:264-266`）。
+`RouterLoop` 内部状态只有两个 Map（`src/router-loop.ts:175-176`）：`engines`（引擎 id → runtime）与 `live`（sessionId → `LiveSession`，`:153-165`：`{ engine, agent, dispose, handover?, recipe }`）。`recipe`（`:131-140`）是"这条会话的 agent 是怎么建起来的"——`ownerCtx` / `agentOptions` / `setup` / `parentAgent`，原地换手时原样重放给继任者；`handover`（`:146-151`，只有托管引擎有）是"怎么把会话交出去"——`lifetime` + `retire`，来自 `HostedAgentHandle`（`src/driver-core/hosted-engine-runtime.ts:81-92`）。`adopt()` 每次发布后记账（`:245-264`），包一层 `dispose` 以便**先 forget 再释放**，保证陈旧句柄永远不会去拆掉重建后的 agent（`:257-263`、`:267-269`）。
 
 ### 3.3 引擎判定：唯一读取点与优先级
 
@@ -133,7 +133,7 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 
 **这是唯一的读取点**：路由器（`createAgent` 的父继承与 `resume`）与插件自己的 Remote（§4.6）调用的都是这个函数，所以"这条会话被哪个引擎驱动"与"这条会话被显示成跑哪个引擎"在构造上不可能不一致——它们是同一个返回值。
 
-**报告在它之上多一层「活 agent」**（`engineReportOfSession`，`src/engine-of-session.ts:128-141`）：一条**有活 agent** 的会话，它的引擎是路由器自己账上的那个（`RouterLoop.live`），因为那才是"此刻真正在跑什么"；记录只在这条会话**没有**活 agent 时充当"它跑什么"的答案，而且**永远不会**在这条会话有活 agent 且记录不同的时候被当成 `engine`——那种情况下记录以 `pending` 单独返回（形状 `SessionEngineReport`，`src/agent-preset-ids.ts:125-135`；§4.6 与 `docs/per-session-engine.md` §1.3 讲用户可见的一面）。有活 agent 时这条路**不读日志**（记录已经够回答那个字段，`src/engine-of-session.ts:137-140`）。这个组合在正常路径上不再出现（原地换手让两者一起变、释放之后没有活 agent），只剩"释放没成功"这一种来源。
+**报告在它之上多一层「活 agent」**（`engineReportOfSession`，`src/engine-of-session.ts:128-141`）：一条**有活 agent** 的会话，它的引擎是路由器自己账上的那个（`RouterLoop.live`），因为那才是"此刻真正在跑什么"；记录只在这条会话**没有**活 agent 时充当"它跑什么"的答案，而且**永远不会**在这条会话有活 agent 且记录不同的时候被当成 `engine`——那种情况下记录以 `pending` 单独返回（形状 `SessionEngineReport`，`src/agent-preset-ids.ts:158-168`；§4.6 与 `docs/per-session-engine.md` §1.3 讲用户可见的一面）。有活 agent 时这条路**不读日志**（记录已经够回答那个字段，`src/engine-of-session.ts:137-140`）。这个组合在正常路径上不再出现（原地换手让两者一起变、释放之后没有活 agent），只剩"释放没成功"这一种来源。
 
 **preset 只在没有记录时说话**，映射仍是纯函数，定义在零导入的 `src/agent-preset-ids.ts`（node 侧与浏览器侧共用，理由 §4.1）：
 
@@ -146,21 +146,21 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 | `loop-engine`（旧版单 preset id，只出现在旧会话里） | in-process（`super`，见下） |
 | 其他（含部署自有的 `standard`） | in-process（`super`） |
 
-- `enginePresetId(engine)`：in-process → `standard`（本插件不为 harness loop 造 preset），其余 → `loop-engine-<engine>`（`src/agent-preset-ids.ts:64-65`）。
-- `engineOfPreset(presetId)`：只有本插件 own 的 id 才返回引擎，任何部署作者的 preset（含 `standard`）返回 `undefined`（`src/agent-preset-ids.ts:86-92`）。
-- `HOSTED_PRESET_PREFIX`（`:41`）与 `HOSTED_PRESET_IDS`（`src/preset.ts:59-60`）是这两条规则的常量面；单一 id 的 `HOSTED_PRESET_ID` 已不存在（每个引擎一份 preset，见 §3.5）。客户端读**同一个函数**（`sessionEngineOf`，`src/agent-preset-ids.ts:264`）来回答"这条会话在跑什么"（§4.3）。
-- `LEGACY_HOSTED_PRESET_ID = 'loop-engine'`（`src/agent-preset-ids.ts:55`）是**只读的历史**，不是路由输入：旧版本给所有托管引擎共用这一个 preset，所以它既不是本插件的一个引擎 id（`engineOfPreset` 读作 `undefined`，路由按 in-process 跑），也没法说出当时用的是哪个引擎。因此路由表里它落在 in-process 一行，而浏览器侧单独把它标成"旧版托管引擎"（§4.3）——两边都对，说的是两件事。
+- `enginePresetId(engine)`：in-process → `standard`（本插件不为 harness loop 造 preset），其余 → `loop-engine-<engine>`（`src/agent-preset-ids.ts:97-98`）。
+- `engineOfPreset(presetId)`：只有本插件 own 的 id 才返回引擎，任何部署作者的 preset（含 `standard`）返回 `undefined`（`src/agent-preset-ids.ts:119-125`）。
+- `HOSTED_PRESET_PREFIX`（`:41`）与 `HOSTED_PRESET_IDS`（`src/preset.ts:59-60`）是这两条规则的常量面；单一 id 的 `HOSTED_PRESET_ID` 已不存在（每个引擎一份 preset，见 §3.5）。客户端读**同一个函数**（`sessionEngineOf`，`src/agent-preset-ids.ts:297`）来回答"这条会话在跑什么"（§4.3）。
+- `LEGACY_HOSTED_PRESET_ID = 'loop-engine'`（`src/agent-preset-ids.ts:88`）是**只读的历史**，不是路由输入：旧版本给所有托管引擎共用这一个 preset，所以它既不是本插件的一个引擎 id（`engineOfPreset` 读作 `undefined`，路由按 in-process 跑），也没法说出当时用的是哪个引擎。因此路由表里它落在 in-process 一行，而浏览器侧单独把它标成"旧版托管引擎"（§4.3）——两边都对，说的是两件事。
 
 **两个入口的 precedence**（这正是"路由与 Remote 报同一个答案"的落脚点）：
 
-- `createAgent`（`src/router-loop.ts:278-287`）：**先读记录**（`this.records.engineOf(options.sessionId)`，`:280`），只有没有记录时才看调用方带来的 `meta.agentPreset` 与父继承（`:281`）。docstring 里写明了理由：已有记录的会话必须按记录里的引擎构建，否则路由与 Remote 会对同一条会话给出不同的答案。
+- `createAgent`（`src/router-loop.ts:284-292`）：**先读记录**（`this.records.engineOf(options.sessionId)`，`:286`），只有没有记录时才看调用方带来的 `meta.agentPreset` 与父继承（`:287`）。docstring 里写明了理由：已有记录的会话必须按记录里的引擎构建，否则路由与 Remote 会对同一条会话给出不同的答案。
 - `resume`（`:303-314`）：读 `engineOfSession`（`:305-307`），没有则按父继承（`:308`）。这是"关掉浏览器明天再来"不会把引擎悄悄变回 in-process 的原因。
 - 父继承本身在 `engineFor`（`:206-217`）：preset 不属于本插件、且有活父 agent 时，读父会话的 `engineOfSession` 来**继承**引擎（`:212-215`），这样被委派的子会话不会悄悄换引擎；都没有 → `in-process`。
 - `createAgent` 只拿到 `CreateAgentOptions`，其中唯一"每会话一条"且会到达工厂的字段就是 `meta.agentPreset`（主仓 `packages/core/agent/src/index.ts:84`）；它由 API Session 的 `composeAgent` 解析后填入（主仓 `packages/api/session-controller/src/agent.ts:374-390`，写入点 `:484`）。这是 preset 仍然决定引擎的**唯一**路径：新会话（还没有插件记录）。
 
 ### 3.4 命令/技能面按 agent scope 隔离
 
-"引擎自己拥有会话的命令菜单与技能目录"这件事，现在是**在 agent 创建时按 agent 注册**的：`registerEngineSurface(agent, engine, warn)`（`src/engine-surface.ts:77-97`），由 `RouterLoop.adopt` 对寄宿引擎调用（`src/router-loop.ts:242`，in-process 不调）。
+"引擎自己拥有会话的命令菜单与技能目录"这件事，现在是**在 agent 创建时按 agent 注册**的：`registerEngineSurface(agent, engine, warn)`（`src/engine-surface.ts:77-97`），由 `RouterLoop.adopt` 对寄宿引擎调用（`src/router-loop.ts:246`，in-process 不调）。
 
 关键在于**用 `agent.ctx` 注册就足够了**：
 
@@ -197,88 +197,93 @@ preset 现在只承担一件事：**agent-plane 组合**——剥掉 dsh 原生�
 - `preset.yml` 是人读元数据：`Claude Code` / `Codex` / `Pi` / `Kimi Code`（文本 `src/preset.ts:89-92`，名字表 `:95-100`，写盘 `:207`）。这些名字就是 harness 会话头 preset 标签显示的文字（主仓 `packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx:46-62`）。**注意它显示的是 preset，不是引擎**：换过引擎的会话，preset 仍然是创建时那一份（§7）。
 - **每次启动都从当时的 `standard` 重新生成**：磁盘文本永远不是权威，harness 升级改了 `standard` 就自然流过；`writeIfDifferent`（`src/preset.ts:171-183`）让内容一致的目录不动盘，避免 standing mount 的 file-stamp 被骗。
 
-**默认引擎 = roster 的默认 preset**。`steerPresetDefault(engine)`（`src/index.ts:504-528`）把 `agent-presets` settings 命名空间的 `default` 字段指向 `enginePresetId(engine)`：
+**默认引擎 = roster 的默认 preset**。`steerPresetDefault(engine)`（`src/index.ts:496-520`）把 `agent-presets` settings 命名空间的 `default` 字段指向 `enginePresetId(engine)`：
 
-- 用 settings 层（`settings.mutate(ns, [op])`，`:480`，经 `mutatePresetDefault` `:465-491`）而不是 patch `agent-presets` 行的 config：patch 的 config 覆盖是**整体替换**语义，会顺带抹掉部署方在同行配置的 `roots`；settings 层天然叠在 config 之上、可 unset 还原。
+- 用 settings 层（`settings.mutate(ns, [op])`，`:472`，经 `mutatePresetDefault` `:457-483`）而不是 patch `agent-presets` 行的 config：patch 的 config 覆盖是**整体替换**语义，会顺带抹掉部署方在同行配置的 `roots`；settings 层天然叠在 config 之上、可 unset 还原。
 - roster 的 `defaultId` 是**每次调用现读**（主仓 `packages/preset/agent-presets/src/index.ts:240-242`），所以改默认只影响之后新建的会话，正在跑的会话保持自己 join 的 preset。
-- `in-process` 把被替换的部署默认值 set 回去（`savedPresetDefault`，声明 `src/index.ts:494`，还原 `:506-512`）；只有在当前默认不是本插件的 id 时才记下来（`:525`），所以托管引擎之间互切不会用受管 id 覆盖部署值。
-- **authoring 失败就不导默认值**：preset 不在磁盘上时把默认指过去会让每个新会话 loud 失败，所以 steering 等 `settled` 成功（`:516-519`）。记忆化与重试见 §3.8。
+- `in-process` 把被替换的部署默认值 set 回去（`savedPresetDefault`，声明 `src/index.ts:486`，还原 `:498-504`）；只有在当前默认不是本插件的 id 时才记下来（`:517`），所以托管引擎之间互切不会用受管 id 覆盖部署值。
+- **authoring 失败就不导默认值**：preset 不在磁盘上时把默认指过去会让每个新会话 loud 失败，所以 steering 等 `settled` 成功（`:508-511`）。记忆化与重试见 §3.8。
 
-### 3.6 provider 路由占位：四个标签常驻
+### 3.6 provider 路由占位：一条共享的 external 标签
 
-四个寄宿引擎各自把固定的 provider 标签写进会话的 `request/header`。宿主侧从**最新一条 header** 推导会话的模型选择（主仓 `packages/api/session-controller/src/agent.ts:290`），并在 `session.prompt` 起点拒绝"没有任何 adapter 服务的 provider"（主仓 `packages/api/session-controller/src/commands.ts:323-328`，判定 `routeServed` 在 `:653-655`，读 `ctx.llm.listProviders()`）。两个事实叠加：首轮 prompt 时空会话回落到部署默认模型（有 adapter，放行）并落一条 header；**第二轮**读到的会话选择就变成了引擎自己的标签——必被拒（`session/model-unavailable`）。这就是"第一次对话正常、第二次报错"的根因。
+四个寄宿引擎都把**同一个** provider 标签写进会话的 `request/header`。宿主侧从**最新一条 header** 推导会话的模型选择（主仓 `packages/api/session-controller/src/agent.ts:290`），并在 `session.prompt` 起点拒绝"没有任何 adapter 服务的 provider"（主仓 `packages/api/session-controller/src/commands.ts:323-328`，判定 `routeServed` 在 `:653-655`，读 `ctx.llm.listProviders()`）。两个事实叠加：首轮 prompt 时空会话回落到部署默认模型（有 adapter，放行）并落一条 header；**第二轮**读到的会话选择就变成了引擎自己的标签——必被拒（`session/model-unavailable`）。这就是"第一次对话正常、第二次报错"的根因。
 
-插件的应对是**四个标签同时常驻**（`HOSTED_PROVIDER_ROUTES`，`src/provider-route.ts:27-32`；`mountProviderRoutes`，`src/index.ts:362-389`）：不再只服务"当前挂载的那一个"，因为任何会话都可能选中任何引擎，而四个引擎的会话在同一个进程里并发。
+插件的应对是注册**一条**共享占位路由（`HOSTED_ROUTE_LABEL = 'external'`，`src/agent-preset-ids.ts`；`mountProviderRoutes`，`src/index.ts`）。**为什么不是四个**：浏览器模型目录是整个 Host **代际**共享、不按会话区分的事实（主仓 `packages/api/session-controller/src/catalog.ts:16` "Build the browser model catalog without requiring a Session"，函数体 `:17-46` 遍历 `ctx.llm.listProviders()`），所以任何一条会话的菜单都能一次列出全部 provider 组——四个引擎各占一个标签时用户会看到**四条一模一样的 `default`**。折叠成一条后，托管引擎在菜单里只占**一个**分组。
 
-- **目录零污染（pi 除外）**：`HostedEngineRouteAdapter` 默认广告空目录，宿主构建目录时会丢弃不广告任何模型的组（主仓 `packages/api/session-controller/src/catalog.ts:64`），所以选择器看不到这些路由。只有 pi 例外——它注入模型探针目录（`src/index.ts:373`，背景见 `docs/engine-pi.md`）。
-- `stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`（`src/provider-route.ts:81-86`）：寄宿引擎原生持有模型，真有查询路由到这里就是接线 bug。
-- **冲突识别结构性优先**：部署方自己的 adapter 已占标签时，llm registry 抛 `LlmError`，code 为 `DUPLICATE_ADAPTER`（主仓 `packages/llm/llm/src/index.ts:429`），据此 warn 跳过且不回收别人的路由；`already registered` 的消息匹配只是无 code registry 的兜底（`src/index.ts:376-387`）。
-- **生命周期跟随插件而不是引擎**：注册在 `mountProviderRoutes`，回收在 `releaseRoutes`（`:392-397`，由清理 effect 调用 `:650-657`）。
+- **一条路由，广告恰好一条目录条目**：`HostedEngineRouteAdapter.listModels`（`src/provider-route.ts`）返回 `[{ provider: 'external', id: 'default', name: 'default' }]`，`default` 就是 `HOSTED_DEFAULT_MODEL`（`src/agent-preset-ids.ts`）——**也是四个驱动写进 `request/header` 的模型标签**（各自的 `PROVIDER` 常量都等于 `HOSTED_ROUTE_LABEL`，如 `src/engine-claude/agent.ts:60`、`src/engine-codex/agent.ts:68`、`src/engine-kimi/agent.ts:67`、`src/engine-pi/agent.ts:55`；claude 那条 reasoning-only 兜底消息同值）。id 与标签必须**逐字相同**：选择器拿目录条目的 `model.id` 与宿主推导出的 `(provider, model)` 比对（主仓 `packages/client/ui-model-selection/src/client/ModelSelect.tsx` 的 `choices`/`selectedIndex`），不一致就回落渲染 `${provider}/${model}` 原样串——用户看到的"不存在的模型" `kimi/kimi-native` 就是这么来的。id 对齐之后，模型座显示引擎自己的词 **`default`**，那一条也是菜单里高亮的那一条。
+- **id 与显示名是同一个 ASCII 串 `external`**：`external` 会写进每条会话的 `request/header`、进选择、参与比较，并且 `providerInfo().id` 必须等于注册时的 provider（主仓 `packages/llm/llm/src/index.ts:431-434` 的结构校验），所以用 ASCII。显示名走 `providerInfo().name`（主仓 `:206-208`），被折进目录的 `group.name`（主仓 `packages/api/session-controller/src/catalog.ts` `group: { id: provider.id, name: provider.name, ... }`）——picker 原样渲染、**没有 i18n 钩子**，所以每个语言看到的都是同一个固定串，这里就取与 id 相同的 `external`，不给它再起一个会随语言漂移的名字。模型条目的 `LlmModelInfo.name` 同样如此，固定为 `default`，含义由插件自己的界面文案解释（§4.5 / `src/client/locales.ts:115`）。
+- **旧标签仍被"认出是托管路由"**：`isHostedProviderRoute`（`src/provider-route.ts`）的判据是"本插件服务过的标签"，包含当前注册的 `external` **与**早期逐引擎写下的四个标签（`claude-code` / `codex` / `pi` / `kimi`）。注册的只有 `external` 一条；旧四家只是为了判定与重置而保留——一条 header 仍是 `kimi/default` 的老会话，切回 `in-process` 时必须能被 `ModelSelectionReset` 重置成部署默认，否则 `kimi` 现在没有任何 adapter 服务，宿主 `routeServed` 会直接拒掉那一轮（`model-unavailable`）。
+- `stream` 被调到即 loud 抛 `HOSTED_ENGINE_ROUTE`：寄宿引擎的模型来自引擎自己的原生配置、或这条会话透传给它的模型（见下一条），**不是**这个路由，真有查询路由到这里就是接线 bug。
+- **会话选的真实 dsh 模型会被透传给引擎**：四个驱动的每一个 step 都重读这条会话当前的选择（`sessionModelOverrideOf`，`src/driver-core/session-model.ts`：宿主读法——投影 `modelSelection.pending` 优先，否则最新 `request/header` 的 config——套一个判据 `sessionModelOverride`），选择指着一条**真实 dsh 模型**（provider 既不是注册的 `external`，也不是旧四家 `kimi` / `claude-code` / `codex` / `pi`）时就把它下发给引擎：pi 的 `--model <provider>/<model>`（pi 的 `--model` 接受 `"provider/id"` 复合串，实测 `pi --help`）、claude-code 的 `Options.model`（`src/engine-claude/sdk.ts:102` 的 `model`）、codex 的 `thread/start` 与 `turn/start` 的 `model`、kimi 的 ACP `session/set_model { sessionId, modelId }`。**能不能用取决于引擎**（它用自己那份凭据与 provider 配置去解析），引擎拒绝就报错——kimi 的回包是错误帧时那一步直接失败，插件不吞。选择是 `external/default`（菜单里那条 `default`，即"交回引擎自己决定"）或日志里没有任何选择时，**一个模型参数都不下发**，用引擎原生默认或部署 composition 里钉住的 `config.model`（**会话选择优先，pin 只是回落**）。粒度是**每个驱动 step**（一次 query / 一个新 thread / 一次 `session/new`），所以会话中途换模型下一步生效。
+- **冲突识别结构性优先**：部署方自己的 adapter 已占 `external` 时，llm registry 抛 `LlmError`，code 为 `DUPLICATE_ADAPTER`（主仓 `packages/llm/llm/src/index.ts`），据此 warn 跳过且不回收别人的路由；`already registered` 的消息匹配只是无 code registry 的兜底（`src/index.ts` `mountProviderRoutes`）。
+- **生命周期跟随插件而不是引擎**：注册在 `mountProviderRoutes`，回收在 `releaseRoutes`（`:385-390`，由清理 effect 调用 `:643-650`）。
 - ⚠️ 0.1.5 的 `routeServed` 无条件读 `ctx.llm.listProviders()`：完全没有 llm 服务的极简 composition 也谈不上"拒绝"，因此注册是 best-effort，llm 缺席时只做有界重试（§3.8）。
-- ⚠️ 0.1.5 的 `routeServed` 无条件读 `ctx.llm.listProviders()`：完全没有 llm 服务的极简 composition 也谈不上"拒绝"，因此注册是 best-effort，llm 缺席时只做有界重试（§3.8）。
-- **标签只是补偿，切回进程内必须换掉它**：占位路由让宿主**不拒绝**这些标签，但它并不是一个模型端点——真有请求路由过来就 loud 抛 `HOSTED_ENGINE_ROUTE`；而一条曾经跑过托管引擎的会话，它的模型选择**就是**引擎标签（宿主的 `selectionFor` 取最新 `request/header` 的 config）。所以 0.1.5-rc3 起，**一条会话被切回 `in-process` 时，插件把它的模型选择写回部署默认**：追加一条 harness 自己的 `model/selection` 事件（`ModelSelectionReset.resetFor`，`src/model-selection-reset.ts:111-121`），值取 `ctx.agentDefaultModel.currentSelection()`——宿主给新会话用的就是它（主仓 `packages/core/agent-default-model/src/index.ts:90-92`，消费点 `packages/api/session-controller/src/agent.ts:490-493`）。事件的形状与宿主自己的模型选择器写下的完全一致（声明 `packages/api/session-controller/src/types.ts:34-42` 与 `:86-90`，折进 `packages/api/session-controller/src/model-selection-projection.ts:39-43` 的那一格），所以宿主下一次为这条会话装选择时读到的就是它。触发点、幂等判据与反向不写的原因见 §3.7，用户可见语义见 `docs/per-session-engine.md` §5.2。
+- **标签只是补偿，座位由插件跟着引擎写**：占位路由让宿主**不拒绝**这些标签，但它并不是一个模型端点——真有请求路由过来就 loud 抛 `HOSTED_ENGINE_ROUTE`；而一条曾经跑过托管引擎的会话，它的模型选择**就是**引擎标签（宿主的 `selectionFor` 取最新 `request/header` 的 config）。所以插件把这条**座位**写进日志，两个时刻都追加 harness 自己的 `model/selection` 事件（`ModelSelectionReset`，`src/model-selection-reset.ts`）：**换引擎时**（`resetFor`，`:171-174`）与**正在被构建时**（`guardFor`，`:191-193`，经 `src/router-loop.ts:355-378` 包裹的 `setup`，在宿主装选择之前落盘）。写什么由**目标引擎**定：托管引擎就是共享的 `external/default`（= 它自己写进 header 的那个词，`HOSTED_DEFAULT_MODEL`），harness loop 就是 `ctx.agentDefaultModel.currentSelection()`——宿主给新会话用的就是它（主仓 `packages/core/agent-default-model/src/index.ts:90-92`，消费点 `packages/api/session-controller/src/agent.ts:490-493`）。事件的形状与宿主自己的模型选择器写下的完全一致（声明 `packages/api/session-controller/src/types.ts:34-42` 与 `:86-90`，折进 `packages/api/session-controller/src/model-selection-projection.ts:39-43` 的那一格），所以宿主下一次为这条会话装选择时读到的就是它。会话日志里已经是一条**真实 dsh 模型**时（provider 不是托管路由标签——既不是 `external` 也不是旧四家）一条都不写——那是用户的显式选择；换引擎而日志里一条选择都没有时也不写（没有座位可改写）。默认值本身**就是**托管标签时（模型菜单把选中的 `default` 存成了部署默认，见 `docs/per-session-engine.md` §5.2）它不写这个值，改取部署 composition 自己声明的默认模型（`configuredDefault`，`:347-354`，读 settings 描述符的 `base` 层）并如实报一次 warn。触发点、三条判据见 §3.7，用户可见语义见 `docs/per-session-engine.md` §5.2。
 
 ### 3.7 会话中途换引擎：原地换手、延后生效、以及剩下的 release
 
-"引擎在会话创建/空白期确定，之后锁定"这条旧边界已经不存在。搬动一条会话的入口是插件自己的 Remote 端点 `loopEngine/select`（§4.6），它把请求交给 `RouterLoop.selectEngine(sessionId, engine)`（`src/router-loop.ts:378-415`）。这正是 preset 通道**表达不了**的那一半——harness 自己的 `AgentPresets.select` → `swap()` 在会话开始后直接拒绝（主仓 `packages/preset/agent-presets/src/index.ts:709-726`，判定 `:713-721`，见 §7）。
+"引擎在会话创建/空白期确定，之后锁定"这条旧边界已经不存在。搬动一条会话的入口是插件自己的 Remote 端点 `loopEngine/select`（§4.6），它把请求交给 `RouterLoop.selectEngine(sessionId, engine)`（`src/router-loop.ts:430-468`）。这正是 preset 通道**表达不了**的那一半——harness 自己的 `AgentPresets.select` → `swap()` 在会话开始后直接拒绝（主仓 `packages/preset/agent-presets/src/index.ts:709-726`，判定 `:713-721`，见 §7）。
 
-**0.1.5-rc3 起，换引擎不再拆会话——涉及 in-process 时改为"释放 + 页面重载"。** 一条会话与另一个**托管**引擎之间是**原地换手**：`Session` 对象、store 条目、写句柄全部保留，只有 agent 被换掉。与 in-process 之间的两个方向做不到原地换手（harness 的硬边界，取证见 `docs/per-session-engine.md` §5.4），所以走另一条路：**写记录 → 释放这条会话的 agent（会话变冷）→ 回包 `reload: true` → 客户端重载页面并自动回到这条会话 → 宿主按记录构建它**。**进程不重启**，而"释放"这件事之所以现在可以做，正是因为紧接着的那次重载会清掉 `session/disposed` 在客户端留下的状态（`api-session/removed` → 会话行被删、当前会话清空、`removed` 标记无复位路径；完整链路见 `docs/per-session-engine.md` §5.2/§5.4）。**客户端在发这一类的请求之前会先弹确认框**（它自己就能判出哪些切换会重载：目标引擎与报告里的实际引擎恰好一边是 `in-process`，`switchNeedsReload`，`src/client/session-engine.ts:250-253`），托管引擎之间不弹（§4.4）。
+**0.1.5-rc3 起，换引擎不再拆会话——涉及 in-process 时改为"释放 + 页面重载"。** 一条会话与另一个**托管**引擎之间是**原地换手**：`Session` 对象、store 条目、写句柄全部保留，只有 agent 被换掉。与 in-process 之间的两个方向做不到原地换手（harness 的硬边界，取证见 `docs/per-session-engine.md` §5.4），所以走另一条路：**写记录 → 模型座位跟着换 → 释放这条会话的 agent（会话变冷）→ 回包 `reload: true` → 客户端重载页面并自动回到这条会话 → 宿主按记录构建它**。**进程不重启**，而"释放"这件事之所以现在可以做，正是因为紧接着的那次重载会清掉 `session/disposed` 在客户端留下的状态（`api-session/removed` → 会话行被删、当前会话清空、`removed` 标记无复位路径；完整链路见 `docs/per-session-engine.md` §5.2/§5.4）。**客户端在发这一类的请求之前会先弹确认框**（它自己就能判出哪些切换会重载：目标引擎与报告里的实际引擎恰好一边是 `in-process`，`switchNeedsReload`，`src/client/session-engine.ts:250-253`），托管引擎之间不弹（§4.4）。
 
-`selectEngine` 的骨架 = 一张拒绝清单 + 一次记账 + 一次模型选择重置 + 一次接管。**拒绝一律是数据**，由 `refuse(code, reason)` 造（`:634-636`）——一个**原因码**加一句宿主自己的英文原话，不是抛出的错误，因为每一种都是可预期的会话状态。码的枚举在 `src/agent-preset-ids.ts:165-190`（`LoopEngineRefusalCode`），客户端按码给本地化文案、把原话留作详情（`docs/per-session-engine.md` §4.2/§5.3）：
+`selectEngine` 的骨架 = 一张拒绝清单 + 一次记账 + 一次模型座位写入 + 一次接管。**拒绝一律是数据**，由 `refuse(code, reason)` 造（`:713-715`）——一个**原因码**加一句宿主自己的英文原话，不是抛出的错误，因为每一种都是可预期的会话状态。码的枚举在 `src/agent-preset-ids.ts:198-223`（`LoopEngineRefusalCode`），客户端按码给本地化文案、把原话留作详情（`docs/per-session-engine.md` §4.2/§5.3）：
 
 | 拒绝 | code | 判定点 | 原文（`reason`） |
 |---|---|---|---|
-| 会话没打开（没有活 agent） | `session-closed` | `:379-382` | `session "…" is not open; open it first, then switch its engine` |
-| 有回合在飞 | `turn-running` | `:386-388` | `session "…" is running; switch its engine after this turn ends` |
-| subagent 会话 | `subagent-session` | `:391-393` | `session "…" is a subagent session; its agent belongs to subagent routing` |
-| 路由器没有它的活记录 | `not-driven` | `:394-400` | `session "…" is not driven by this plugin's loop router` |
-| 记录写不进去 | `record-failed` | `:401-405` | `could not record the engine of session "…": <原始错误>` |
-| 旧机器退场了、继任者没建起来 | `rebuild-failed` | `:515`（`hotSwap` 的 catch） | `could not rebuild session "…" on <引擎>: <原始错误>` |
+| 会话没打开（没有活 agent） | `session-closed` | `:431-434` | `session "…" is not open; open it first, then switch its engine` |
+| 有回合在飞 | `turn-running` | `:438-440` | `session "…" is running; switch its engine after this turn ends` |
+| subagent 会话 | `subagent-session` | `:443-445` | `session "…" is a subagent session; its agent belongs to subagent routing` |
+| 路由器没有它的活记录 | `not-driven` | `:446-452` | `session "…" is not driven by this plugin's loop router` |
+| 记录写不进去 | `record-failed` | `:453-457` | `could not record the engine of session "…": <原始错误>` |
+| 旧机器退场了、继任者没建起来 | `rebuild-failed` | `:555-569`（`hotSwap` 的 catch） | `could not rebuild session "…" on <引擎>: <原始错误>` |
 
-- **有回合在飞就不换**：一个回合的输出属于产生它的那个引擎，引擎子进程持有的上下文也不是插件能在回合中途交接的，所以这里不做抢占（`:383-385` 的注释就是这条）。原地换手沿用同一条门——这也正是"旧机器必须先完全退场再发布继任者"的前提：退场时要 `cancel({kind:'disposed'})` + `whenIdle()`，一个跑着回合的机器会在那里被中断。
-- **subagent 会话不换**：它的 agent 属于创建它的那次委派，在这里丢掉会把父会话的子任务晾在中间（`:389-393`）。
+- **有回合在飞就不换**：一个回合的输出属于产生它的那个引擎，引擎子进程持有的上下文也不是插件能在回合中途交接的，所以这里不做抢占（`:435-437` 的注释就是这条）。原地换手沿用同一条门——这也正是"旧机器必须先完全退场再发布继任者"的前提：退场时要 `cancel({kind:'disposed'})` + `whenIdle()`，一个跑着回合的机器会在那里被中断。
+- **subagent 会话不换**：它的 agent 属于创建它的那次委派，在这里丢掉会把父会话的子任务晾在中间（`:441-445`）。
 - **"路由器没有它的活记录"是重试窗口**：基础 loop 还占着槽位、插件的路由器还在重试挂载时，agent 存在，但它不是路由器能重建的那个（§3.1 第 7 步）。**`router-unmounted`**（`src/engine-remote.ts:246-252`）是它在端点上的兄弟：`loopEngine/select` 在路由器还没挂上时就回这条码，两者对用户是同一件事，所以客户端共用一句文案。
 - **`rebuild-failed` 是唯一"半途失败"的码**：记录已经写下、旧机器已经退场，继任者没建起来，于是这条会话被放冷并按记录重建（§3.7 下面那段）；它的文案必须说清这一点，不能只说"失败了"。
 
-通过的路径，顺序是**载荷**（`:401-414`）：
+通过的路径，顺序是**载荷**（`:452-467`）：
 
-1. **先写记录**（`this.records.record(sessionId, engine)`，`:402`）——记录是路由器、Remote、宿主的下一次 resolve 共同读的那个答案，写不进去就按拒绝回答（`record-failed`），记录与 agent 都保持原样（`:401-405`）；
-2. **切回进程内，就把这条会话的模型选择写回部署默认**（`if (engine === 'in-process') this.restoreDefaultModel(entry)`，`:406-412`）——会话此前的选择就是引擎标签（§3.6），而那个标签只有本插件的占位路由服务、真有模型调用过来会 loud 抛 `HOSTED_ENGINE_ROUTE`，而进程内这一侧是**真的**要调模型，所以这次切换连着把选择换掉。反向（切到托管引擎）**不写**：那些引擎原生持有模型、也不读这条选择，唯一读它的 pi 驱动会把不认识的模型丢掉。写入形状、幂等判据与跳过条件在 `src/model-selection-reset.ts:111-203`，这一处与下面 preset 那条路径共用同一个方法（`src/router-loop.ts:628-630`）；
-3. **活 agent 的引擎没变就直接返回**（`:413`）——这条比较用的是**活 agent 的引擎**而不是记录：释放失败时记录和活 agent 会不一致（见下），而此时"这条会话跑什么"的答案是活 agent；用记录做这个判断会让"重新选中当前实际运行的引擎"变成一次把同一个 agent 拆掉重建的空转。已经跑在目标引擎上的会话**只记账、不重建**：记录是用户的显式选择，而替换一个没变的 agent 只会让这条会话白白重启一次。**这条也是"撤回一次记录"的实现**：在释放失败留下的那个窗口里选中当前实际运行的引擎，记录就跟着活 agent 改回去；
-4. 变了就交给私有 `move`（`:414` → `:451-456`）：**两边都是托管引擎**时走 `hotSwap`（`:482-517`），**任一边是 in-process** 时 `await release(entry)`（`:549-554`）并返回 `{ ok: true, engine, reload: true }`（为什么是"释放 + 重载"见 §3.7 下面）。
+1. **先写记录**（`this.records.record(sessionId, engine)`，`:454`）——记录是路由器、Remote、宿主的下一次 resolve 共同读的那个答案，写不进去就按拒绝回答（`record-failed`），记录与 agent 都保持原样（`:452-456`）；
+2. **模型座位跟着换**（`this.moveModelSelection(entry, engine)`，`:465` → `:691-693`）——按**目标引擎**定值：托管引擎写 `<新引擎>/default`，`in-process` 写部署默认；会话日志里已经是**真实 dsh 模型**时不动（那是用户的显式选择），**一条选择都没有**时也不写（`resetFor` 的第一条判据，`src/model-selection-reset.ts:171-173`）。它必须在换手**之前**：宿主读的是日志，而继任者那次构建（原地 swap 的 `setup`、或重载之后那次 resume）紧接着就读它。写入形状、三条判据与跳过条件在 `src/model-selection-reset.ts:143-386`，这一处与下面 preset 那条路径共用同一个方法；
+3. **活 agent 的引擎没变就直接返回**（`:466`）——这条比较用的是**活 agent 的引擎**而不是记录：释放失败时记录和活 agent 会不一致（见下），而此时"这条会话跑什么"的答案是活 agent；用记录做这个判断会让"重新选中当前实际运行的引擎"变成一次把同一个 agent 拆掉重建的空转。已经跑在目标引擎上的会话**只记账、不重建**：记录是用户的显式选择，而替换一个没变的 agent 只会让这条会话白白重启一次。**这条也是"撤回一次记录"的实现**：在释放失败留下的那个窗口里选中当前实际运行的引擎，记录就跟着活 agent 改回去；
+4. 变了就交给私有 `move`（`:467` → `:504-511`）：**两边都是托管引擎**时走 `hotSwap`（`:535-570`），**任一边是 in-process** 时 `await release(entry)`（`:602-604`）并返回 `{ ok: true, engine, reload: true }`（为什么是"释放 + 重载"见 §3.7 下面）。
 
 #### 原地换手（`hotSwap`）
 
-顺序是硬要求，`src/router-loop.ts:482-517`：
+顺序是硬要求，`src/router-loop.ts:535-570`：
 
 1. **旧机器退场**（`handover.retire()`，`src/driver-core/hosted-engine-runtime.ts:274-279`）：`cancel({kind:'disposed'})` → `whenIdle()` → `scope.dispose()`，然后**只从 `ctx.agents` 摘掉自己**（`:239` 的 `detachAgent?.()`）。
 2. **会话的两个资源留在原地**：store 条目与写句柄都在 `SessionLifetime` 里（`src/driver-core/session-lifetime.ts:35-78`），随会话交给继任者；`handedOver` 标志让旧机器的 teardown 跳过 `closeHandle()` 与 `leaveStore()`（`:236`、`:242`），所以**不发出 `session/disposed`**。
 3. **继任者就地发布**（`runtime.swap(...)`，`src/driver-core/hosted-engine-runtime.ts:468-483`）：用**同一个 `Session` 对象**构造新 agent、跑调用方给的 composition 回调，然后只做 agent 那一半发布——`publish` 里 `joining = lifetime.entered`（`:294`）为真时不再调 `sessions.enter` / `sessions.announce`（`sessions.enter` 对已活的 id 直接抛 `already exists`，主仓 `packages/core/session/src/index.ts:1033`；`announce` 对已 announce 的 entry 也抛，`:1085-1087`）。
-4. 路由器把 `live` 记账换成新 agent（`adopt`，`:242-261`），`live` 条目同时带上**重建配方**（`BuildRecipe`，`:126-136`：`ownerCtx` / `agentOptions` / `setup` / `parentAgent`）与**交接句柄**（`Handover`，`:141-146`：`lifetime` + `retire`），供下一次换手使用。
+4. 路由器把 `live` 记账换成新 agent（`adopt`，`:245-264`），`live` 条目同时带上**重建配方**（`BuildRecipe`，`:131-140`：`ownerCtx` / `agentOptions` / `setup` / `parentAgent`）与**交接句柄**（`Handover`，`:146-151`：`lifetime` + `retire`），供下一次换手使用。
 
 为什么"先退旧、再上新"：一个 sessionId 只能有一个 agent（`agents.enter` 对重复 id 抛 `already registered`，主仓 `packages/core/agent/src/index.ts:466`），而两个机器同时挂在一个会话上会**互相 splice 同一个收件箱**（各自的 `DriverInbox` 折的是同一条日志的 `agent/inbox/spliced`），所以旧机器必须在任何输入能到达继任者之前完全 settle。
 
-**继任者的 composition 来自调用方**：`BuildRecipe.setup` 是上一次 create/resume 时 API 层交进来的那个 `composeAgent` 回调（安装 model selection + mount agent preset，主仓 `packages/api/session-controller/src/agent.ts:374-390`），换手时原样重放。插件不自己组装 composition——那会把 API 层的策略抄一份在这里并且早晚漂移。传一个**已经存在**的 `Session` 给四个引擎的 agent 是安全的：它们的构造函数只读日志（`DriverInbox` 折 `ownEvents()`、`lastTurn` 折 `turn/start`），不写事件、不注册 session 监听、不碰 `ctx.sessions`、也不需要写句柄（`docs/per-session-engine.md` §5.4）。
+**继任者的 composition 来自调用方**：`BuildRecipe.setup` 是上一次 create/resume 时 API 层交进来的那个 `composeAgent` 回调（安装 model selection + mount agent preset，主仓 `packages/api/session-controller/src/agent.ts:374-390`），换手时原样重放。插件不自己组装 composition——那会把 API 层的策略抄一份在这里并且早晚漂移。传一个**已经存在**的 `Session` 给四个引擎的 agent 是安全的：它们的构造函数只读日志（`DriverInbox` 折 `ownEvents()`、`lastTurn` 折 `turn/start`），不写事件、不注册 session 监听、不碰 `ctx.sessions`、也不需要写句柄（`docs/per-session-engine.md` §5.4）。⚠️ 继任者拿到的 `agentOptions` 也是配方里那一份（`hotSwap` 原样传给 `swap()`）——没有任何引擎读它，真正被宿主读到的座位是第 2 步写进日志的那条。
 
-**换手失败**（`:498-514`）：旧机器已经退场、继任者没发布，这时没有任何东西驱动这条会话。插件把 `SessionLifetime` 释放掉——`closeHandle()`（失败只 warn，`:506-510`）+ `leaveStore()`（`:511`）——会话变回冷会话，下一次打开按记录（就是刚写下的新引擎）重建，返回 `could not rebuild session "…" on <engine>: <原始错误>`。**退场本身失败**（`retire()` 抛）则相反：留在 registry 的摘除是它 teardown 的最后一步，所以机器**已经**不在 `ctx.agents` 里了，插件报一条 warn 后继续换手（`:482-490`）——此时拒绝只会留下一条活着却没人驱动的会话。
+**换手失败**（`:555-569`）：旧机器已经退场、继任者没发布，这时没有任何东西驱动这条会话。插件把 `SessionLifetime` 释放掉——`closeHandle()`（失败只 warn，`:562-566`）+ `leaveStore()`（`:567`）——会话变回冷会话，下一次打开按记录（就是刚写下的新引擎）重建，返回 `could not rebuild session "…" on <engine>: <原始错误>`。**退场本身失败**（`retire()` 抛）则相反：留在 registry 的摘除是它 teardown 的最后一步，所以机器**已经**不在 `ctx.agents` 里了，插件报一条 warn 后继续换手（`:537-545`）——此时拒绝只会留下一条活着却没人驱动的会话。
 
 #### 与 in-process 之间：释放这条会话 + 让页面重载
 
-`move` 在"任一边是 in-process"时**不换手**，而是**释放**这条会话的 agent（`await release(entry)`，`:448-453` → `:546-551`）并返回 `{ ok: true, engine, reload: true }`。为什么这条路能成立、每一环负责什么：
+`move` 在"任一边是 in-process"时**不换手**，而是**释放**这条会话的 agent（`await release(entry)`，`:504-511` → `:602-604`）并返回 `{ ok: true, engine, reload: true }`。为什么这条路能成立、每一环负责什么：
 
-- **释放就是"把它放冷"**：`entry.dispose()` 走完 `cancel → whenIdle → scope.dispose → handle.close() → detachAgent() → detachSession()`，会话离开 `ctx.sessions`、记录留在侧车里。**记录就是它下一次构建要用的引擎**，所以下一个 resolve 自然落在新引擎上（`:306-317` 的 resume 路径，读记录优先）。
+- **释放就是"把它放冷"**：`entry.dispose()` 走完 `cancel → whenIdle → scope.dispose → handle.close() → detachAgent() → detachSession()`，会话离开 `ctx.sessions`、记录留在侧车里。**记录就是它下一次构建要用的引擎**，所以下一个 resolve 自然落在新引擎上（`:316-324` 的 resume 路径，读记录优先）。
 - **`reload: true` 是这条路的关键一半**：`detachSession()` 会发出 `session/disposed`，宿主把它转成 `api-session/removed`，浏览器那半据此删掉会话行、清空当前会话，并在那个 `Session` 实例上写下**没有复位路径**的 `removed` 标记（完整链路与取证见 `docs/per-session-engine.md` §5.2/§5.4）。所以客户端半收到这个标志就：把 id 存进本标签页的 `sessionStorage`（`src/client/reload.ts:95-107`）→ `window.location.reload()`（`src/client/session-engine.ts:799-800`）→ 重载后的页面用这个 id 调 `sessions.open(id)` 回到这条会话（`src/client/reload.ts:164-206`，接线 `src/client/index.ts:91`）。**重载是"清掉被标记的那份页面状态"的最小动作**，宿主重建 agent 靠的是重开之后那次 `resume`，不是重载本身。
 - **为什么不能只"释放 + 让用户自己点回来"**：`session/disposed` 之后那个页面上的这条会话是**不可用**的（输入框与模型座被锁），用户点回一条被标记的会话不会恢复它——这正是更早两版把会话弄丢的原因（`docs/per-session-engine.md` §5.4 第一段）。
-- **`await` 的含义**：`release` 返回 teardown 的 promise，`move` 等它结束才回包——回包在告诉客户端"这条会话已经是冷的了"，那必须是真话（测试断言 `ctx.agents.get(id)` 在 `select` 返回时已是 `undefined`，`tests/engine-remote.spec.ts`）。teardown 失败只 warn（`:546-551`）并按 `reload: true` 照常回包：记录已经写下，页面重载后宿主的 resolve 会照记录重建。
+- **`await` 的含义**：`release` 返回 teardown 的 promise，`move` 等它结束才回包——回包在告诉客户端"这条会话已经是冷的了"，那必须是真话（测试断言 `ctx.agents.get(id)` 在 `select` 返回时已是 `undefined`，`tests/engine-remote.spec.ts`）。teardown 失败只 warn（`:602-604`）并按 `reload: true` 照常回包：记录已经写下，页面重载后宿主的 resolve 会照记录重建。
 - **客户端的可见代价**：这一页的临时状态（滚动位置、未提交的草稿）会丢；会话记录一字不少。客户端在重载前弹一句 `switchReloadTitle` / `switchReloadBody`（§4.4、`docs/per-session-engine.md` §5.2「丢了什么」）。
 
-**模型选择与这次释放同时落盘**（0.1.5-rc3 起）：这条会话的模型选择**在切换那一刻就写**——`selectEngine` 写完记录后立刻把部署默认追加成一条 `model/selection`（`:403-409`）。理由是这一侧的用户可见后果：进程内的 harness loop 会**真的**调模型，而会话此刻的选择还是引擎标签（§3.6），那个标签只有本插件的占位路由服务、真有请求过来 loud 抛 `HOSTED_ENGINE_ROUTE`——用户实测到的"托管引擎之间怎么切都正常、切回 harness 默认就每轮报错"就是这条。写进去的是宿主自己的事件、读回它的是宿主自己的选择逻辑（`selectionFor` 优先投影的 `pending`，否则取最新 `request/header`），所以重载之后那一次构建装出来的 in-process agent 拿到的就是部署默认。
-- **幂等**：会话当前选择已经是部署默认（provider + model 相同）时不追加，反复切 in-process 不会往日志里堆事件（判据 `src/model-selection-reset.ts:123-158`：先读 `sessionProjections` 的 `modelSelection.pending`，没有就读会话自己最新的 `request/header`）；
-- **反向不写**：切到托管引擎（含两个托管引擎之间）**不碰**模型选择——那台引擎会把自己的标签写进下一条 header，而唯一读这条选择的 pi 驱动只认自己目录里的模型，别家模型的默认值它直接丢掉；
-- **拿不到默认值就跳过**：composition 里没有 `agentDefaultModel` 服务、或它的 `currentSelection()` 抛错/答不出 provider+model → 只报**一次** warn、不写事件，切换本身照常成功（`src/model-selection-reset.ts:160-203`）；
-- **同一条语义也走 preset 通道**：harness 自己那个"换 preset"路径落到映射为 in-process 的 preset 上时，`rebuildOnEngineChange` 在释放 agent 之前做同一件事（`src/router-loop.ts:602`，见下）。
+**模型座位与这次释放同时落盘**（0.1.5-rc3 起；0.1.5-rc4 起两个方向都写）：这条会话的模型座位**在切换那一刻就写**——`selectEngine` 写完记录后立刻按**目标引擎**写一条 `model/selection`（`:465` → `:691-693`）。为什么必须是这一刻：宿主读的是日志，而这次换手（原地 swap 的 `setup`，或重载之后那次构建）紧接着就会读它；为什么必须写：进程内的 harness loop 会**真的**调模型，而会话此刻的选择还是引擎标签（§3.6），那个标签只有本插件的占位路由服务、真有请求过来 loud 抛 `HOSTED_ENGINE_ROUTE`——用户实测到的"托管引擎之间怎么切都正常、切回 harness 默认就每轮报错"就是这条。写进去的是宿主自己的事件、读回它的是宿主自己的选择逻辑（`selectionFor` 优先投影的 `pending`，否则取最新 `request/header`），所以下一次构建装出来的 agent 拿到的就是它。
+- **写什么由目标引擎定**：托管引擎 → 共享的 `external/default`（§3.6 的那个词）；in-process → 部署默认模型；
+- **幂等**：会话当前选择已经是写入值（provider + model 相同）时不追加，反复切同一个引擎不会往日志里堆事件（判据 `src/model-selection-reset.ts`：先读 `sessionProjections` 的 `modelSelection.pending`，没有就读会话自己最新的 `request/header`）。托管引擎之间互切因此通常**不写**第二条座位——四个引擎写的是同一个 `external/default`；
+- **真实 dsh 模型不动**：会话当前的选择 provider 不是托管路由标签（`external` 或旧四家）时一条都不写——那是一次显式选择，换引擎没有理由把它删掉（而且它会被四个驱动透传给引擎当模型用，见 §3.6）；
+- **日志里一条选择都没有时也不写**：没有座位可改写，会话的第一条座位由"构建时"那条通道负责（`src/model-selection-reset.ts:171-173`）；
+- **拿不到默认值就跳过**：composition 里没有 `agentDefaultModel` 服务、或它的 `currentSelection()` 抛错/答不出 provider+model → 只报**一次** warn、不写事件，切换本身照常成功（`src/model-selection-reset.ts:284-297` 的读取与 `:369-376` 的一次性告警）；
+- **默认值本身是托管标签时，改取部署 composition 声明的默认模型**：模型菜单把选中的那条 `default` 存成了部署默认（`session.selectModel` → `AgentDefaultModelConfig.saveSelection`，见 `docs/per-session-engine.md` §5.2），拿它去服务进程内会话必炸，所以 `configuredDefault`（`src/model-selection-reset.ts:347-354`）读 settings 描述符的 `base` 层——那是 `packages/bundle/base/cordis.patch.yml` 给 `agent-default-model` 行配的真实模型——写入它并如实报**一次** warn；连 composition 都给不出可用模型时只 warn、不写；
+- **同一条语义也走 preset 通道与"构建时"通道**：harness 自己那个"换 preset"路径上，`rebuildOnEngineChange` 在释放 agent 之前做同一件事（`src/router-loop.ts:660`，见下）；而**一条被构建**的会话（`createAgent` 的两个分支 `:289`/`:291`，`resume` 的 in-process 分支 `:323`）走 `guardFor`——路由器的 `engineOptions`（`:355-378`）把 `setup` 包一层，在宿主装选择之前先写（为什么必须在这个时刻，见 `docs/per-session-engine.md` §5.2）。托管引擎那一路同时把 `agentOptions` 换成同一个座位（`engineRouteOptions`，`:708-710`）；in-process 那一路保持调用方给的值，因为对 harness loop 来说那不是座位、**就是**请求路由。
 
-**报告只有一种情况会同时带两个事实**：`RouterLoop.reportEngine(sessionId)`（`:336-341`）在**有活 agent** 且它驱动的引擎与记录不同时，把 `engine`（实际）与 `pending`（记录）分开报——而正常路径上二者不可能不同（原地换手一起改、释放之后没有活 agent，冷会话直接答记录）。它剩下的唯一来源是**释放没成功**（teardown 抛错、或有人手改了侧车文件）：会话仍由旧引擎驱动，chip / composer 写「正在跑的那个 · 切到 X · 尚未接管」（§4.3、§4.6、`docs/per-session-engine.md` §1.3），用户再选一次目标引擎即可重试。这是"显示≠实际"这一族问题的最后一道防线。
+**报告只有一种情况会同时带两个事实**：`RouterLoop.reportEngine(sessionId)`（`:385-392`）在**有活 agent** 且它驱动的引擎与记录不同时，把 `engine`（实际）与 `pending`（记录）分开报——而正常路径上二者不可能不同（原地换手一起改、释放之后没有活 agent，冷会话直接答记录）。它剩下的唯一来源是**释放没成功**（teardown 抛错、或有人手改了侧车文件）：会话仍由旧引擎驱动，chip / composer 写「正在跑的那个 · 切到 X · 尚未接管」（§4.3、§4.6、`docs/per-session-engine.md` §1.3），用户再选一次目标引擎即可重试。这是"显示≠实际"这一族问题的最后一道防线。
 
 **没有 `force` 之类的破坏性选项，也不该有**：破坏性 teardown 就是上面那条 `release`，而它已经由**服务端**在需要时自动执行；给它加一个客户端可选的开关只会多一个"用户点下去，会话被拆"的入口。客户端能做、且现在正在做的就是两件事：**重载页面**与**用 `sessions.open(id)` 重新打开那条会话**（取证：客户端没有 `reopen`/`resync` 这类动作，宿主的 `resolve` 见到活 agent 就直接返回它——所以"重开以应用切换"只有在 agent 真的已经被释放之后才成立，这正是这条路的前提。逐条证据在 `docs/per-session-engine.md` §5.4）。
 
@@ -286,23 +291,23 @@ preset 现在只承担一件事：**agent-plane 组合**——剥掉 dsh 原生�
 
 #### 仍然走 release 的那一条路径
 
-`RouterLoop.release(entry)`（`:526-531`）先 `forget`（`:261-262`——只在 `live` 里那条记录还指向同一个 agent 时才删，所以陈旧的句柄永远不会去拆重建后的 agent），再 fire-and-forget 地 `dispose`，失败经 `pluginWarn` 报出来。它现在只剩一个调用点：harness 自己在**空白会话**上的 preset 切换 `rebuildOnEngineChange`（`:557-582`）监听无 scope 事件 `agent-preset/selected(sessionId, preset)`（`:558`）。该事件类型在 `:81-91` **本地声明**，而不是从 `@deepseek-ai/dsh-agent-presets` 导入：插件消费这个通知，但不对 roster 建立构建期依赖（最小 profile 可能根本不组合它）。事件由 roster 在日志提交点转发（主仓 `packages/preset/agent-presets/src/index.ts:228-230`）。harness 那次切换只是重组合活 agent 的 scope 并把选择记进日志，**不重建 agent**，所以引擎会停在创建时那个；丢掉 agent 让宿主的下一次 resolve 落到 `resume`（主仓 `packages/api/session-controller/src/agent.ts:183-199`），按日志里记录的 preset 用正确的引擎重建。
+`RouterLoop.release(entry)`（`:602-604`）先 `forget`（`:267-269`——只在 `live` 里那条记录还指向同一个 agent 时才删，所以陈旧的句柄永远不会去拆重建后的 agent），再 fire-and-forget 地 `dispose`，失败经 `pluginWarn` 报出来。它现在只剩一个调用点：harness 自己在**空白会话**上的 preset 切换 `rebuildOnEngineChange`（`:637-663`）监听无 scope 事件 `agent-preset/selected(sessionId, preset)`（`:638`）。该事件类型在 `:84-96` **本地声明**，而不是从 `@deepseek-ai/dsh-agent-presets` 导入：插件消费这个通知，但不对 roster 建立构建期依赖（最小 profile 可能根本不组合它）。事件由 roster 在日志提交点转发（主仓 `packages/preset/agent-presets/src/index.ts:228-230`）。harness 那次切换只是重组合活 agent 的 scope 并把选择记进日志，**不重建 agent**，所以引擎会停在创建时那个；丢掉 agent 让宿主的下一次 resolve 落到 `resume`（主仓 `packages/api/session-controller/src/agent.ts:183-199`），按日志里记录的 preset 用正确的引擎重建。
 
 **为什么它不改成原地换手**：新 agent 要用**新 preset 的** composition，而 composition 只有 API 层的 `composeAgent` 会组装（主仓 `packages/api/session-controller/src/agent.ts:374-390`）；插件手里的 `BuildRecipe.setup` 是"引擎选择器那条路径"的回调（对应会话当前的 preset），拿不到"某个 preset 的回调"。所以这条路径继续"释放 + 下次 resolve 重建"。代价可控：它只对**空白**会话生效（跑过一轮的会话到不了这里，harness 的 roster 会用 `agent-preset/locked` 拒绝，见 §7）。这条差别也写进了用户文档（`docs/per-session-engine.md` §5.1 末条）。
 
-`rebuildOnEngineChange` 的三条判定（`:559-567`）：只处理路由器记账过的会话（`:559-560`）；只在新 preset 映射到**别的**引擎时动手（`:561-562`）；空白判定读 `sessionProjections.stateOf(session, 'turnBoundary')`（结构性类型见 `src/driver-core/host-servers.ts:56-61`），`openTurnStartSeq === null && lastTurn === 0` 算空白、投影 `undefined` 也算空白，**非空白只 warn 不换**（`:563-567`）——与主仓自己的空白判定同一套事实（主仓 `packages/preset/agent-presets/src/index.ts:713-719`）。映射的引擎是 **in-process** 时它还做同一件模型选择重置（`if (next === 'in-process') this.restoreDefaultModel(entry)`，`:575-579`），而且必须在 `release` **之前**——release 正是把 agent 从这条会话上摘掉的那一步，事件得先落进日志。这是同一处缺陷、同一个方法（`:584-607`），只是入口换成了 preset 通道；引擎选择器那条见 §3.7。
+`rebuildOnEngineChange` 的三条判定（`:639-647`）：只处理路由器记账过的会话（`:639-640`）；只在新 preset 映射到**别的**引擎时动手（`:641-642`）；空白判定读 `sessionProjections.stateOf(session, 'turnBoundary')`（结构性类型见 `src/driver-core/host-servers.ts:73-78`），`openTurnStartSeq === null && lastTurn === 0` 算空白、投影 `undefined` 也算空白，**非空白只 warn 不换**（`:643-647`）——与主仓自己的空白判定同一套事实（主仓 `packages/preset/agent-presets/src/index.ts:713-719`）。它紧接着做同一件模型座位的事（`this.moveModelSelection(entry, next)`，`:660` → `:691-693`），而且必须在 `release` **之前**（`:661`）——release 正是把 agent 从这条会话上摘掉的那一步，事件得先落进日志。这与引擎选择器那条是同一个方法，只是入口换成了 preset 通道；引擎选择器那条见 §3.7。
 
-**最后一次用户动作胜出**（`:568-574`）：会话**已有插件记录**时，harness 的选择器也是一次引擎选择，所以记录先跟着新 preset 走，再释放 agent。没有记录就不进记录——只有显式选择才值得记下来，没记录的会话继续按 preset 映射回答。少了这一步，两个入口会互相打脸：选择器按 preset 重建，而下一次 resume 又按记录把它搬回去。
+**最后一次用户动作胜出**（`:648-654`）：会话**已有插件记录**时，harness 的选择器也是一次引擎选择，所以记录先跟着新 preset 走，再释放 agent。没有记录就不进记录——只有显式选择才值得记下来，没记录的会话继续按 preset 映射回答。少了这一步，两个入口会互相打脸：选择器按 preset 重建，而下一次 resume 又按记录把它搬回去。
 
-注意 `release` 的前提是记账只由路由器自己写（`adopt`，`:239-258`）：宿主或其他 factory 建的 agent 不在 `live` 里，路由器不会去动它。
+注意 `release` 的前提是记账只由路由器自己写（`adopt`，`:245-264`）：宿主或其他 factory 建的 agent 不在 `live` 里，路由器不会去动它。
 
 ### 3.8 幂等与有界重试
 
 挂载期有几条路径都会碰到"对端还没就绪"的时序问题，处理方式统一为**结构性探测优先 + 有界重试 + 幂等**：
 
-- **preset authoring 是记忆化的**：`authoring ??= ensureEnginePresets(...)`（`src/index.ts:446`，声明 `:457`）。两条路径都要 preset——启动时的 authoring 与 steering 路径（`:513`）——让它们各自走一遍同样的 8 个文件会竞争写入：Windows 上落败的 `rename` 报 EPERM，部署默认值就永远没被 steer（回归测试 `tests/index.spec.ts:610-638`，注释 `:634-636`）。失败**不**被当成已完成的记忆值：catch 里把 `authoring` 置回 `undefined` 并记 error（`src/index.ts:446-452`），所以下一次切换会重试 authoring（`tests/index.spec.ts:656-685`）。
-- **roster settings namespace 的 attach 竞争**：settings provider 能枚举 namespace 时，先 `describe()` 判断 roster 的 `agent-presets` 段是否已注册（主仓 `packages/settings/settings/src/index.ts:505`），不在就只调度重试而**根本不尝试写入**；provider 没有 `describe` 才退回"写入 + 匹配 `not registered` 文案"的老路径；其他错误一律 loud 一次、不重试（`src/index.ts:465-491`）。窗口是 30 × 100ms（常量 `:290-291`，`PRESET_DEFAULT_ATTEMPTS` / `PRESET_DEFAULT_RETRY_MS`）。
-- **roster 服务本身的 attach 竞争**：`ctx.get('agentPresets')` 为 undefined 时同样 30 × 100ms 重试（`src/index.ts:439-445`）。
+- **preset authoring 是记忆化的**：`authoring ??= ensureEnginePresets(...)`（`src/index.ts:438`，声明 `:457`）。两条路径都要 preset——启动时的 authoring 与 steering 路径（`:513`）——让它们各自走一遍同样的 8 个文件会竞争写入：Windows 上落败的 `rename` 报 EPERM，部署默认值就永远没被 steer（回归测试 `tests/index.spec.ts:610-638`，注释 `:634-636`）。失败**不**被当成已完成的记忆值：catch 里把 `authoring` 置回 `undefined` 并记 error（`src/index.ts:438-444`），所以下一次切换会重试 authoring（`tests/index.spec.ts:656-685`）。
+- **roster settings namespace 的 attach 竞争**：settings provider 能枚举 namespace 时，先 `describe()` 判断 roster 的 `agent-presets` 段是否已注册（主仓 `packages/settings/settings/src/index.ts:505`），不在就只调度重试而**根本不尝试写入**；provider 没有 `describe` 才退回"写入 + 匹配 `not registered` 文案"的老路径；其他错误一律 loud 一次、不重试（`src/index.ts:457-483`）。窗口是 30 × 100ms（常量 `:264-266`，`PRESET_DEFAULT_ATTEMPTS` / `PRESET_DEFAULT_RETRY_MS`）。
+- **roster 服务本身的 attach 竞争**：`ctx.get('agentPresets')` 为 undefined 时同样 30 × 100ms 重试（`src/index.ts:431-437`）。
 - **llm 服务的 attach 竞争**：`ROUTE_ATTEMPTS` / `ROUTE_RETRY_MS` = 30 × 100ms（`:293-294`、`:366-370`）。web profile 里 llm 更靠前，但 fiber 启动顺序不是契约。
 - **基础 loop 占着 `agentLoop` 名字**——唯一一条等的不是服务、而是**服务名释放**的路径：受管理块要到下一次 composition 才生效（§3.1 第 3、7 步），所以全新安装的第一次启动必须先等 harness 的 live patch reload 摘掉基础行。窗口是 40 × 50ms（常量 `:299-300`，`ROUTER_ATTEMPTS` / `ROUTER_RETRY_MS`），判定用结构性的 `ctx.get('agentLoop') !== undefined` 而不是匹配报错文案，并且**每次重试都先 dispose 上一次的 fiber 再 `mountRouter()`**（`:604-608`）——失败那次的构造已经占住了名字、挂上了自己的 effects，同一个 fiber 重试只会一直撞自己。回归测试在 `tests/router-mount.spec.ts:196` 起：窗口内释放后成功挂载、永不释放则 loud 放弃、卸载中途停止重试、非冲突错误不重试。
 - **重试 timer 必须能被 dispose 挡掉**：全部经 `retryLater` 挂载，它在触发前检查 `disposed`（`:326-327`），清理 effect 置位并清掉各待决 handle（`:650-657`）。两者都需要：清理只能清**已挂上**的 timer，而从异步续体（如一条 mutation 的 rejection）里**新挂**的 timer 只能靠 `disposed` 挡掉（回归测试 `tests/index.spec.ts:1082` 起）。
@@ -362,7 +367,7 @@ schema（`src/settings.ts:41-44`）：`engine` 五选一并默认 `in-process`�
 - 改它**不需要**重启 `dsh web`，也**不需要**刷新页面（§4.4）。
 - 它只在新会话创建时起作用：宿主在那个时刻解析 default preset 并把 id 写进 `meta.agentPreset`（主仓 `packages/api/session-controller/src/agent.ts:374-390`、`:484`）。
 
-`onChange` 是同步钩子：读到新值先与 `steeredEngine` 比对，相同则短路（`src/index.ts:670-674`）；首次 attach 的 `onChange` 读到 seed 值，只是把 steering 收敛到同一结果。
+`onChange` 是同步钩子：读到新值先与 `steeredEngine` 比对，相同则短路（`src/index.ts:662-666`）；首次 attach 的 `onChange` 读到 seed 值，只是把 steering 收敛到同一结果。
 
 ### 4.3 client bundle 的四个露面点
 
@@ -371,11 +376,11 @@ schema（`src/settings.ts:41-44`）：`engine` 五选一并默认 `in-process`�
 会话侧的读与写集中在 `src/client/session-engine.ts`，而**读的那一半不再来自客户端**：
 
 - **引擎的报告来自插件自己的 Remote**：`createSessionEngineCache`（`src/client/session-engine.ts:719-736`）在客户端半 mount 一份手写的 contribution（`LOOP_ENGINE_REMOTE_CONTRIBUTION`，`:462-477`）拿到 `remote.loopEngine`，再由 `SessionEngineCache`（`:517-735`）按 sessionId 缓存报告并通知组件；`useEngineOfSession`（`src/client/use-session-engine.ts:71-101`）是组件侧的订阅钩子，**同时是 turn-status 行唯一的驱动者**（§4.3 的 turn-status 那段）。**第一次答案到达之前缓存里没有值**（`read` 返回 undefined），chip 因此不渲染、composer 显示「读取中…」**并禁用（置灰、打不开菜单）**——不显示默认值，也不显示任何旧值。禁用这一半由 `engineSwitchReady`（`src/client/session-engine.ts:205`）判定，它同时是类型收窄，所以"引擎未知"这一状态既不会走到重载确认、也不会被提交成一次切换（§4.4）。
-  - **缓存的是整份报告**（`SessionEngineReport`：`engine` + 可选 `pending`，`src/agent-preset-ids.ts:125-135`），因为三处露面读的不是同一份：chip 与 composer 的名字、composer 的选中项都用 `engine`（实际引擎），`pending` 只在 chip / composer 里作一句「切到 X · 尚未接管」的标注（composer 的菜单里被标注的那一行也带同样的后缀，§4.4），而 turn-status 行**只看 `engine`**（`hostedEngineOf(report.engine)`）。把两者在缓存里合并就等于抹掉这个区别，所以缓存原样保留、由各处自己取用。这个组合在正常路径上不出现（原地换手让两者一起变、释放之后没有活 agent），只剩"释放没成功"那一种来源（§3.7）。
+  - **缓存的是整份报告**（`SessionEngineReport`：`engine` + 可选 `pending`，`src/agent-preset-ids.ts:158-168`），因为三处露面读的不是同一份：chip 与 composer 的名字、composer 的选中项都用 `engine`（实际引擎），`pending` 只在 chip / composer 里作一句「切到 X · 尚未接管」的标注（composer 的菜单里被标注的那一行也带同样的后缀，§4.4），而 turn-status 行**只看 `engine`**（`hostedEngineOf(report.engine)`）。把两者在缓存里合并就等于抹掉这个区别，所以缓存原样保留、由各处自己取用。这个组合在正常路径上不出现（原地换手让两者一起变、释放之后没有活 agent），只剩"释放没成功"那一种来源（§3.7）。
   - **一条会话的报告在它的界面出现时重新取一次**（`watch` 的第一个 watcher → `refresh`，`src/client/session-engine.ts:575-610`）：这与"怎么让切换落地"无关（切换由宿主执行：原地换手，或释放这条会话并让页面重载，§3.7），它解决的是**答案可能过时**：另一个窗口、别处的一次原地换手、或一次插件重载都能让这条会话换了引擎，而这个页面手上的还是早先那份。重挂载时重取一次正是为了不留这种陈旧答案。持续渲染不重取（hook 的 effect 以 sessionId 为依赖，`src/client/use-session-engine.ts:81-84`），同一会话的两个界面同时出现也只发一次请求（只有第一个 watcher 触发重取，第二个并进同一次读取）；而 `invalidate`（换引擎成功回调）仍然是"这份答案肯定错了"的那条路径。
   - 为什么不能用客户端会话列表：`SessionSummary.projectionValues` 是宿主 `projectionsFor()` 算出的 `SessionProjectionHints`，自己写明 "partial: missing cells and cache rows are never materialized here"；而 `agentPreset` 在**空白期换过引擎**的会话上表示的是"创建时的 preset"，不是"实际跑的引擎"。历史上 chip 读的正是它，于是出现过"实际跑 pi、chip 显示 Claude Code"的生产事故。现在客户端**不再读** `projectionValues.agentPreset`。
   - contribution 是手写的普通 JSON：typert 协议没有 schema registry，第三方插件拿不到主仓生成的 `typert.remote-client.d.ts`，也不需要它。服务端侧由 `src/engine-remote.ts` 提供同名绑定（§3.1 第 8 步、§4.6）。
-- `sessionEngineOf`（现在在**零导入**的 `src/agent-preset-ids.ts:264`，类型 `SessionEngine` 在 `:103`）是唯一的三态判定，**路由与 Remote 共用**：`loop-engine-<engine>` → `{ kind: 'engine', engine }`；`LEGACY_HOSTED_PRESET_ID` → `{ kind: 'legacy' }`（当时确实是托管引擎，只是没记录哪个，绝不当成 in-process）；没有 preset（或非字符串）→ `{ kind: 'unset' }`；其余 preset（含部署自有的 `standard`）→ `{ kind: 'engine', engine: 'in-process' }`。**没有"未知即 in-process"这个入口**：两个会话级渲染点（chip 与 composer）各自决定怎么呈现 `legacy` / `unset`（§4.3 与 §4.4）。喂给它的 preset id 只有一个来源：`engineOfSession`（`src/engine-of-session.ts:78`）——有插件记录时来自记录，没有记录时才来自那条持久化投影（§3.3、§7）。**报告**（`engineReportOfSession`，`src/engine-of-session.ts:128-141`）在此之上多一层「活 agent 优先」：有活 agent 时 `legacy` 不会出现在 `engine` 里（那条会话此刻跑的就是 harness loop），所以上面那句"绝不把它说成进程内"的边界是**没有活 agent 时**的回答（§3.3）。
+- `sessionEngineOf`（现在在**零导入**的 `src/agent-preset-ids.ts:297`，类型 `SessionEngine` 在 `:103`）是唯一的三态判定，**路由与 Remote 共用**：`loop-engine-<engine>` → `{ kind: 'engine', engine }`；`LEGACY_HOSTED_PRESET_ID` → `{ kind: 'legacy' }`（当时确实是托管引擎，只是没记录哪个，绝不当成 in-process）；没有 preset（或非字符串）→ `{ kind: 'unset' }`；其余 preset（含部署自有的 `standard`）→ `{ kind: 'engine', engine: 'in-process' }`。**没有"未知即 in-process"这个入口**：两个会话级渲染点（chip 与 composer）各自决定怎么呈现 `legacy` / `unset`（§4.3 与 §4.4）。喂给它的 preset id 只有一个来源：`engineOfSession`（`src/engine-of-session.ts:78`）——有插件记录时来自记录，没有记录时才来自那条持久化投影（§3.3、§7）。**报告**（`engineReportOfSession`，`src/engine-of-session.ts:128-141`）在此之上多一层「活 agent 优先」：有活 agent 时 `legacy` 不会出现在 `engine` 里（那条会话此刻跑的就是 harness loop），所以上面那句"绝不把它说成进程内"的边界是**没有活 agent 时**的回答（§3.3）。
 - `sessionEngineSwitcher`（`src/client/session-engine.ts:760-803`）把选中的引擎换成 `remote.loopEngine.select({ sessionId, engine })`（`:770`），拒绝一律折成可渲染的结果：调用本身被拒（网关拒了一个畸形请求、连接断了）取 `result.error.message`（`:780`），调用被服务但插件拒绝了这次搬迁则带上宿主给的 `code` 与那句原话（`:786-789`，`code` 是界面本地化文案的依据、原话是详情）。namespace 从 `ctx.get('remote.loopEngine')` 现取（`:766`），取不到就报 `unavailable`（`:767`）——不把它写进 inject 门，一个缺失的可选能力不该让整个选择器不注册。**换成功后它回调通知调用方**（`onSwitched`，`:793`），由 `src/client/index.ts:148` 作废该会话的缓存并重新取值：显示不能靠"宿主投影变了会通知我"，那正是旧实现里"换完还显示旧引擎"的来源。**涉及 in-process 的那次回包带 `reload: true`，这个函数自己把收尾做完**（`:794-801`）：`armReloadReturn` 存下会话 id（`src/client/reload.ts:95-107`），再 `page.reload()`（默认就是 `window.location.reload()`，`src/client/reload.ts:72-84`），返回 `{ ok: true, reload: true }`；页面回来时由 `installReloadReturn`（`src/client/index.ts:91`）装上的一半读到这个 id 并调 `sessions.open(id)`（`src/client/reload.ts:164-206`）——重载必须由**这个函数**（而不是组件）负责，因为它是唯一同时知道"宿主释放了 agent"与"页面必须换一份状态"的地方。
 
 `LoopEngineStore`（`src/client/store.ts:33`）仍是设置页、composer 的可见性开关与**没有会话时** composer 显示的默认值的传输：`decodeLoopEngine` 收窄线上值（非法 id 读为 undefined → 落默认；`showInComposer` 缺失视为 true，`src/client/store.ts:21-30`）。`setEngine`/`setShowInComposer` 的成败判定不是看 promise 是否拒绝，而是**写完后对照 scope 留下的快照**（`src/client/store.ts:60-77`）——被拒绝的写在恢复后会报 `unavailable`。它**不再驱动 turn-status 行**（那曾是"这一行永远跟默认引擎走"的来源）。
@@ -395,7 +400,7 @@ turn-status 行**跟的是当前会话的引擎**，与 chip / composer 同源�
   3. 页面拿不到本插件自己的 Remote → 提示说本插件自己的话 `switchUnavailable`（`src/client/locales.ts:136` / `:181`）。
   composer 的弹窗因此有三种用途：重载前的**确认框**（两个按钮，`:505-518`）、拒绝的**错误提示**（一个"关闭"按钮）、重载时的**说明**（`switchReloadTitle` / `switchReloadBody`，`src/client/LoopEngineComposerSelect.tsx:420-423`）。台词是"托管引擎之间选中即生效；涉及进程内时先确认、再重载一次并回到这条会话"；会话记录（对话历史）不受影响（`composerHint`，`src/client/locales.ts:123` / `:168`）。
 
-claude-code 作为当前（或默认）引擎时额外显示"模型选择不生效"提示（`src/client/LoopEngineSection.tsx:212`，背景见 `docs/proposals/model-selection-disable.md`）。
+**任一托管引擎**作为当前（或默认）引擎时额外显示一句模型说明（`hostedEngineModelNotice`，判据 `isHostedEngine`：`src/client/LoopEngineSection.tsx:213`、`src/client/LoopEngineComposerSelect.tsx:375-376`，文案 `src/client/locales.ts:115` / `:160`）——它说明默认由引擎自己决定模型、**在菜单里选一条 dsh 模型会把它交给该引擎使用**（引擎不接受就报错），以及菜单里那个共享的 `external` 分组名下那条 `default` 的含义（§3.6）。背景与"为什么不是每个引擎一条真目录"见 `docs/proposals/per-session-model-for-hosted-engines.md`，本插件侧的取舍见 `docs/per-session-engine.md` §5.2。
 
 ### 4.5 标准座位是怎么读到的（artifact-plane 的类型缺口）
 
@@ -411,15 +416,15 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 
 | 端点 | 做什么 | 结果 |
 |---|---|---|
-| `loopEngine/engine`（`:193-207`） | 报一条会话**实际**跑哪个引擎，以及它自己的记录写了什么 | 纯 JSON 的 `SessionEngineReport`（`src/agent-preset-ids.ts:125-135`）：`engine` 是三态 `SessionEngine`，`pending?: LoopEngineId` 只在"活 agent 的引擎 ≠ 侧车记录"时出现（正常路径不出现，见 §3.7）。有路由器时由 `RouterLoop.reportEngine` 供货、没有时退回记录/日志（`:198-202`）；读不出来时答 `{ engine: { kind: 'unset' } }` 并把失败经 `pluginWarn` 报一次，而不是把渲染它的页面弄崩 |
-| `loopEngine/select`（`:233-255`） | 把一条会话换到另一个引擎 | `LoopEngineSelectResult`（`src/agent-preset-ids.ts:201-243`）：`{ ok: true, engine }`（托管引擎之间原地换手时只有这两项）或 `{ ok: true, engine, reload: true }`（涉及 `in-process`：agent 已被释放，客户端要重载页面，见 §3.7），或 `{ ok: false, code, reason }`——**拒绝是数据，不是抛出的错误**，`code`（`LoopEngineRefusalCode`，`src/agent-preset-ids.ts:165-190`）是客户端本地化文案的依据、`reason` 是详情 |
+| `loopEngine/engine`（`:193-207`） | 报一条会话**实际**跑哪个引擎，以及它自己的记录写了什么 | 纯 JSON 的 `SessionEngineReport`（`src/agent-preset-ids.ts:158-168`）：`engine` 是三态 `SessionEngine`，`pending?: LoopEngineId` 只在"活 agent 的引擎 ≠ 侧车记录"时出现（正常路径不出现，见 §3.7）。有路由器时由 `RouterLoop.reportEngine` 供货、没有时退回记录/日志（`:198-202`）；读不出来时答 `{ engine: { kind: 'unset' } }` 并把失败经 `pluginWarn` 报一次，而不是把渲染它的页面弄崩 |
+| `loopEngine/select`（`:233-255`） | 把一条会话换到另一个引擎 | `LoopEngineSelectResult`（`src/agent-preset-ids.ts:234-276`）：`{ ok: true, engine }`（托管引擎之间原地换手时只有这两项）或 `{ ok: true, engine, reload: true }`（涉及 `in-process`：agent 已被释放，客户端要重载页面，见 §3.7），或 `{ ok: false, code, reason }`——**拒绝是数据，不是抛出的错误**，`code`（`LoopEngineRefusalCode`，`src/agent-preset-ids.ts:198-223`）是客户端本地化文案的依据、`reason` 是详情 |
 
 - **两个端点各收一个普通对象参数，名字都叫 `request`**（`LoopEngineRequest` `:73-76`、`LoopEngineSelectRequest` `:83-88`）：typert 会把名为 `agent` / `session` 的参数解析成**活的**对象，而这两个端点要为任何**已持久化**的会话作答——包括没有任何进程加载过的那些，所以它们只收字符串。
 - **"实际"由路由器供货，记录只是后备**：端点自己不判定引擎——它把 `RouterSurfaceHolder`（`:132-135`）里的路由器交给调用，`RouterLoop.reportEngine` 用 `live` 记账回答"现在跑什么"（§3.3、§3.7）；`SessionEngineResolver`（`:99`）那条"记录 → 日志"的路只在**没有路由器**时用（全新安装的第一次启动正处在挂载重试窗口，那时没有会话由本插件驱动，两条路给出的答案一致）。
 - **只有畸形的请求才是 `RemoteError`**：非字符串或空的 `sessionId`、以及不在 `LOOP_ENGINE_IDS` 里的 `engine`，都按 typert 的惯例抛 `gateway/bad-request`（`:195-197`、`:234-245`）。可预期的"不行"（会话没打开、有回合在飞、subagent、记录写不进去、旧机器退场后新引擎没建起来）是数据——一个原因码加宿主原话——由调用面渲染（§4.4）。
-- **`select` 自己没有策略**：它只做边界校验，然后把请求交给**持有者** `RouterSurfaceHolder` 里的路由器（`:132-135`，结构面 `RouterSurface` `:115-120`，实例在 `src/index.ts:554`）。`current` 就是已挂载的路由器（`src/index.ts:597`）；路由器还没挂上（§3.1 第 7 步）时 `current === undefined`，端点回一条 `{ ok: false, code: 'router-unmounted', reason: 'this process cannot switch engines yet: the loop router is not mounted' }`（`:247-253`）——对一个无从得知这件事的调用者，用话拒绝比抛错好，而这个码让客户端能说本地化的话（§4.4）。真正判定能不能搬、怎么搬的是路由器（`RouterLoop.selectEngine`，§3.7）：只有它知道这条会话有没有活 agent、有没有回合在飞、要不要拆 agent。
+- **`select` 自己没有策略**：它只做边界校验，然后把请求交给**持有者** `RouterSurfaceHolder` 里的路由器（`:132-135`，结构面 `RouterSurface` `:115-120`，实例在 `src/index.ts:546`）。`current` 就是已挂载的路由器（`src/index.ts:589`）；路由器还没挂上（§3.1 第 7 步）时 `current === undefined`，端点回一条 `{ ok: false, code: 'router-unmounted', reason: 'this process cannot switch engines yet: the loop router is not mounted' }`（`:247-253`）——对一个无从得知这件事的调用者，用话拒绝比抛错好，而这个码让客户端能说本地化的话（§4.4）。真正判定能不能搬、怎么搬的是路由器（`RouterLoop.selectEngine`，§3.7）：只有它知道这条会话有没有活 agent、有没有回合在飞、要不要拆 agent。
 - **线协议靠形参名**：`loopEngine/*` 没有主仓 codegen 生成的 strict descriptor，所以网关走 SRC 路径——用 `Function.prototype.toString` 读活方法的形参表当参数名（主仓 `packages/api/gateway/src/index.ts` 的 `methodParameterNames`）。因此 `request` 这个名字就是线字段名，不能改名、不能解构、不能带默认值；`tests/engine-remote.spec.ts` 的最后一条测试读源码文本把这件事钉死。浏览器半那份手写 descriptor（`src/client/session-engine.ts:462-477`）声明的是同一个 wire 名，并且两个端点各有一个 **strict** 请求 codec（`:468`、`:475`）与 strict 结果 codec（`:473` 的 `parseSessionEngineReport`、`:475` 的 `parseSelectResult`）——两侧的校验因此对同一批畸形输入给出同样的判定（`pending` 不是已安装引擎时在两边都是"这不是一个答案"；`reload` 不是字面量 `true` 时也是；**`code` 不是本 build 认识的码时被规范化成"没有码"**，于是 `reason` 仍然是可读的那句话）。
-- **生命周期跟着插件**：`TypertRemoteService` 在构造时注册服务与可见的 `typertRemote` 绑定，网关是**调用时**才反射发现的，所以没有网关的 profile 一点代价都不付，卸载插件即随 fiber 撤下（`src/index.ts:638-646`）。
+- **生命周期跟着插件**：`TypertRemoteService` 在构造时注册服务与可见的 `typertRemote` 绑定，网关是**调用时**才反射发现的，所以没有网关的 profile 一点代价都不付，卸载插件即随 fiber 撤下（`src/index.ts:630-638`）。
 
 ## 5. invariant 入口
 
@@ -464,10 +469,10 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 - **手改 patch 文件不改变任何引擎选择**：文件只在 `apply()` 启动时被插件读一次，且读的只是"要不要迁移 legacy 块"；块本身是常量、里面没有引擎 id。harness 自己会 live reload 这层 patch——正是它把基础 `agent-loop` 行摘掉，让全新安装的第一次启动不必再重启第二次（§3.1 第 7 步、§3.8）。
 - **主仓 `agent-loop` 行的 config 随该行一起失效**：路由器按 `super(ctx, { agents: [] })` 构造（`src/router-loop.ts:200`），所以 `agents:` 声明式启动列表与 `maxParallelToolCalls` 的 **yml config** 都到不了 loop。`agent-loop` settings 段仍然生效（`installSection` 的 `base: entry` 之上叠用户文档，主仓 `packages/settings/settings/src/index.ts:472-495`），即用户在设置里改的并行度还在。
 - **引擎不再在会话创建时锁定**：任何**已打开且空闲**的会话都能换引擎（§3.7），这是本次改动的核心。harness 自己那条"preset 在会话开始后固定"的边界仍然在，插件为此保有自己的记录。测试里 `describe('the blank-session engine switch')`（`tests/router-loop.spec.ts:568` 起）仍钉住 harness 那条路径的每条分支，包括"投影完全缺失也算空白"（`:630`）。
-- **换引擎需要一个打开且空闲的会话**：会话没打开（没有活 agent）、有回合在飞、或它是 subagent 会话时，`selectEngine` 一律拒绝并把原因作为**数据**返回（§3.7 的清单：一个原因码加宿主原话）；一个回合的输出属于产生它的引擎，绝不被打断、绝不被抢走（`src/router-loop.ts:380-393`）。
-- **托管引擎之间：原地换手，会话不重建**。记录先落盘，然后旧 agent 退场、新引擎的 agent 用**同一个 `Session` 对象**就地发布（§3.7）——会话的 store 条目与写句柄都保留，所以浏览器那半看不到任何生命周期边，"会话不可用"与"退回主页"这两条线上现象从根上不再产生。这条会话的下一条输入自然落到新 agent 上（宿主每轮按 sessionId 现取 agent）。
-- **与 in-process 之间：写记录 → 释放这条会话的 agent → 回包 `reload: true`，客户端重载页面并回到同一条会话，宿主按记录重建它。进程不重启。** harness 自带的 loop 既不交出活会话、也不接受不是它自己创建的会话（逐条证据见 `docs/per-session-engine.md` §5.4），所以这两个方向无法原地换手；插件改为**释放**这条会话（`src/router-loop.ts:451-456` 的 `move` → `:549-554` 的 `release`），会话因此变冷，而记录就是它下一次构建要用的引擎。这次释放会发 `session/disposed`，所以回包里带 `reload: true`，客户端半据此把 id 存进 `sessionStorage` 并 `window.location.reload()`（`src/client/session-engine.ts:799-800`、`src/client/reload.ts`），重载后的页面用这个 id 调 `sessions.open(id)` 回到这条会话（`src/client/reload.ts:164-206`，接线 `src/client/index.ts:91`）——宿主随后 `resume` 它（§3.3）。**为什么必须重载**：`api-session/removed` 会把会话行从列表里删掉、把当前会话清空，并在那个 `Session` 实例上写下没有复位路径的 `removed` 标记（`docs/per-session-engine.md` §5.2/§5.4）；重载是清掉这份页面状态的最小动作。这段窗口里报告一般没有第二个事实（释放之后没有活 agent，记录直接就是答案）；只有**释放没成功**时才会有：`engine` 是仍在驱动的旧引擎、`pending` 是记录（§3.3、§4.6），此时 chip / composer 写「正在跑的那个 · 切到 X · 尚未接管」并提示再选一次重试——**没有任何一处显示与实际不一致**。
-- **subagent 会话不能换**：它的 agent 属于创建它的那次委派，在这里丢掉会把父会话的子任务晾在中间（`src/router-loop.ts:391-393`）。
+- **换引擎需要一个打开且空闲的会话**：会话没打开（没有活 agent）、有回合在飞、或它是 subagent 会话时，`selectEngine` 一律拒绝并把原因作为**数据**返回（§3.7 的清单：一个原因码加宿主原话）；一个回合的输出属于产生它的引擎，绝不被打断、绝不被抢走（`src/router-loop.ts:431-445`）。
+- **托管引擎之间：原地换手，会话不重建**。记录与**模型座位**先落盘（`<旧>/default` → `<新>/default`），然后旧 agent 退场、新引擎的 agent 用**同一个 `Session` 对象**就地发布（§3.7）——会话的 store 条目与写句柄都保留，所以浏览器那半看不到任何生命周期边，"会话不可用"与"退回主页"这两条线上现象从根上不再产生。这条会话的下一条输入自然落到新 agent 上（宿主每轮按 sessionId 现取 agent）。
+- **与 in-process 之间：写记录 → 模型座位写回真实模型 → 释放这条会话的 agent → 回包 `reload: true`，客户端重载页面并回到同一条会话，宿主按记录重建它。进程不重启。** harness 自带的 loop 既不交出活会话、也不接受不是它自己创建的会话（逐条证据见 `docs/per-session-engine.md` §5.4），所以这两个方向无法原地换手；插件改为**释放**这条会话（`src/router-loop.ts:504-511` 的 `move` → `:602-604` 的 `release`），会话因此变冷，而记录就是它下一次构建要用的引擎。这次释放会发 `session/disposed`，所以回包里带 `reload: true`，客户端半据此把 id 存进 `sessionStorage` 并 `window.location.reload()`（`src/client/session-engine.ts:799-800`、`src/client/reload.ts`），重载后的页面用这个 id 调 `sessions.open(id)` 回到这条会话（`src/client/reload.ts:164-206`，接线 `src/client/index.ts:91`）——宿主随后 `resume` 它（§3.3）。**为什么必须重载**：`api-session/removed` 会把会话行从列表里删掉、把当前会话清空，并在那个 `Session` 实例上写下没有复位路径的 `removed` 标记（`docs/per-session-engine.md` §5.2/§5.4）；重载是清掉这份页面状态的最小动作。这段窗口里报告一般没有第二个事实（释放之后没有活 agent，记录直接就是答案）；只有**释放没成功**时才会有：`engine` 是仍在驱动的旧引擎、`pending` 是记录（§3.3、§4.6），此时 chip / composer 写「正在跑的那个 · 切到 X · 尚未接管」并提示再选一次重试——**没有任何一处显示与实际不一致**。
+- **subagent 会话不能换**：它的 agent 属于创建它的那次委派，在这里丢掉会把父会话的子任务晾在中间（`src/router-loop.ts:443-445`）。
 - **侧车文件是第二份真相来源，而且刻意在会话日志之外**：`$DSH_HOME/.loop-engine/engines.json`（§3.9）对每一个日志读者（会话列表、fork、压缩、会话日志上传）都不可见，也自带迁移与垃圾回收问题。这是本插件为绕开 harness 的缺口付的代价；向上游要的那半个接缝写在 `docs/proposals/append-ignorable-events.md`，完整证据见 §3.10。
 - **preset 与引擎现在是两个不同的事实**：preset 是这个会话的 agent-plane 组合（prompt / 命令 / 技能面），并且只在会话**没有插件记录**时决定引擎（§3.3）。换过引擎的会话，preset 仍是创建时那一份——所以 harness 自己的会话头 preset 标签显示的是 preset，不是引擎，会滞后（§2.2 那条说明仍然成立）。
 - **插件刻意绕开了 harness 对会话 composition 的冻结**：harness 给会话定的规矩是"preset 在会话开始后不可变"（`AgentPresets.select` 抛 `agent-preset/locked`，判定与抛点在主仓 `packages/preset/agent-presets/src/index.ts:713-721`），而引擎在 harness 的设计里就是 preset 的函数——于是"给一条已经跑起来的会话换引擎"在 harness 内部没有表达手段，日志那种"插件自有事件"的路也被读取端堵死（§3.10）。插件没有去改主仓，也没有假装这件事不存在：它把这条事实记在自己的记录里，托管引擎之间**原地换手**（不拆会话，§3.7），与 in-process 之间**释放这条会话 + 让页面重载**（因为 harness 那半既不给句柄也不肯被别人接管，见 `docs/per-session-engine.md` §5.4；这次重载是"清掉被 `session/disposed` 标记过的页面状态"的最小动作，进程本身不动），并把两种代价如实写进上面几条。

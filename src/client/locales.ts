@@ -87,8 +87,8 @@ export interface LoopEngineKey {
   cancelAction: string
   /** Accessible close-button label of the settings confirmation and the switch notices. */
   closeLabel: string
-  /** Notice shown while the Claude Code engine owns the slot: model selection is native. */
-  claudeModelNotice: string
+  /** Notice shown while a hosted engine drives the session: the model seat is the engine's own business. */
+  hostedEngineModelNotice: string
 }
 
 /** Simplified Chinese copy. */
@@ -112,7 +112,7 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   confirmAction: '切换',
   cancelAction: '取消',
   closeLabel: '关闭',
-  claudeModelNotice: '当前使用 Claude Code 引擎：实际模型由 Claude Code 原生决定，页面上的模型选择不生效。',
+  hostedEngineModelNotice: '本会话由外部引擎驱动：默认用哪个模型由该引擎自己决定。在模型菜单里选一个 dsh 模型，会把它交给该引擎使用——用的是引擎自己的凭据与 provider 配置，所以能不能用取决于该引擎，引擎不接受就会报错。模型菜单里所有托管引擎共用一个 `external` 分组（模型目录是整个 Host 代际共享的，不按会话区分，所以四个引擎折叠成这一条），名下那条「default」表示交回引擎自己的默认，不是 dsh 能提供的模型。',
   sessionNotice: '本会话当前运行的引擎：有活 agent 时就是正在驱动它的那个引擎；没有活 agent 时才看插件的会话级记录，没有记录再回退到它自己的 agent preset。',
   legacySessionNotice: '这是本插件早期版本创建的会话：它当时跑的托管引擎没有被记录。选一个引擎即可在本会话里切换。',
   enginePendingPrefix: '切到 ',
@@ -157,7 +157,7 @@ export const en: Record<keyof LoopEngineKey, string> = {
   confirmAction: 'Switch',
   cancelAction: 'Cancel',
   closeLabel: 'Close',
-  claudeModelNotice: 'Claude Code engine active: the actual model is decided natively by Claude Code; the model selector in this session has no effect.',
+  hostedEngineModelNotice: 'This session is driven by a hosted engine: by default that engine decides the model. Picking a dsh model in the menu hands it to the engine — it is used with the engine\'s own credentials and provider configuration, so whether it works depends on the engine, and a model the engine refuses reports an error. Every hosted engine shares one provider group, "external", in the model menu (the model catalog is shared across the whole Host generation rather than per session, so the engines collapse into that one group), whose single entry, "default", means "hand the choice back to the engine\'s own default" — not a model dsh can serve.',
   sessionNotice: 'The engine this session runs right now: the agent driving it, when one is live, and otherwise the plugin\'s per-session record (falling back to the session\'s own agent preset when there is no record).',
   legacySessionNotice: 'This session was created by an earlier version of the plugin: the hosted engine it ran was never recorded. Pick any engine to switch it here.',
   enginePendingPrefix: '→ ',

@@ -53,7 +53,6 @@ import { LoopEngineRemote } from './engine-remote.ts'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
-import type { PiModelEntry } from './engine-pi/probe.ts'
 import { KimiLoop, type Config as KimiConfig } from './engine-kimi/loop.ts'
 import type { CodexApprovalPolicy, CodexSandboxMode } from './engine-codex/types.ts'
 import {
@@ -63,7 +62,8 @@ import {
   legacyBlockEngineOf,
 } from './patch-manager.ts'
 import { enginePresetId, ensureEnginePresets } from './preset.ts'
-import { HOSTED_PROVIDER_ROUTES, HostedEngineRouteAdapter } from './provider-route.ts'
+import { HOSTED_ROUTE_LABEL } from './agent-preset-ids.ts'
+import { HostedEngineRouteAdapter } from './provider-route.ts'
 import { ROUTER_SERVICES, RouterLoop, type RouterEngine } from './router-loop.ts'
 import {
   resolveEngineRecordPath,
@@ -328,14 +328,6 @@ export function apply(ctx: Context, config: Config): void {
   const retryLater = (run: () => void, ms: number): ReturnType<typeof setTimeout> =>
     setTimeout(() => { if (!disposed) run() }, ms)
 
-  /**
-   * Cached Pi model catalog from `pi --list-models`, shared by the Pi route
-   * adapter. Populated asynchronously by the Pi engine's constructor; the route
-   * adapter reads it through a live closure, so the probe need not finish before
-   * a session selects the engine.
-   */
-  const piCatalogHolder: { entries: readonly PiModelEntry[] } = { entries: [] }
-
   let routeDisposers: (() => void)[] | undefined
   let routeRetry: ReturnType<typeof setTimeout> | undefined
 
@@ -347,15 +339,18 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Serve every hosted engine's provider route label from the llm registry.
+   * Serve the single hosted provider route label from the llm registry.
    *
-   * Each hosted engine logs its own label into its sessions' request/header,
-   * and the web host refuses a turn whose session selection names a provider no
-   * adapter serves — without these placeholders the second prompt of every
-   * hosted session fails with `model-unavailable`. All four labels are served
-   * at once because any session may select any engine. The placeholders
-   * advertise no models (only Pi injects its probed catalog), so the model
-   * catalog is unchanged.
+   * Every hosted engine logs the SAME label into its sessions' request/header
+   * (`HOSTED_ROUTE_LABEL`), and the web host refuses a turn whose session
+   * selection names a provider no adapter serves — without this placeholder the
+   * second prompt of every hosted session fails with `model-unavailable`. One
+   * label for all four engines means one adapter: the browser model catalog is
+   * per Host generation rather than per session, so a route per engine would put
+   * four identical `default` groups in every session's menu at once
+   * (`provider-route.ts`). The placeholder advertises exactly one model entry —
+   * the engine's own `default` — so the model menu can name a hosted session's
+   * selection instead of rendering the raw `provider/model` string.
    *
    * Best-effort: a composition without the llm service cannot enforce the route
    * check either, so an absent registry only schedules a bounded retry against
@@ -371,20 +366,17 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     const registered: (() => void)[] = []
-    for (const [engine, label] of Object.entries(HOSTED_PROVIDER_ROUTES)) {
-      const options = engine === 'pi' ? { listModels: (): readonly PiModelEntry[] => piCatalogHolder.entries } : undefined
-      try {
-        registered.push(llm.registerAdapter([label], new HostedEngineRouteAdapter(label, options)))
-      } catch (error: unknown) {
-        // A deployment whose own adapter already serves the label needs no
-        // placeholder. The llm registry signals that structurally with an error
-        // code; the message arm stays for a registry that throws an uncoded one.
-        const duplicateAdapter = (error as { code?: unknown } | null)?.code === 'DUPLICATE_ADAPTER'
-        if (error instanceof Error && (duplicateAdapter || error.message.includes('already registered'))) {
-          ctx.logger.warn(`loop-engine: provider route "${label}" is already served by another adapter`)
-          continue
-        }
-        ctx.logger.error(`loop-engine: provider route "${label}" registration failed: ${String(error)}`)
+    try {
+      registered.push(llm.registerAdapter([HOSTED_ROUTE_LABEL], new HostedEngineRouteAdapter()))
+    } catch (error: unknown) {
+      // A deployment whose own adapter already serves the label needs no
+      // placeholder. The llm registry signals that structurally with an error
+      // code; the message arm stays for a registry that throws an uncoded one.
+      const duplicateAdapter = (error as { code?: unknown } | null)?.code === 'DUPLICATE_ADAPTER'
+      if (error instanceof Error && (duplicateAdapter || error.message.includes('already registered'))) {
+        ctx.logger.warn(`loop-engine: provider route "${HOSTED_ROUTE_LABEL}" is already served by another adapter`)
+      } else {
+        ctx.logger.error(`loop-engine: provider route "${HOSTED_ROUTE_LABEL}" registration failed: ${String(error)}`)
       }
     }
     routeDisposers = registered
@@ -563,7 +555,7 @@ export function apply(ctx: Context, config: Config): void {
       case 'codex':
         return new CodexLoop(engineCtx, codexConfig(config))
       case 'pi':
-        return new PiLoop(engineCtx, { ...piConfig(config), piCatalogHolder })
+        return new PiLoop(engineCtx, piConfig(config))
       case 'kimi':
         return new KimiLoop(engineCtx, kimiConfig(config))
     }

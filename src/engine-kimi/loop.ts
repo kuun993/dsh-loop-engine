@@ -30,7 +30,7 @@ export const KIMI_DISPOSE_GRACE_MS = 3000
 
 /** Deployment-owned configuration for the Kimi loop plugin. */
 export interface Config {
-  /** Model alias for the `kimi` child (`-m`); Kimi native config owns the model when omitted. */
+  /** Model sent per ACP session (`session/set_model`) when the session selects none; Kimi native config owns the model when omitted. */
   model?: string
   /** Explicit environment entries passed to the `kimi` child. */
   env?: Record<string, string>

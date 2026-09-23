@@ -17,9 +17,9 @@ export type PiSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-acces
 export interface ResolvedConfig {
   /** Pinned sandbox mode; `undefined` follows the session's dsh permission knobs per query. */
   readonly sandboxMode: PiSandboxMode | undefined
-  /** LLM provider the `pi` RPC process is launched with (`--provider`). */
+  /** LLM provider the `pi` RPC process is launched with (`--provider`), when the session selects no model. */
   readonly provider: string | undefined
-  /** Model pattern the `pi` RPC process is launched with (`--model`). */
+  /** Fallback model pattern for the `pi` RPC process (`--model`), used when the session selects none. */
   readonly model: string | undefined
   /** Thinking/reasoning level for the model (`--model <id>:<level>` or set at runtime). */
   readonly thinkingLevel: string | undefined

@@ -362,6 +362,26 @@ describe('the engine a surface names', () => {
       .toBe('→ In-process engine (default) · not in force')
   })
 
+  it('explains a hosted engine\'s model seat for every hosted engine, in both languages', () => {
+    // The copy this plugin shipped named Claude Code, which made a general fact
+    // ("the engine decides the model") read as a property of one engine — while
+    // the model menu now carries one entry per hosted engine. So the copy names
+    // none of them, says what that entry means, and describes what a real pick
+    // does: it is HANDED to the engine (which may refuse it), rather than the
+    // "no effect" the earlier copy claimed.
+    for (const [lang, dict] of [['zh', zh], ['en', en]] as const) {
+      const copy = dict.hostedEngineModelNotice
+      expect(`${lang}=${copy}`).not.toMatch(/Claude Code|Codex|Kimi|Pi CLI|claude-code/i)
+      expect(copy).toContain('default')
+    }
+    expect(zh.hostedEngineModelNotice).toContain('交给该引擎使用')
+    expect(zh.hostedEngineModelNotice).toContain('报错')
+    expect(en.hostedEngineModelNotice).toContain('hands it to the engine')
+    expect(en.hostedEngineModelNotice).toContain('reports an error')
+    expect(zh.hostedEngineModelNotice).toContain('引擎')
+    expect(en.hostedEngineModelNotice).toMatch(/engine/i)
+  })
+
   it('names the reload, not a restart or a reopened session, for a pick that has to release its agent', () => {
     // The copy this plugin shipped twice described a switch it could not make:
     // the first version promised "reopen this session and it takes over" (false —

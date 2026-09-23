@@ -11,6 +11,7 @@ import SessionStore, { SessionId, type SessionEvent, type Session } from '@deeps
 import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 
 const loopPlugin = loopPluginFor(KimiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -19,6 +20,7 @@ const mock = vi.hoisted(() => {
   const client = {
     initialize: vi.fn(async () => ({})),
     newSession: vi.fn(async () => 'sess_1'),
+    setModel: vi.fn(async () => ({})),
     // Deliver every scripted update to the registered onUpdate handler before
     // the prompt response settles (mirrors the real prompt-result-after-updates
     // ordering).
@@ -70,7 +72,12 @@ const toolStream = (id: string, status: string, text: string, rawInput?: unknown
 
 /** Bind a fresh harness context with the loop plugin mounted. */
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
-  return await mountHarness(loopPlugin, config, 'stub')
+  const ctx = await mountHarness(loopPlugin, config, 'stub')
+  // The host's `modelSelection` fold, so a `model/selection` appended to the
+  // session is read back as the pending selection the driver resolves a model
+  // from — the same read the host's own `selectionFor` makes.
+  ctx.provide('sessionProjections', modelSelectionProjections(ctx))
+  return ctx
 }
 
 /** Text of a single-block user message, for content assertions. */
@@ -120,6 +127,8 @@ beforeEach(() => {
   mock.permissionHandler = undefined
   mock.client.initialize.mockClear()
   mock.client.newSession.mockClear()
+  mock.client.setModel.mockReset()
+  mock.client.setModel.mockResolvedValue({})
   mock.client.prompt.mockClear()
   mock.client.cancel.mockClear()
   mock.client.onPermission.mockClear()
@@ -168,7 +177,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
         data: {
           message: {
             role: 'assistant',
-            source: { kind: 'model', provider: 'kimi' },
+            source: { kind: 'model', provider: 'external' },
             content: [{ type: 'text', text: 'Hello world' }],
           },
         },
@@ -1163,6 +1172,94 @@ describe('KimiAgent request header', () => {
       const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers[1]).toMatchObject({ data: { reason: 'resume' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('KimiAgent model selection', () => {
+  it('selects the session-selected dsh model on the ACP session, over the deployment pin', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('model-sel-s'), meta: { cwd: process.cwd() } })
+      // A harness `session.selectModel` appends a model/selection event.
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'deepseek-flash' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // Kimi selects per ACP session: `session/set_model { sessionId, modelId }`.
+      // Kimi takes a bare model id, so the session wins over the deployment pin.
+      expect(mock.client.setModel).toHaveBeenCalledWith('sess_1', 'deepseek-flash')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('selects nothing for the hosted seat, falling back to the deployment pin', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('model-sel-hosted-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // `external` means "the engine decides": the pin governs instead.
+      expect(mock.client.setModel).toHaveBeenCalledWith('sess_1', 'deployment-pinned')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('selects no model at all when the deployment pins none and no real model is selected', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('model-sel-none-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(mock.client.setModel).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the model on every step, so a mid-session change reaches the next session', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('model-sel-change-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-a' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(mock.client.setModel).toHaveBeenNthCalledWith(1, 'sess_1', 'model-a')
+
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'model-b' })
+      agent.followup(message('again'))
+      await agent.whenIdle()
+      expect(mock.client.setModel).toHaveBeenNthCalledWith(2, 'sess_1', 'model-b')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails the step loud when the engine rejects the model, never running the default', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      mock.client.setModel.mockRejectedValue(new Error('model "deepseek-flash" is not available'))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('model-sel-reject-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'meicloud', model: 'deepseek-flash' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // The rejection surfaces as the turn's error, and the prompt never runs
+      // under a model the engine refused.
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'error' } } })
+      expect(mock.client.prompt).not.toHaveBeenCalled()
     } finally {
       await ctx.fiber.dispose()
     }
