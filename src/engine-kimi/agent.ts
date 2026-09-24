@@ -34,6 +34,8 @@ import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
+import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
+import { kimiModelEnv } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import type { KimiSpawnCapability, KimiSpawnSpec } from './process.ts'
@@ -137,6 +139,13 @@ export class KimiAgent implements Agent {
   private acp: AcpClient | undefined
   /** The spawn spec the cached client was built from; a change forces a respawn. */
   private lastSpec: KimiSpawnSpec | undefined
+  /**
+   * The environment the last handover produced, memoized by its own content so
+   * an unchanged endpoint reuses ONE object: `specsEqual` compares environments
+   * by reference, and a fresh object per step would otherwise respawn the child
+   * every step.
+   */
+  private handoverEnvCache: { key: string; env: Record<string, string> } | undefined
 
   constructor(
     private loopCtx: Context,
@@ -485,8 +494,8 @@ export class KimiAgent implements Agent {
   }
 
   /** Return the cached ACP client, respawning when the spec or process changed. */
-  private async acpClient(cwd: string): Promise<AcpClient> {
-    const spec = this.spawnSpec(cwd)
+  private async acpClient(cwd: string, handover: DshModelHandover | undefined): Promise<AcpClient> {
+    const spec = this.spawnSpec(cwd, handover)
     if (this.acp !== undefined && !this.acp.closed && this.specsEqual(this.lastSpec, spec)) return this.acp
     this.acp?.dispose()
     const client = AcpClient.create(spec, this.spawn)
@@ -504,12 +513,25 @@ export class KimiAgent implements Agent {
   }
 
   /** Build the `kimi acp` argv/cwd/env for the persistent child. */
-  private spawnSpec(cwd: string): KimiSpawnSpec {
+  private spawnSpec(cwd: string, handover: DshModelHandover | undefined): KimiSpawnSpec {
     return {
       argv: kimiAcpArgv(this.bin),
       cwd,
-      env: this.config.env,
+      env: this.handoverEnv(handover),
     }
+  }
+
+  /**
+   * The child environment for one handover, memoized by content so an unchanged
+   * endpoint yields the SAME object across steps (see {@link handoverEnvCache}).
+   */
+  private handoverEnv(handover: DshModelHandover | undefined): Record<string, string> {
+    if (handover === undefined) return this.config.env
+    const key = JSON.stringify(handover)
+    if (this.handoverEnvCache?.key === key) return this.handoverEnvCache.env
+    const env = { ...this.config.env, ...kimiModelEnv(handover) }
+    this.handoverEnvCache = { key, env }
+    return env
   }
 
   /** Run one `kimi acp` step for the current session history and map the streamed updates. */
@@ -545,7 +567,12 @@ export class KimiAgent implements Agent {
     this.assertRequestHeader()
     signal.throwIfAborted()
 
-    const client = await this.acpClient(cwd)
+    // The session's model selection, and — when dsh discloses it — that model's
+    // endpoint and credential, resolved fresh on every step so a mid-session
+    // change reaches the next child (and a changed endpoint respawns it).
+    const override = sessionModelOverrideOf(this.loopCtx, this.session)
+    const handover = await resolveModelHandover(this.loopCtx, override)
+    const client = await this.acpClient(cwd, handover)
     signal.throwIfAborted()
     // Answer ACP tool-approval requests from the session's dsh approval knobs.
     client.onPermission(() => resolveToolApproval(this.session.snapshotEvents()))
@@ -556,9 +583,13 @@ export class KimiAgent implements Agent {
     // a model changed mid-conversation reaches the next session. Kimi selects a
     // model per ACP session through `session/set_model`, and the client rejects
     // on an error frame — so a model Kimi refuses fails this step loud rather
-    // than leaving the default in place.
-    const model = sessionModelOverrideOf(this.loopCtx, this.session)?.model ?? this.config.model
-    if (model !== undefined) await client.setModel(acpSessionId, model)
+    // than leaving the default in place. When dsh handed over an ENDPOINT, the
+    // child's environment already names that model as kimi's default
+    // (KIMI_MODEL_NAME via kimi's own env-model path), so `set_model` is
+    // deliberately skipped: it would ask kimi for the raw dsh model id as a
+    // model ALIAS, which the env model is not.
+    const model = override?.model ?? this.config.model
+    if (handover === undefined && model !== undefined) await client.setModel(acpSessionId, model)
     signal.throwIfAborted()
 
     try {

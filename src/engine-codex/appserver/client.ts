@@ -84,10 +84,27 @@ export class AppServerClient {
     })
   }
 
-  /** Spawn the pinned app-server dependency and initialize the client. */
-  static async create(): Promise<AppServerClient> {
-    const proc = spawn(process.execPath, [codexCliEntrypoint(), 'app-server'], {
+  /**
+   * Spawn the pinned app-server dependency and initialize the client.
+   *
+   * `argv` appends the driver's own overrides to the bare `app-server`
+   * subcommand (codex's `-c key=value` configuration), and `env` layers the
+   * driver's explicit entries over the ambient environment — the child still
+   * needs `PATH` and, under a user's own codex setup, the ambient auth facts its
+   * configuration reads, so this is an overlay, not a replacement. Both default
+   * to nothing, which is the bare `codex app-server` the driver used before a
+   * dsh endpoint was ever handed over.
+   * @param argv - extra arguments after the `app-server` subcommand.
+   * @param env - explicit environment entries layered over the ambient one.
+   * @returns the initialized client.
+   */
+  static async create(
+    argv: readonly string[] = [],
+    env: NodeJS.ProcessEnv = {},
+  ): Promise<AppServerClient> {
+    const proc = spawn(process.execPath, [codexCliEntrypoint(), 'app-server', ...argv], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
     })
     const client = new AppServerClient(proc)
     await client.initialize()

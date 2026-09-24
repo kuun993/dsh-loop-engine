@@ -38,6 +38,8 @@ import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
+import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
+import { codexModelConfig } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import {
@@ -176,6 +178,12 @@ export class CodexAgent implements Agent {
 
   /** Lazily created app-server client, reused across steps and released on scope teardown. */
   private appServer: AppServerClient | undefined
+  /**
+   * The spawn configuration (`argv` + `env`) the cached client was built from.
+   * Codex's endpoint lives in the child's own command line, so a handover change
+   * must respawn the child rather than reuse one configured for another endpoint.
+   */
+  private appServerConfig: string | undefined
 
   constructor(
     private loopCtx: Context,
@@ -201,10 +209,24 @@ export class CodexAgent implements Agent {
     }, 'codex.appServerClient()')
   }
 
-  /** Return the cached app-server client, spawning one on first use or after a dead process. */
-  private async appServerClient(): Promise<AppServerClient> {
-    if (this.appServer !== undefined && !this.appServer.closed) return this.appServer
-    this.appServer = await AppServerClient.create()
+  /**
+   * Return the cached app-server client, spawning one on first use, after a dead
+   * process, or when the resolved dsh endpoint changed since the last spawn.
+   *
+   * A handover is codex's own `-c` configuration for a dsh provider, so a
+   * different endpoint (different provider, base URL, protocol, or credential)
+   * needs a different child — the config is fixed when the process starts.
+   * @param handover - the session's resolved dsh endpoint, or undefined to leave codex to its own configuration.
+   */
+  private async appServerClient(handover: DshModelHandover | undefined): Promise<AppServerClient> {
+    const modeled = handover === undefined ? { argv: [], env: {} } : codexModelConfig(handover)
+    const config = JSON.stringify(modeled)
+    if (this.appServer !== undefined && !this.appServer.closed && this.appServerConfig === config) {
+      return this.appServer
+    }
+    this.appServer?.dispose()
+    this.appServer = await AppServerClient.create(modeled.argv, { ...this.config.env, ...modeled.env })
+    this.appServerConfig = config
     // Answer server-initiated requests (Codex approvals under an `ask` policy,
     // user-input questions, MCP elicitations) through their dsh seams; a request
     // with no answer stalls the turn.
@@ -637,12 +659,18 @@ export class CodexAgent implements Agent {
     let live: DriverAssistantStream | undefined
     try {
       const permission = this.queryPermission()
-      const client = await this.appServerClient()
+      // The session's model selection, and — when dsh discloses it — that
+      // model's endpoint, protocol, and credential, resolved fresh on every step
+      // so a mid-session change reaches the next thread (and a changed endpoint
+      // respawns the app-server).
+      const override = sessionModelOverrideOf(this.loopCtx, this.session)
+      const handover = await resolveModelHandover(this.loopCtx, override)
+      const client = await this.appServerClient(handover)
       // The session's own pick wins over the deployment's pin, read every step
       // so a model changed mid-conversation reaches the next thread. Codex takes
       // a bare model slug, so only the model half of the override travels; the
       // provider is a dsh routing fact it does not speak.
-      const model = sessionModelOverrideOf(this.loopCtx, this.session)?.model ?? this.config.model
+      const model = override?.model ?? this.config.model
       const threadParams: ThreadStartParams = {
           cwd,
           sandbox: permission.sandboxMode,

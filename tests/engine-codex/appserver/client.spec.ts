@@ -75,11 +75,38 @@ describe('AppServerClient', () => {
     const result = await client.initialize()
     expect(result.userAgent).toBe('test/1.0')
     expect(result.codexHome).toBe('/tmp/.codex')
-    expect(mocks.spawn).toHaveBeenCalledWith(
-      process.execPath,
-      [expect.stringMatching(/@openai[\\/]codex[\\/]bin[\\/]codex\.js$/), 'app-server'],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+    const [program, args, options] = mocks.spawn.mock.calls[0]! as unknown as [
+      string,
+      string[],
+      { stdio: string[]; env: Record<string, string | undefined> },
+    ]
+    expect(program).toBe(process.execPath)
+    expect(args).toEqual([expect.stringMatching(/@openai[\\/]codex[\\/]bin[\\/]codex\.js$/), 'app-server'])
+    expect(options.stdio).toEqual(['pipe', 'pipe', 'pipe'])
+    // The ambient environment is the overlay base, so the bare `codex app-server`
+    // still finds PATH and the user's own codex facts.
+    expect(options.env).toMatchObject({ ...process.env })
+    client.dispose()
+  })
+
+  it('appends explicit argv and layers explicit env over the ambient one', async () => {
+    const client = await AppServerClient.create(
+      ['-c', 'model_provider="dsh"'],
+      { DSH_LOOP_ENGINE_API_KEY: 'sk-test' },
     )
+    const [program, args, options] = mocks.spawn.mock.calls[0]! as unknown as [
+      string,
+      string[],
+      { env: Record<string, string | undefined> },
+    ]
+    expect(program).toBe(process.execPath)
+    expect(args).toEqual([
+      expect.stringMatching(/@openai[\\/]codex[\\/]bin[\\/]codex\.js$/),
+      'app-server',
+      '-c', 'model_provider="dsh"',
+    ])
+    expect(options.env.DSH_LOOP_ENGINE_API_KEY).toBe('sk-test')
+    expect(options.env).toMatchObject({ ...process.env })
     client.dispose()
   })
 

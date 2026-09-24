@@ -4,6 +4,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -14,6 +16,7 @@ import { PiLoop } from '../../src/engine-pi/loop.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
+import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
 const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -973,6 +976,121 @@ describe('PiAgent model selection', () => {
       expect(second).toContain('--model')
       expect(second).toContain('meicloud/model-b')
       expect(second).not.toContain('meicloud/model-a')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('PiAgent dsh endpoint handover', () => {
+  /** The spawn spec the Nth Pi child was created from. */
+  function specAt(index: number): { argv: string[]; env: Record<string, string> } {
+    const spec = mock.created[index]?.spec as { argv: string[]; env: Record<string, string> } | undefined
+    if (spec === undefined) throw new Error(`no Pi child spawned at index ${index}`)
+    return spec
+  }
+
+  /** The `models.json` a spawn spec's agent directory carries. */
+  function modelsAt(index: number): unknown {
+    const dir = specAt(index).env.PI_CODING_AGENT_DIR
+    if (dir === undefined) throw new Error(`spawn ${index} carried no agent directory`)
+    return JSON.parse(readFileSync(join(dir, 'models.json'), 'utf8'))
+  }
+
+  it('points the child at a self-built agent directory holding the dsh endpoint', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const spec = specAt(0)
+      expect(spec.argv).toContain('--model')
+      expect(spec.argv).toContain(`${DSH_ENDPOINT.provider}/${DSH_ENDPOINT.model}`)
+      expect(spec.argv).toContain('--provider')
+      expect(spec.argv).toContain(DSH_ENDPOINT.provider)
+      expect(spec.argv).toContain('--api-key')
+      expect(spec.argv).toContain(DSH_ENDPOINT.apiKey)
+      expect(modelsAt(0)).toEqual({
+        providers: {
+          [DSH_ENDPOINT.provider]: {
+            baseUrl: DSH_ENDPOINT.baseURL,
+            api: DSH_ENDPOINT.api,
+            apiKey: DSH_ENDPOINT.apiKey,
+            models: [{ id: DSH_ENDPOINT.model, name: DSH_ENDPOINT.model }],
+          },
+        },
+      })
+      // The credential reaches the child (its directory and argv), never the log.
+      expect(JSON.stringify(agent.session.snapshotEvents())).not.toContain(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('hands nothing over for the hosted seat, leaving Pi its own configuration', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-hosted-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const spec = specAt(0)
+      expect('PI_CODING_AGENT_DIR' in spec.env).toBe(false)
+      expect(spec.argv).not.toContain('--api-key')
+      expect(spec.argv).not.toContain('--provider')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects nothing and warns once when the endpoint cannot be resolved', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-unresolved-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      agent.followup(message('again'))
+      await agent.whenIdle()
+
+      for (const index of [0, 1]) {
+        const spec = specAt(index)
+        expect('PI_CODING_AGENT_DIR' in spec.env).toBe(false)
+        expect(spec.argv).not.toContain('--api-key')
+        // The model name still travels; only the endpoint stayed behind.
+        expect(spec.argv).toContain(`${DSH_ENDPOINT.provider}/${DSH_ENDPOINT.model}`)
+      }
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the endpoint every step, so a mid-session change reaches the next child', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      const endpoint = provideDshEndpoint(ctx, { baseURL: 'https://first.example.com/litellm' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-change-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(modelsAt(0)).toMatchObject({ providers: { [DSH_ENDPOINT.provider]: { baseUrl: 'https://first.example.com/litellm' } } })
+
+      endpoint.update({ baseURL: 'https://second.example.com/litellm' })
+      agent.followup(message('again'))
+      await agent.whenIdle()
+      expect(modelsAt(1)).toMatchObject({ providers: { [DSH_ENDPOINT.provider]: { baseUrl: 'https://second.example.com/litellm' } } })
+      expect(specAt(1).env.PI_CODING_AGENT_DIR).not.toBe(specAt(0).env.PI_CODING_AGENT_DIR)
     } finally {
       await ctx.fiber.dispose()
     }

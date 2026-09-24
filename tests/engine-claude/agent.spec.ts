@@ -20,6 +20,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { loopPluginFor, mountHarness } from '../helpers/agent-harness.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
+import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
 const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -1074,6 +1075,104 @@ describe('ClaudeCodeAgent cancellation and pre-step interception', () => {
         type: 'turn/end',
         data: { reason: { kind: 'blocked' } },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('ClaudeCodeAgent dsh endpoint handover', () => {
+  /** The `Options` the Nth query ran with. */
+  function queryOptionsAt(index: number): { env: Record<string, string | undefined>; model?: string } {
+    const args = queryMock.mock.calls[index]?.[0] as { options: { env: Record<string, string | undefined>; model?: string } } | undefined
+    if (args === undefined) throw new Error(`no query ran at index ${index}`)
+    return args.options
+  }
+
+  /** Every durable event rendered as JSON, for the "no credential escapes" assertions. */
+  function sessionLogJson(session: Session): string {
+    return JSON.stringify(session.snapshotEvents())
+  }
+
+  it('hands the selected dsh model\'s endpoint and credential to the SDK environment', async () => {
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      provideDshEndpoint(ctx)
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const options = queryOptionsAt(0)
+      expect(options.model).toBe(DSH_ENDPOINT.model)
+      expect(options.env.ANTHROPIC_BASE_URL).toBe(DSH_ENDPOINT.baseURL)
+      expect(options.env.ANTHROPIC_AUTH_TOKEN).toBe(DSH_ENDPOINT.apiKey)
+      // The credential is handed to the child's environment, never to the log.
+      expect(sessionLogJson(agent.session)).not.toContain(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects no endpoint for the hosted seat, leaving Claude Code its own configuration', async () => {
+    const ctx = await harness()
+    try {
+      provideDshEndpoint(ctx)
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-hosted-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const options = queryOptionsAt(0)
+      expect('ANTHROPIC_BASE_URL' in options.env).toBe(false)
+      expect('ANTHROPIC_AUTH_TOKEN' in options.env).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects nothing and warns once when the endpoint cannot be resolved', async () => {
+    const ctx = await harness()
+    try {
+      const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-unresolved-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      for (const index of [0, 1]) {
+        const options = queryOptionsAt(index)
+        expect('ANTHROPIC_BASE_URL' in options.env).toBe(false)
+        // The model name still travels; only the endpoint stayed behind.
+        expect(options.model).toBe(DSH_ENDPOINT.model)
+      }
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain(DSH_ENDPOINT.model)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('re-resolves the endpoint every step, so a mid-session change reaches the next query', async () => {
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([assistantText('ok'), successResult()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-change-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      const endpoint = provideDshEndpoint(ctx, { baseURL: 'https://first.example.com/litellm' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryOptionsAt(0).env.ANTHROPIC_BASE_URL).toBe('https://first.example.com/litellm')
+
+      endpoint.update({ baseURL: 'https://second.example.com/litellm' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(queryOptionsAt(1).env.ANTHROPIC_BASE_URL).toBe('https://second.example.com/litellm')
     } finally {
       await ctx.fiber.dispose()
     }

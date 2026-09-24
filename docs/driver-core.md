@@ -59,9 +59,9 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
 ```
 
-- `src/engine-claude/agent.ts:531`
-- `src/engine-pi/agent.ts:587`
-- `src/engine-kimi/agent.ts:528`
+- `src/engine-claude/agent.ts:532`
+- `src/engine-pi/agent.ts:609`
+- `src/engine-kimi/agent.ts:550`
 
 命中时本步的 prompt 就是那一行：**不带 `<user>` 框架、也不回放历史**——斜杠命令是引擎的控制行，不是给模型的对话。它仍然只由日志前缀决定，所以投影约束不破。被注入的技能内容（`skill-inject.ts` 落成一条 `skill-invocation` 用户消息）会顶掉"最后一条"，于是那一步照常走转录路径——用户显式调用的技能优先。
 
@@ -71,12 +71,12 @@ codex **不使用**这条路径：app-server 协议没有文本斜杠面（`turn
 
 四个 agent 都先取 `this.session.deriveMessages()`，再组装 prompt，空 prompt 抛错（v8-ignore 的兜底分支）。claude/pi/kimi 走 `engineSlashPrompt(history) ?? serializeHistory(history)`（见上一节），codex 仍只用 `serializeHistory(history)`：
 
-- `src/engine-claude/agent.ts:527-531`
-- `src/engine-codex/agent.ts:601-602`
-- `src/engine-pi/agent.ts:584-587`
-- `src/engine-kimi/agent.ts:525-528`
+- `src/engine-claude/agent.ts:528-532`
+- `src/engine-codex/agent.ts:623-624`
+- `src/engine-pi/agent.ts:606-609`
+- `src/engine-kimi/agent.ts:547-550`
 
-kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:554`），因为 ACP prompt 是一个需要等响应帧的 RPC。
+kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:581`），因为 ACP prompt 是一个需要等响应帧的 RPC。
 
 ### 改它会波及谁
 
@@ -103,7 +103,7 @@ dsh web 的权限预设（只读 / 工作区可写 / 完全放开 × ask / never
 | pi | `src/engine-pi/permission.ts:67-80` | 不剪 `--tools`，不包沙箱 | **降级为 read-only 拒绝**（pi 无审批回调） | `read-only` + 只读工具集（`DEFAULT_PI_PERMISSION`，`:36-39`；`--tools` 派生见 `toolsForSandbox`，`:54-62`） |
 | kimi | `src/engine-kimi/permission.ts:30-31` | 不查 sandbox 旋钮 | `ask` → 拒绝 | 其他（`never`/无旋钮）→ 自动批准 |
 
-claude 还有一个**部署级覆盖**：`cordis.yml` 里钉死的 `config.permissionMode` 直接赢过会话旋钮（`src/engine-claude/agent.ts:369-370`）。kimi 不读 sandbox 旋钮是刻意的——Kimi 自己的工具策略约束工具能做什么，ACP 审批是宿主侧闸门，只由 `approval/policy` 信号驱动（`src/engine-kimi/permission.ts:22-27` 的头注）。
+claude 还有一个**部署级覆盖**：`cordis.yml` 里钉死的 `config.permissionMode` 直接赢过会话旋钮（`src/engine-claude/agent.ts:370-371`）。kimi 不读 sandbox 旋钮是刻意的——Kimi 自己的工具策略约束工具能做什么，ACP 审批是宿主侧闸门，只由 `approval/policy` 信号驱动（`src/engine-kimi/permission.ts:22-27` 的头注）。
 
 ### 改它会波及谁
 
@@ -186,7 +186,7 @@ dsh 里**恰好只有一个工厂**能占住 `AgentFactory` 槽位（第二次�
 | `persistence.create` | `:415-418` |
 | `persistence.open` + `handle.read` + `sessions.prepare` | `:510-530` |
 
-kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt 响应（`src/engine-kimi/agent.ts:554`）。
+kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt 响应（`src/engine-kimi/agent.ts:581`）。
 
 ### 改它会波及谁
 
@@ -211,13 +211,13 @@ harness 0.1.5 把两件原本由 `dsh-agent` 提供的东西收了回去：`Inbo
 
 | 用途 | claude | codex | pi | kimi |
 |---|---|---|---|---|
-| 构造 `DriverInbox` | agent.ts:150-154 | agent.ts:177-181 | agent.ts:154-158 | agent.ts:140-144 |
-| 开一次流式尝试（`new DriverAssistantStream` + `start()`） | agent.ts:572-579 | agent.ts:670-677 | agent.ts:621-628 | agent.ts:734-741 |
-| chunk 入流 | agent.ts:611 | agent.ts:757-759 | agent.ts:822-826 | agent.ts:655-667 |
-| 写 `assistant/message` 并 `settle` | agent.ts:669-671 | agent.ts:713-715 | agent.ts:693-695 | agent.ts:812-814 |
-| 段尾 `abandon()` | agent.ts:771 | agent.ts:909 | agent.ts:913 | agent.ts:578 |
+| 构造 `DriverInbox` | agent.ts:151-155 | agent.ts:179-189 | agent.ts:156-160 | agent.ts:149-153 |
+| 开一次流式尝试（`new DriverAssistantStream` + `start()`） | agent.ts:573-580 | agent.ts:698-705 | agent.ts:643-650 | agent.ts:765-772 |
+| chunk 入流 | agent.ts:622 | agent.ts:785-787 | agent.ts:844-848 | agent.ts:686-698 |
+| 写 `assistant/message` 并 `settle` | agent.ts:680-682 | agent.ts:741-743 | agent.ts:715-717 | agent.ts:843-845 |
+| 段尾 `abandon()` | agent.ts:782 | agent.ts:937 | agent.ts:935 | agent.ts:609 |
 
-kimi 是唯一把 flush 抽成独立方法的引擎，也是唯一**按 phase 惰性打开流尝试**的引擎：`currentStream(phase)`（`src/engine-kimi/agent.ts:732-744`）在第一个 chunk 到达时建 `DriverAssistantStream` 并 `start()`，`flushSegment`（`:756-764`）与它调用的 `flushAssistant`（`:781-820`）负责收尾，段与段之间把 `this.live` 置空。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀（`src/engine-codex/agent.ts:803`、`:820`），plan item 结束时也切一刀但这段 chunk 直接丢弃（plan 没有内容块，`:811`），`HeldMessage.stream` 装的就是这一段自己的 chunk；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
+kimi 是唯一把 flush 抽成独立方法的引擎，也是唯一**按 phase 惰性打开流尝试**的引擎：`currentStream(phase)`（`src/engine-kimi/agent.ts:763-775`）在第一个 chunk 到达时建 `DriverAssistantStream` 并 `start()`，`flushSegment`（`:756-764`）与它调用的 `flushAssistant`（`:781-820`）负责收尾，段与段之间把 `this.live` 置空。codex 是唯一在内容分段边界调用 `takeStream()` 的引擎：`item-completed` 在推理 item 与正文 item 结束时各切一刀（`src/engine-codex/agent.ts:831`、`:820`），plan item 结束时也切一刀但这段 chunk 直接丢弃（plan 没有内容块，`:811`），`HeldMessage.stream` 装的就是这一段自己的 chunk；claude / pi / kimi 不切段，整段尝试的 `attempt.stream` 一起内嵌。
 
 ### 改它会波及谁
 
@@ -257,14 +257,14 @@ claude **不用**这个模块：CLAUDE.md 由 `ClaudeCodeSkillProvider` 按"带 
 
 ### 7.1 skill-inject.ts：为什么托管引擎要自己复刻 `/name`
 
-进程内引擎的技能注入由 dsh-tool-skill 的 handler 完成，但它挂在 agent-preset 上下文链上，而托管引擎 agent 的上下文**不从那条链派生**（`src/driver-core/skill-inject.ts:1-8` 头注；claude agent 里也有同样的注释，`src/engine-claude/agent.ts:312-315`）。所以四个 agent 各自复制同一段注入流程，共享部分抽在这里：
+进程内引擎的技能注入由 dsh-tool-skill 的 handler 完成，但它挂在 agent-preset 上下文链上，而托管引擎 agent 的上下文**不从那条链派生**（`src/driver-core/skill-inject.ts:1-8` 头注；claude agent 里也有同样的注释，`src/engine-claude/agent.ts:313-316`）。所以四个 agent 各自复制同一段注入流程，共享部分抽在这里：
 
 - `SKILL_GESTURE`（`:18`）：空白边界的 `/name` 手势正则，name 必须 kebab-case（`SKILL_NAME_RE`，`:15`）；
 - `invokedSkillNames(messages)`（`:84-97`）：只扫 `source.kind === 'user'` 的消息文本块，按首次出现顺序去重——**tool 结果、技能注入消息自身不会被递归扫描**；
 - `renderSkillContent(skill)`（`:67-81`）：渲染 `<skill_content>` XML；`resourceBase.kind === 'directory'` 时写明基目录让模型自行解析相对路径，否则声明资源由 provider 管理；`escapeText` / `escapeAttr`（`:57-64`）防注入；
 - `SkillInvocationSource`（`:38-42`）+ `MessageSourceMap` 模块增强（`:44-49`）：注入的消息带持久 source `{ kind: 'skill-invocation', name, form: 'instructions' }`，镜像 dsh-skill 的线上形状，保证重放时能被识别。
 
-四个 agent 的 `injectSkills` 逐字一致（claude `src/engine-claude/agent.ts:332-358`；codex `:444-470`；pi `:352-378`；kimi `src/engine-kimi/agent.ts:331-357`）：从 `loopCtx` 取 `skills` 服务（`SkillsService` 最小形状，`:52-54`），逐个 `skills.get(name, { cwd, signal, scope: this })`，加载失败静默跳过、`userInvocable === false` 跳过、中途 abort 整批放弃返回原消息，最后把注入消息**追加**到本步消息批末尾。
+四个 agent 的 `injectSkills` 逐字一致（claude `src/engine-claude/agent.ts:333-359`；codex `:444-470`；pi `:352-378`；kimi `src/engine-kimi/agent.ts:340-366`）：从 `loopCtx` 取 `skills` 服务（`SkillsService` 最小形状，`:52-54`），逐个 `skills.get(name, { cwd, signal, scope: this })`，加载失败静默跳过、`userInvocable === false` 跳过、中途 abort 整批放弃返回原消息，最后把注入消息**追加**到本步消息批末尾。
 
 ### 7.2 skills.ts：ClaudeCodeSkillProvider 与各引擎 provider 的共性
 
@@ -380,7 +380,37 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 
 ### 改它会波及谁
 
-判据的任何改动（例如把"provider 是托管标签"换成别的、或加入 reasoning effort）会同时改变四个引擎下发的模型参数与 `model-selection-reset.ts` 的读取。测试：`tests/driver-core/session-model.spec.ts` 覆盖判据与读取的每个分支；四个 `tests/engine-*/agent.spec.ts` 各有"真实模型下发 / `external` 或空不下发 / pin 回落 / 中途改值"一组，kimi 另有"`set_model` 报错浮上来"一条。共享 `modelSelection` 折叠在 `tests/helpers/model-selection-projection.ts`。
+判据的任何改动（例如把"provider 是托管标签"换成别的、或加入 reasoning effort）会同时改变四个引擎下发的模型参数与 `model-selection-reset.ts` 的读取。测试：`tests/driver-core/session-model.spec.ts` 覆盖判据与读取的每个分支；四个 `tests/engine-*/agent.spec.ts` 各有"真实模型下发 / `external` 或空不下发 / pin 回落 / 中途改值"一组。共享 `modelSelection` 折叠在 `tests/helpers/model-selection-projection.ts`。
+
+## 7.7 model-handover.ts：端点、协议与凭据的共同解析
+
+### 解决什么问题
+
+§7.6 只解决"**模型名**怎么送到引擎"。引擎拿到模型名之后，仍用**它自己那份**凭据与 provider 配置去解析——所以"把 dsh 模型交给引擎"过去实际是"引擎能不能在自己那份配置里找到这个模型名"，而不是"用 dsh 的那个端点对话"。这个模块是**后半截**：把会话选中的那条 dsh 模型解析成 `{ model, baseURL, api, apiKey }`，四个驱动各自翻译进自己的入口（`resolveModelHandover`，一次解析、四处消费）。
+
+### 契约
+
+- **输入**：`(ctx, override)`，`override` 就是 §7.6 的 `sessionModelOverrideOf(...)` 结果。`undefined`（托管座位/没有选择）→ 直接 `undefined`，**不注入任何东西**。
+- **provider → namespace 的映射规则**（这一步是"不许猜"的关键）：取自 **llm 注册表自己的"可配置 provider 目录"**——`ctx.llm.listConfigurableProviders()`（主仓 `LlmRuntime`，外形见 `packages/llm/llm/src/types.ts` 的 `LlmConfigurableProvider`：`{ provider, displayName, settingsNs, settingsPath }`）。也就是说**不是**本插件硬编 `llm-pi-ai` / `llm-deepseek`，而是问注册表"这条 provider 路由由哪个 ns 的哪一段配置"。当前两个 provider 插件给出的答案是：`llm-pi-ai` → `settingsNs: 'llm-pi-ai'`、`settingsPath: ['providers', <路由名>]`；`llm-deepseek` → `settingsNs: 'llm-deepseek'`、`settingsPath: []`（整段就是 profile）。注册表缺席、没有 `listConfigurableProviders`、或目录里没有这条 provider → **映射失败 → 不注入 + warn 一次**。
+- **profile 读取**：`ctx.settings.get(ns)` 拿到该 ns 的 resolved 值，按 `settingsPath` 走；读到的对象必须有非空字符串的 `baseURL` 与 `api`，`apiKeyEnv` 可选（非空字符串才认）。任何形状不符 → 不注入 + warn 一次。`api` 是 dsh 的 wire 协议名（`llm-pi-ai` 的 `PROTOCOLS`：`anthropic-messages` / `openai-completions` / `openai-responses`），**缺失即不注入**——插件不替它假定一个协议。
+- **凭据**：`apiKeyEnv` 是**环境变量名**（`CredentialRef`），值在 harness 的凭据存储里，**不在 process.env**（主仓 `packages/bundle/base/cordis.patch.yml`:83-93 明说不 materialize 进进程环境）。解析顺序：`ctx.credentials.resolve(apiKeyEnv)?.value`（seam 缺席或答空时）→ `process.env[apiKeyEnv]`；两者都拿不到 → 不注入 + warn 一次。
+- **warn 去重**：一条会话**每个 step** 都重解析，所以每条"provider/model + 失败原因"只 warn **一次**（`WeakMap<Context, Set<string>>`）。warn 文案只带 provider 与 model，**绝不带凭据值**。
+- 返回的 `DshModelHandover` 含 `apiKey`；调用方只把它放进子进程 env（或 pi 自建的 `0600` 目录文件 / argv），**不写日志、不进事件、不进 `request/header`**。
+
+### 逐引擎翻译（各驱动内联或各自的 `model-handover.ts`）
+
+| 引擎 | 端点/凭据入口 | 协议翻译 |
+|---|---|---|
+| claude-code | `Options.env` 里 `ANTHROPIC_BASE_URL` = `baseURL`、`ANTHROPIC_AUTH_TOKEN` = `apiKey`（在 `src/engine-claude/agent.ts` step 内联；`sdk.ts` 已把 `scrubbedParentEnv()` 铺底再叠 `spec.env`） | 无（Claude Code 天然只说 `/v1/messages`） |
+| kimi | 子进程 env：`KIMI_MODEL_NAME` = model、`KIMI_MODEL_API_KEY` = apiKey、`KIMI_MODEL_BASE_URL` = baseURL、`KIMI_MODEL_PROVIDER_TYPE`（`kimiModelEnv`，`src/engine-kimi/model-handover.ts`）；有端点注入时**跳过** `session/set_model`（env model 已是默认） | `anthropic-messages`→`anthropic`；`openai-completions`/`openai-responses`→`openai`；其余**省略该变量**（退回 kimi 默认，由 kimi 报错） |
+| pi | 插件自建 agent 目录（`piAgentDir`，`src/engine-pi/model-handover.ts`：`<tmp>/dsh-loop-engine-pi-agent/<hash>/models.json`，0700/0600）+ env `PI_CODING_AGENT_DIR` + argv `--provider` / `--model <provider>/<model>` / `--api-key`；**绝不碰 `~/.pi`** | `api` 原样写进 `models.json`（pi 认 `openai-completions` / `anthropic-messages` 等自由字符串） |
+| codex | `-c model_provider="dsh"` + `-c model_providers.dsh={base_url,wire_api,env_key}` + env `DSH_LOOP_ENGINE_API_KEY`（`codexModelConfig`，`src/engine-codex/model-handover.ts`）；经 `AppServerClient.create(argv, env)`（env 是**叠加在 `process.env` 之上**，见 `src/engine-codex/appserver/client.ts`）；端点指纹变了就重启 app-server | `openai-responses`→`responses`；`openai-completions`→`chat`；`anthropic-messages`/其余**省略 `wire_api`**（codex 用自己的默认 wire 去请求并报错） |
+
+**只在必要时注入**：会话选择是 `external/default` 或没有任何选择 → 四家都**完全不注入**（引擎用自己原生配置/部署 pin，即旧行为）。
+
+### 改它会波及谁
+
+`resolveModelHandover` 的判据改动会同时改变四个引擎的端点注入与 warn 行为；映射表（kimi 的 `KIMI_PROVIDER_TYPES`、codex 的 `CODEX_WIRE_APIS`）改动只影响对应引擎。测试：`tests/driver-core/model-handover.spec.ts` 覆盖解析的每个分支（无映射 / 无 settings / 形状不符 / 缺凭据 / warn 一次 / 凭据不入文案）；`tests/engine-{kimi,pi,codex}/model-handover.spec.ts` 覆盖三张映射表与 pi 目录落盘；四个 `tests/engine-*/agent.spec.ts` 各有"端点/凭据注入到引擎入口 / `external` 或空不注入 / 解析不到不注入 + warn 一次 / 中途改端点生效"一组，codex 另在 `tests/engine-codex/appserver/client.spec.ts` 覆盖 `create(argv, env)` 通路本身（含 `config.env` 之前无人消费的回归）。驱动器夹具在 `tests/helpers/dsh-model-endpoint.ts`。
 
 ## 8. 改动影响矩阵
 
@@ -394,6 +424,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 | `engine-surface.ts` 命令/技能注册 | 托管会话的斜杠菜单与技能目录（按 agent scope 隔离） | `tests/index.spec.ts`（真 agent scope）；`tests/router-loop.spec.ts` 只断言"是否调用"（该模块被 mock） |
 | `preset.ts` `engineOfPreset` / `enginePresetId` / `ensureEnginePresets` | 每会话的引擎选择与磁盘上的 preset 文件 | `tests/preset.spec.ts` + `tests/router-loop.spec.ts` |
 | `host-servers.ts` 结构切片 | 所有消费方（纯类型，编译期） | 无独立 spec；由 `pnpm run typecheck` 与各消费方 spec 兜住 |
+| `model-handover.ts` 解析 / 两张映射表 | 四个引擎的端点与凭据注入、warn 次数 | `tests/driver-core/model-handover.spec.ts` + `tests/engine-{kimi,pi,codex}/model-handover.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `inbox.ts` 折叠与落盘 | 四个引擎的收件箱语义与 `agent/inbox/spliced` 持久流 | `tests/driver-core/inbox.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `assistant-stream.ts` 帧与分段压缩 | 四条流式路径的 live 帧与内嵌 stream | `tests/driver-core/assistant-stream.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
@@ -525,7 +556,7 @@ harness 的 `AgentRegistry.setFactory` 只接受一个工厂（第二次注册�
 `registerEngineSurface(agent, engine, warn)`（`src/engine-surface.ts:77-97`）用 **`agent.ctx`** 而不是插件的 ctx 去取服务并注册，这一处选择就是全部作用域机制：
 
 - `commands.register` / `skills.registerProvider` 把定义写进**调用方 ctx 所在 scope 的那一层**（harness `../deepseek-harness/packages/core/scope/src/store.ts:231` 的 `scopeOf(ctx)`）；
-- agent 的 scope key 就是 agent 自己：默认 loop 用 `createScope(loopCtx, this)` 建 scope（`../deepseek-harness/packages/core/agent-loop/src/agent.ts:104`），四个托管驱动也各自这么做（`src/engine-claude/agent.ts:157`、`src/engine-codex/agent.ts:184`、`src/engine-pi/agent.ts:161`、`src/engine-kimi/agent.ts:147`），并把 `agent.ctx` 挂成 `scope.ctx.extend({ agent: this })`（同一处的下一行）。
+- agent 的 scope key 就是 agent 自己：默认 loop 用 `createScope(loopCtx, this)` 建 scope（`../deepseek-harness/packages/core/agent-loop/src/agent.ts:104`），四个托管驱动也各自这么做（`src/engine-claude/agent.ts:158`、`src/engine-codex/agent.ts:192`、`src/engine-pi/agent.ts:163`、`src/engine-kimi/agent.ts:156`），并把 `agent.ctx` 挂成 `scope.ctx.extend({ agent: this })`（同一处的下一行）。
 
 于是注册天然按 agent 隔离：A/B 两个会话的菜单与技能目录互不可见，agent 的 scope 被拆掉时注册自动回收。插件侧因此不需要记账、不需要按引擎卸载，也不会在切引擎时泄漏。
 

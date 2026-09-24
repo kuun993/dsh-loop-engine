@@ -367,16 +367,18 @@ describe('the engine a surface names', () => {
     // ("the engine decides the model") read as a property of one engine — while
     // the model menu now carries one entry per hosted engine. So the copy names
     // none of them, says what that entry means, and describes what a real pick
-    // does: it is HANDED to the engine (which may refuse it), rather than the
-    // "no effect" the earlier copy claimed.
+    // does: it is HANDED to the engine together with its endpoint and credential
+    // (and a protocol the engine does not speak is the engine's error to report),
+    // rather than the "no effect" the earliest copy claimed or the
+    // "engine's own credentials" a later one claimed.
     for (const [lang, dict] of [['zh', zh], ['en', en]] as const) {
       const copy = dict.hostedEngineModelNotice
       expect(`${lang}=${copy}`).not.toMatch(/Claude Code|Codex|Kimi|Pi CLI|claude-code/i)
       expect(copy).toContain('default')
     }
-    expect(zh.hostedEngineModelNotice).toContain('交给该引擎使用')
+    expect(zh.hostedEngineModelNotice).toContain('端点与凭据')
     expect(zh.hostedEngineModelNotice).toContain('报错')
-    expect(en.hostedEngineModelNotice).toContain('hands it to the engine')
+    expect(en.hostedEngineModelNotice).toContain('endpoint and credential')
     expect(en.hostedEngineModelNotice).toContain('reports an error')
     expect(zh.hostedEngineModelNotice).toContain('引擎')
     expect(en.hostedEngineModelNotice).toMatch(/engine/i)

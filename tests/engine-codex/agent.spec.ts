@@ -13,6 +13,7 @@ import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
+import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
 const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
 
@@ -24,13 +25,16 @@ type RunStreamed = (
 /** Hoisted mock state: every constructed fake client plus the runStreamed implementation. */
 const mock = vi.hoisted(() => ({
   constructed: [] as Array<{ threadParams: Record<string, unknown> }>,
+  spawns: [] as Array<{ argv: readonly string[]; env: NodeJS.ProcessEnv }>,
   runStreamed: vi.fn<RunStreamed>(),
   requestHandler: undefined as undefined | ((method: string, params: unknown) => Promise<{ result?: unknown; error?: { code: number; message: string } }>),
 }))
 
 vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
   AppServerClient: {
-    create: async () => ({
+    create: async (argv: readonly string[], env: NodeJS.ProcessEnv) => {
+      mock.spawns.push({ argv, env })
+      return {
       threadStart: async () => ({ thread: { id: 'mock-thread-1' } }),
       threadResume: async () => ({ thread: { id: 'mock-thread-1' } }),
       turnStart: async () => ({ turn: { id: 'mock-turn-1', status: 'inProgress' } }),
@@ -41,7 +45,8 @@ vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
       },
       onStderr: () => {},
       dispose: () => {},
-    }),
+      }
+    },
   },
 }))
 
@@ -64,6 +69,7 @@ vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
 
 beforeEach(() => {
   mock.constructed.length = 0
+  mock.spawns.length = 0
   mock.runStreamed.mockReset()
   mock.requestHandler = undefined
 })
@@ -1558,6 +1564,128 @@ describe('CodexAgent model selection', () => {
       agent.followup(message('again'))
       await agent.whenIdle()
       expect(mock.constructed[1]?.threadParams.model).toBe('model-b')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('CodexAgent dsh endpoint handover', () => {
+  /** The spawn arguments the Nth app-server was created with. */
+  function spawnAt(index: number): { argv: readonly string[]; env: NodeJS.ProcessEnv } {
+    const spawn = mock.spawns[index]
+    if (spawn === undefined) throw new Error(`no app-server spawned at index ${index}`)
+    return spawn
+  }
+
+  it('spawns the app-server with the dsh provider override and the credential env', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      provideDshEndpoint(ctx, { api: 'openai-responses' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const { argv, env } = spawnAt(0)
+      expect(argv).toContain('model_provider="dsh"')
+      expect(argv.some(entry => entry.startsWith('model_providers.dsh={'))).toBe(true)
+      const profile = argv.find(entry => entry.startsWith('model_providers.dsh={'))!
+      expect(profile).toContain(`base_url="${DSH_ENDPOINT.baseURL}"`)
+      expect(profile).toContain('wire_api="responses"')
+      expect(profile).toContain('env_key="DSH_LOOP_ENGINE_API_KEY"')
+      expect(env.DSH_LOOP_ENGINE_API_KEY).toBe(DSH_ENDPOINT.apiKey)
+      // The model itself still travels as the thread's own param.
+      expect(mock.constructed[0]?.threadParams.model).toBe(DSH_ENDPOINT.model)
+      // The credential reaches the child's environment, never the session log.
+      expect(JSON.stringify(agent.session.snapshotEvents())).not.toContain(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('passes the deployment\'s own env entries to the app-server, with the handover layered over them', async () => {
+    const ctx = await harness({ env: { CODEX_STATIC: 'from-config' } })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-env-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // `config.env` used to be parsed and never consumed; it now reaches the
+      // child, which is what makes the argv/env path real.
+      expect(spawnAt(0).env.CODEX_STATIC).toBe('from-config')
+      expect(spawnAt(0).env.DSH_LOOP_ENGINE_API_KEY).toBe(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('spawns a bare app-server when no endpoint is handed over', async () => {
+    const ctx = await harness({ model: 'deployment-pinned', env: { CODEX_STATIC: 'from-config' } })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-hosted-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      const { argv, env } = spawnAt(0)
+      expect(argv).toEqual([])
+      expect('DSH_LOOP_ENGINE_API_KEY' in env).toBe(false)
+      // The deployment's own env still reaches the child.
+      expect(env.CODEX_STATIC).toBe('from-config')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects nothing and warns once when the endpoint cannot be resolved', async () => {
+    const ctx = await harness()
+    try {
+      const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-unresolved-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      agent.followup(message('two'))
+      await agent.whenIdle()
+
+      expect(spawnAt(0).argv).toEqual([])
+      // The model name still travels; only the endpoint stayed behind.
+      expect(mock.constructed[0]?.threadParams.model).toBe(DSH_ENDPOINT.model)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('respawns the app-server when the endpoint changes mid-session', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const endpoint = provideDshEndpoint(ctx, { baseURL: 'https://first.example.com/litellm' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-change-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      expect(spawnAt(0).argv.some(entry => entry.includes('https://first.example.com/litellm'))).toBe(true)
+
+      endpoint.update({ baseURL: 'https://second.example.com/litellm' })
+      agent.followup(message('two'))
+      await agent.whenIdle()
+      expect(mock.spawns).toHaveLength(2)
+      expect(spawnAt(1).argv.some(entry => entry.includes('https://second.example.com/litellm'))).toBe(true)
+
+      // An unchanged endpoint reuses the running child rather than respawning.
+      agent.followup(message('three'))
+      await agent.whenIdle()
+      expect(mock.spawns).toHaveLength(2)
     } finally {
       await ctx.fiber.dispose()
     }

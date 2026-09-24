@@ -7,7 +7,7 @@
 claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-sdk`）驱动 dsh 会话。核心模型是：
 
 - **每个 dsh step 一次无状态 query**（`src/engine-claude/loop.ts:2-6` 模块注释）。SDK 进程不保留任何会话状态：`persistSession: false`（`src/engine-claude/sdk.ts:97`），dsh 的持久化 session log 是模型上下文的唯一来源。注意**反方向不成立**：一次 query 里模型会跑很多个内部轮次，driver 会在片段边界把 dsh step 轮转开（§4.1），所以一个 query ≠ 一个 step。
-- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:527-531`、`src/driver-core/prompt.ts:150`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。**例外**是本步最后一条消息就是一条斜杠命令：那时改发裸行（`engineSlashPrompt(history) ?? serializeHistory(history)`，`src/driver-core/prompt.ts:122`，见 §7.1），否则 CLI 的本地命令派发看不到它。
+- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:528-532`、`src/driver-core/prompt.ts:150`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。**例外**是本步最后一条消息就是一条斜杠命令：那时改发裸行（`engineSlashPrompt(history) ?? serializeHistory(history)`，`src/driver-core/prompt.ts:122`，见 §7.1），否则 CLI 的本地命令派发看不到它。
 - **Claude Code 拥有自己的 prompt、工具和权限**。SDK 子进程是真正的 agent 运行时（自带系统提示、内置工具、技能展开）；dsh 侧只做收件箱、turn/step 边界、事件落盘和审批转发（`src/engine-claude/agent.ts:1-8`）。
 - **进程模型**：SDK 的 `query()` 内部 spawn 一个 `claude` CLI 子进程。引擎通过 SDK 的 `spawnClaudeCodeProcess` 钩子把 spawn 请求转交给 dsh 的 subprocess seam（`src/engine-claude/sdk.ts:145-148`），子进程树的生命周期（终止升级阶梯、grace）由 harness 统一管理，而不是 SDK 直接 `child_process.spawn`。
 
@@ -74,33 +74,33 @@ claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-s
 
 ### 3.3 Agent 的 turn/step 驱动
 
-`ClaudeCodeAgent` 的状态机是三态 `Phase`：`idle` / `maintenance` / `running`（`src/engine-claude/agent.ts:64-72`）。
+`ClaudeCodeAgent` 的状态机是三态 `Phase`：`idle` / `maintenance` / `running`（`src/engine-claude/agent.ts:65-73`）。
 
-- **收件箱**：`DriverInbox` 区分 `next-turn` 与 `next-step` 两个目标；`followup` 排 next-turn 并唤醒、`steer` 排 next-step 并唤醒、`inject` 排 next-step 不唤醒（`src/engine-claude/agent.ts:156-174`）。`cancel` 默认清空收件箱并 abort 当前 phase；`keepInbox` 保队列（`src/engine-claude/agent.ts:176-182`）。
-- **唤醒**：`wakeDriver` 只在 idle 时开新 driver；非 idle 时若原因是 maintenance 或"abort 后唤醒"则 latch `wakeRequested`，driver 退出时若收件箱仍有消息会接力唤醒（`src/engine-claude/agent.ts:219-237`、`254-268`）。一个细节：abort 之后收到的 wakeup 会被 `send` 重分类为 `next-turn`（`src/engine-claude/agent.ts:146-148`），保证它开启新 turn 而不是混入已死的 step。
+- **收件箱**：`DriverInbox` 区分 `next-turn` 与 `next-step` 两个目标；`followup` 排 next-turn 并唤醒、`steer` 排 next-step 并唤醒、`inject` 排 next-step 不唤醒（`src/engine-claude/agent.ts:157-175`）。`cancel` 默认清空收件箱并 abort 当前 phase；`keepInbox` 保队列（`src/engine-claude/agent.ts:177-183`）。
+- **唤醒**：`wakeDriver` 只在 idle 时开新 driver；非 idle 时若原因是 maintenance 或"abort 后唤醒"则 latch `wakeRequested`，driver 退出时若收件箱仍有消息会接力唤醒（`src/engine-claude/agent.ts:220-238`、`254-268`）。一个细节：abort 之后收到的 wakeup 会被 `send` 重分类为 `next-turn`（`src/engine-claude/agent.ts:147-149`），保证它开启新 turn 而不是混入已死的 step。
 - **turn**：`turn/start` 落盘 → 循环 `preStep`（claim 消息 → `agent/pre-step` waterfall，可被拦截 reject → 技能注入）→ `step/start` → 每条用户消息落 `user/message` → `step()` → `step/end`。turn 结束原因在 `turn/end` 落盘：`completed` / `blocked` / `aborted` / `error`。`agent/turn-stopping` serial 事件给拦截器最后一次注入输入的机会。
   两个关键点：① `step()` 内部会在助手片段边界轮转 step（§4.1），所以收尾的 `step/end` 关的是 `phase.step` 而非本次迭代开头开的 step；② **轮转出来的 step 不重跑 `preStep`**——只有 turn 的第一个 step 走 inbox claim / waterfall / 技能注入，因为一次 query 是原子的、中途也无法投递 steer/inject。
-- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:510-521`）。header 的 model 标签是 `config.model ?? 'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts:71`）——**不镜像** web 会话的模型选择：header 记的是引擎自己的**座位**标签（模型没被部署钉死时就是 `default`），而会话选的真实模型是每步经 `Options.model` 传给 query 的（见 §8），两者是两件事（背景见 `docs/proposals/per-session-model-for-hosted-engines.md`）。这个 `'default'` 也正是本插件给共享占位 provider 路由**唯一**广告的模型条目（`{ provider: 'external', id: 'default', name: 'default' }`，`src/provider-route.ts`）——菜单按 `model.id` 解析会话的 `(provider, model)`，所以两边同串才能让那一格显示成「default」，而不是拼出一个不存在的 `external/...`。provider 标签是四个引擎**共用**的 `'external'`（`PROVIDER = HOSTED_ROUTE_LABEL`，`src/engine-claude/agent.ts`），由插件**常驻**注册为**一条**占位 provider 路由（`src/index.ts` 的 `mountProviderRoutes`、`src/provider-route.ts`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。早期版本写下的 `'claude-code'` 标签不再注册，但仍被 `isHostedProviderRoute` 判为托管路由以便重置老会话。
+- **request/header**：每个 loop 实例只在第一个 step 前落一次，`reason` 按 session 是否已有 baseline 区分 `initial` / `resume`（`src/engine-claude/agent.ts:511-522`）。header 的 model 标签是 `config.model ?? 'default'`（`HOSTED_DEFAULT_MODEL`，`src/agent-preset-ids.ts:71`）——**不镜像** web 会话的模型选择：header 记的是引擎自己的**座位**标签（模型没被部署钉死时就是 `default`），而会话选的真实模型是每步经 `Options.model` 传给 query 的（见 §8），两者是两件事（背景见 `docs/proposals/per-session-model-for-hosted-engines.md`）。这个 `'default'` 也正是本插件给共享占位 provider 路由**唯一**广告的模型条目（`{ provider: 'external', id: 'default', name: 'default' }`，`src/provider-route.ts`）——菜单按 `model.id` 解析会话的 `(provider, model)`，所以两边同串才能让那一格显示成「default」，而不是拼出一个不存在的 `external/...`。provider 标签是四个引擎**共用**的 `'external'`（`PROVIDER = HOSTED_ROUTE_LABEL`，`src/engine-claude/agent.ts`），由插件**常驻**注册为**一条**占位 provider 路由（`src/index.ts` 的 `mountProviderRoutes`、`src/provider-route.ts`；见 `docs/architecture.md` §3.6），否则宿主按 header 推导的会话模型选择会让第二轮 prompt 被 `model-unavailable` 拒绝。早期版本写下的 `'claude-code'` 标签不再注册，但仍被 `isHostedProviderRoute` 判为托管路由以便重置老会话。
 
 ### 3.4 中断与销毁
 
-step 内的取消路径：phase 信号 → 单次监听器转成 per-query `AbortController` 的 abort（`src/engine-claude/agent.ts:482-491`）→ SDK 中断 query、终止子进程。`turn` 的 catch 区分：信号已 abort → `turn/end` 记 `aborted`；否则记 `error` 并经 `throwError` 先派发 `agent/error` 再抛出，由 `kick` 的 driver 边界收容（`src/engine-claude/agent.ts:246-268`、`414-433`）。`finally` 里无条件 `controller.abort()` 并摘掉监听器（`src/engine-claude/agent.ts:659-665`）。
+step 内的取消路径：phase 信号 → 单次监听器转成 per-query `AbortController` 的 abort（`src/engine-claude/agent.ts:483-492`）→ SDK 中断 query、终止子进程。`turn` 的 catch 区分：信号已 abort → `turn/end` 记 `aborted`；否则记 `error` 并经 `throwError` 先派发 `agent/error` 再抛出，由 `kick` 的 driver 边界收容（`src/engine-claude/agent.ts:247-269`、`414-433`）。`finally` 里无条件 `controller.abort()` 并摘掉监听器（`src/engine-claude/agent.ts:670-676`）。
 
 ## 4. 事件/消息映射
 
-映射分两个方向。**入方向**（dsh → SDK）只有一件产物：prompt 文本（第 1 节）。**出方向**（SDK → dsh）在 `agent.ts` 的 `for await (const message of query)` 循环里按 `message.type` 分派（`src/engine-claude/agent.ts:532-651`），翻译逻辑全部在 `mapping.ts`：
+映射分两个方向。**入方向**（dsh → SDK）只有一件产物：prompt 文本（第 1 节）。**出方向**（SDK → dsh）在 `agent.ts` 的 `for await (const message of query)` 循环里按 `message.type` 分派（`src/engine-claude/agent.ts:533-662`），翻译逻辑全部在 `mapping.ts`：
 
-- **`stream_event`**（SDK 原始流事件，因 `includePartialMessages: true` 才有，`src/engine-claude/sdk.ts:91-96`）：`mapStreamEvent` 把 `content_block_start` / `content_block_delta` 翻成 dsh `StreamChunk`（`block-start` / `text-delta` / `reasoning-delta` / `tool-call-delta`），每个 chunk 交给这次尝试的 `DriverAssistantStream`（`currentStream()`）：它把 chunk 按时间戳压进 compact stream，并发一条 `agent/assistant-stream` 的 `chunk` 帧（`src/engine-claude/agent.ts:512-524`、`535-543`；`src/driver-core/assistant-stream.ts:72-82`）。tool_use 的 call 身份（callId + name）在 `content_block_start` 时按 block index 记进 `toolCalls` Map，供后续 `input_json_delta` 命名；匹配不到时合成 `call-${index}`（`src/engine-claude/mapping.ts:221-223`、`236-243`）。`content_block_stop`、`message_*` 等传输事件不产出 chunk——durable 消息由完整 `assistant` 消息另行落盘；chunk 的 live 帧只驱动 web 端的实时 partial 投影，同一批 chunk 还会作为消息内嵌的 stream 落盘。
+- **`stream_event`**（SDK 原始流事件，因 `includePartialMessages: true` 才有，`src/engine-claude/sdk.ts:91-96`）：`mapStreamEvent` 把 `content_block_start` / `content_block_delta` 翻成 dsh `StreamChunk`（`block-start` / `text-delta` / `reasoning-delta` / `tool-call-delta`），每个 chunk 交给这次尝试的 `DriverAssistantStream`（`currentStream()`）：它把 chunk 按时间戳压进 compact stream，并发一条 `agent/assistant-stream` 的 `chunk` 帧（`src/engine-claude/agent.ts:513-525`、`535-543`；`src/driver-core/assistant-stream.ts:72-82`）。tool_use 的 call 身份（callId + name）在 `content_block_start` 时按 block index 记进 `toolCalls` Map，供后续 `input_json_delta` 命名；匹配不到时合成 `call-${index}`（`src/engine-claude/mapping.ts:221-223`、`236-243`）。`content_block_stop`、`message_*` 等传输事件不产出 chunk——durable 消息由完整 `assistant` 消息另行落盘；chunk 的 live 帧只驱动 web 端的实时 partial 投影，同一批 chunk 还会作为消息内嵌的 stream 落盘。
 - **`assistant`**：`mapAssistantMessage` 逐 block 翻译——text 原样、tool_use 同时产出 `tool-call` 内容块和一条 `tool/call` 事件（SDK 的 tool_use id 直接复用为 dsh `ToolCallId` 以便结果配对）、thinking → `reasoning`、redacted-thinking 与未知块丢弃（`src/engine-claude/mapping.ts:72-114`）。usage 经 `mapUsage` 翻译，cache 计数为 null 时省略（`src/engine-claude/mapping.ts:180-187`）。内容块保留 SDK 的原名（`Read`/`Write`/`Edit`/`Bash`/`TodoWrite`），而落盘的 `tool/call` 事件经 `normalizeHostedToolCall('claude-code', …)` 投影成 dsh 名（`Read→read` 等），让客户端工具行与产出文件行认得它；`TodoWrite` 额外 append 一条 `todo/write` 事件驱动 dsh 待办面板。两者按 callId 配对，故下一次查询的 prompt（从内容块序列化）仍是 SDK 词汇（`src/driver-core/hosted-tool-vocabulary.ts`）。
 - **`user`**（query 内部只承载工具结果）：`mapToolResults` 提取 `tool_result` block 翻成 dsh `tool/result` 事件；字符串内容原样、block 数组只取 text、空内容补 `(no content)` 占位块以便关联（`src/engine-claude/mapping.ts:123-172`）。
-- **`result`**：`success` 标记 `finished`；其余 subtype 抛 `LlmError`，错误码为 `CLAUDE_CODE_<SUBTYPE>`，未知 subtype 归一为 `CLAUDE_CODE_ERROR`（`src/engine-claude/agent.ts:81-91`、`638-643`）。流结束而未见 result 抛 `CLAUDE_CODE_NO_RESULT`（`src/engine-claude/agent.ts:652-657`）。
-- **其余**（`system`/init/status/permission/control 等 SDK 传输消息）：直接跳过——durable log 只记模型可见的转录（`src/engine-claude/agent.ts:646-649`）。
+- **`result`**：`success` 标记 `finished`；其余 subtype 抛 `LlmError`，错误码为 `CLAUDE_CODE_<SUBTYPE>`，未知 subtype 归一为 `CLAUDE_CODE_ERROR`（`src/engine-claude/agent.ts:82-92`、`638-643`）。流结束而未见 result 抛 `CLAUDE_CODE_NO_RESULT`（`src/engine-claude/agent.ts:663-668`）。
+- **其余**（`system`/init/status/permission/control 等 SDK 传输消息）：直接跳过——durable log 只记模型可见的转录（`src/engine-claude/agent.ts:657-660`）。
 
-**思维链的三种兜底**（`src/engine-claude/agent.ts:544-577`、`610-637`），这是映射里最容易踩坑的部分：
+**思维链的三种兜底**（`src/engine-claude/agent.ts:545-578`、`610-637`），这是映射里最容易踩坑的部分：
 
 1. provider 把 thinking 拆成独立的 reasoning-only assistant 消息：按住不落盘，折进下一条消息（否则"最后一条 assistant 消息生效"的 step 投影会丢掉 thinking）；其 usage stash 到 `pendingUsage`。
 2. provider 流式发了 thinking delta 但完整消息里没有 thinking block：用 chunk 累积的 reasoning 合成 block 补在内容前面；完整消息自带 thinking 时丢弃累积，防止重复。
-3. step 以 reasoning-only 消息结束（`result` 到达时仍按着）：作为独立 durable 消息 flush，模型标签记 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/engine-claude/agent.ts:727`）。
+3. step 以 reasoning-only 消息结束（`result` 到达时仍按着）：作为独立 durable 消息 flush，模型标签记 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/engine-claude/agent.ts:738`）。
 
 ### 4.1 一段一步（step 轮转）
 
@@ -118,10 +118,10 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 
 权限裁决分两层，每个 query 独立折叠一次（中途切换预设即时生效）：
 
-1. **部署钉死的 `permissionMode`** 无条件胜出（`src/engine-claude/agent.ts:340`）。
+1. **部署钉死的 `permissionMode`** 无条件胜出（`src/engine-claude/agent.ts:341`）。
 2. 否则读 session log 的 dsh 权限旋钮（`resolveSessionPermission`，`src/engine-claude/permission.ts:33-37`）：
    - `sandbox/mode = danger-full-access` → `bypassPermissions`（web 的 "full" 预设会同时钉 `never` 策略，full access 无条件胜出）；
-   - `approval/policy = ask` → 若宿主有 `approval` 服务，`permissionMode: 'default'` + `onToolPermission` 把每个原生权限请求转发到 dsh 审批缝（`allowed-once` → `allow` 其余 → `deny`，理由文本带 200 字符上限的工具输入摘要，`src/engine-claude/agent.ts:343-358`、`src/engine-claude/permission.ts:39-53`）；没有审批服务时**落到 deny**；
+   - `approval/policy = ask` → 若宿主有 `approval` 服务，`permissionMode: 'default'` + `onToolPermission` 把每个原生权限请求转发到 dsh 审批缝（`allowed-once` → `allow` 其余 → `deny`，理由文本带 200 字符上限的工具输入摘要，`src/engine-claude/agent.ts:344-359`、`src/engine-claude/permission.ts:39-53`）；没有审批服务时**落到 deny**；
    - 其他一切（含从未记录过旋钮的会话）→ `deny`，即 `dontAsk`。
 
 落到 SDK `Options` 时（`src/engine-claude/sdk.ts:98-126`）：
@@ -129,7 +129,7 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 - `bypassPermissions` → `allowDangerouslySkipPermissions: true`，**不装** `canUseTool` 钩子。
 - 其余模式装 `canUseTool`：有 `onToolPermission` 转发则按裁决 allow/deny；没有则一律 deny 并报诊断。
 - `disallowedTools` 恒定禁 `AskUserQuestion`，`plan` 模式追加 `ExitPlanMode`——无头驱动不能阻塞等人回答。
-- 三类交互统一自动应答并产生一行诊断（经 `onUnattended` 上抛，agent 在 step 结束时不计顺序地 `logger.warn` 出去，`src/engine-claude/agent.ts:508`、`663-665`）：`canUseTool` 自动 deny、`onElicitation` 自动 decline（不收交互式 MCP 输入）、`onUserDialog` 自动 cancel；`supportedDialogKinds` 只声明 `refusal_fallback_prompt`（`src/engine-claude/sdk.ts:22-23`、`127-145`）。
+- 三类交互统一自动应答并产生一行诊断（经 `onUnattended` 上抛，agent 在 step 结束时不计顺序地 `logger.warn` 出去，`src/engine-claude/agent.ts:509`、`663-665`）：`canUseTool` 自动 deny、`onElicitation` 自动 decline（不收交互式 MCP 输入）、`onUserDialog` 自动 cancel；`supportedDialogKinds` 只声明 `refusal_fallback_prompt`（`src/engine-claude/sdk.ts:22-23`、`127-145`）。
 
 可选模式全集是 SDK `PermissionMode` 的非交互子集：`dontAsk` / `acceptEdits` / `auto` / `plan` / `bypassPermissions`（`src/engine-claude/types.ts:10-15`、`src/engine-claude/loop.ts:22-28`）。`default` 不出现在配置里——它只在 ask 转发路径内部使用。
 
@@ -142,7 +142,7 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 - `claudeQueryOptions` 给 SDK 的 `env` = `scrubbedParentEnv()` + 部署的 `config.env`（`src/engine-claude/sdk.ts:87-90`）。`scrubbedParentEnv` 是主仓 subprocess 包的公共定义：剔除所有 credential 形状的名字（`/KEY|PASSWORD|SECRET|TOKEN/i`）和全部 `DSH_*`（大小写不敏感），保留 `PATH`/`HOME`/locale/代理（主仓 `packages/subprocess/subprocess/src/index.ts:38-78`）。
 - SDK 拿到这个 env 后会再做自己的增删，最后把**完整的子进程环境**放进 `SpawnOptions.env` 传给 spawn 钩子。`sdkEnvironmentOverlay` 把它转成 subprocess spec 的 overlay：SDK 删掉的、但 scrubbed 父环境里存在的名字要补 `undefined` 墓碑，否则它们会从 overlay 基座里复活（`src/engine-claude/process.ts:32-40`）。想显式传 credential（比如给 CLI 用的 token）只能走 `config.env`，它在 scrub 之后合并。
 
-**spawn 桥接**：`claudeSpawnSpec` 把 SDK 的 `SpawnOptions` 翻成 `SubprocessSpawnSpec`：`argv = [command, ...args]`、`stdio` stdin/stdout pipe + stderr inherit、`graceMs = disposeGraceMs`（默认 3000，`src/engine-claude/sdk.ts:21`）、转发 SDK 的 `signal`；`cwd` 缺失直接抛（`src/engine-claude/process.ts:48-63`）。实际 spawn 走 `loopCtx.subprocess.spawn(spec)`（`src/engine-claude/agent.ts:507`），子进程树归 harness 的 subprocess 实现管。
+**spawn 桥接**：`claudeSpawnSpec` 把 SDK 的 `SpawnOptions` 翻成 `SubprocessSpawnSpec`：`argv = [command, ...args]`、`stdio` stdin/stdout pipe + stderr inherit、`graceMs = disposeGraceMs`（默认 3000，`src/engine-claude/sdk.ts:21`）、转发 SDK 的 `signal`；`cwd` 缺失直接抛（`src/engine-claude/process.ts:48-63`）。实际 spawn 走 `loopCtx.subprocess.spawn(spec)`（`src/engine-claude/agent.ts:508`），子进程树归 harness 的 subprocess 实现管。
 
 **进程投影**：`ManagedClaudeCodeProcess` 实现 SDK 的 `SpawnedProcess`：透传 stdin/stdout，把 `child.done` 的 settle/reject 投影成 `exit`/`error` 事件；`kill()` 忽略 SDK 选的信号（注释：升级阶梯归共享 seam 所有），幂等地转调 `child.terminate()`，已退出或已请求过返回 `false`（`src/engine-claude/process.ts:69-133`）。构造函数里给 `error` 挂了 no-op 监听器——EventEmitter 对无监听器的 `error` 有特殊 throw 语义，而 SDK 是在 custom spawn 返回后才同步挂监听，这个 no-op 同时收容一个已经 reject 的 spawn 句柄（`src/engine-claude/process.ts:83-86`）。
 
@@ -152,7 +152,7 @@ step 内的取消路径：phase 信号 → 单次监听器转成 per-query `Abor
 
 dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。但 Claude Code 命令的真正处理在 CLI 内部，所以所有注册的 claude 命令 handler 只做一件事：把原始 `/<name> [args]` 行以普通用户消息 `followup` 回给 agent，由 CLI 原生展开（`src/commands.ts:64-72`）。注册的意义是让这些命令出现在 web 斜杠菜单里。
 
-转发回来的行之所以能被 CLI 展开，靠的是驱动侧的斜杠命令步：`engineSlashPrompt` 让本步的 prompt 就是那一行（`src/engine-claude/agent.ts:531`）。CLI 的派发条件是 `T.startsWith("/")`（`rCb` 里 `F !== null && !G && F.startsWith("/")` → `processSlashCommand`），带 `<user>` 框架的转录永远不满足，`/status` 就成了给模型的散文。
+转发回来的行之所以能被 CLI 展开，靠的是驱动侧的斜杠命令步：`engineSlashPrompt` 让本步的 prompt 就是那一行（`src/engine-claude/agent.ts:532`）。CLI 的派发条件是 `T.startsWith("/")`（`rCb` 里 `F !== null && !G && F.startsWith("/")` → `processSlashCommand`），带 `<user>` 框架的转录永远不满足，`/status` 就成了给模型的散文。
 
 - 内置 4 个：`help` / `compact` / `clear` / `review`（`src/commands.ts:88-93`）。这份清单是**实测**出来的：逐条真跑一次 SDK query，`/help`、`/compact`、`/clear`（回一条 `conversation_reset`）、`/review`（真跑一次 review 流程）都被 CLI 当命令处理，而 `/explain`、`/fix`、`/tests` 回 `Unknown command: /xxx`——所以后者已从清单删除。（注意 `/status` 在 SDK 环境回 `isn't available in this environment.`：多数本地命令只在交互 TUI 可用，这是**引擎自己的答复**，会作为 assistant 消息（`model: "<synthetic>"`）落进会话，驱动无需特判。）
 - **用户级自定义命令**（`~/.claude/commands/*.md`）由 `discoverUserSlashCommands` 同步扫描注册：只收 `.md`、名字须过 dsh 命令名语法、与内置重名跳过；描述取 frontmatter `description`，否则取正文首个非空非标题行（>120 字符截断），都没有则跳过（`src/commands.ts:103-129`）。同步扫描是有意的——注册点没有 await 点，命令必须在 agent 发布前注册完（`src/commands.ts:95-102` 头注）。
@@ -171,12 +171,12 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 
 ### 7.3 技能注入（agent 侧）
 
-进程内引擎的技能注入由 dsh-tool-skill 在 agent-preset 上下文链上完成，而 claude agent 的上下文不从那条链派生，所以 `preStep` 里复刻了一遍手势扫描（`src/engine-claude/agent.ts:282-291` 注释）：
+进程内引擎的技能注入由 dsh-tool-skill 在 agent-preset 上下文链上完成，而 claude agent 的上下文不从那条链派生，所以 `preStep` 里复刻了一遍手势扫描（`src/engine-claude/agent.ts:283-292` 注释）：
 
 - 只扫 `source.kind === 'user'` 的消息的 text block 里空白边界的 `/name` 手势（kebab-case），按首次出现去重（`src/driver-core/skill-inject.ts:84-97`）。
 - 经 `skills.get(name, { signal, scope, cwd })` 加载；加载失败、未找到、`userInvocable === false` 都静默跳过。
-- 命中的技能渲染成 `<skill_content>` XML（名称/路径/provider 转义）作为 `source: { kind: 'skill-invocation', form: 'instructions' }` 的用户消息**追加**到本步批次，随批次落 `user/message`（`src/engine-claude/agent.ts:302-328`）。
-- 加载期间 step 被取消：整批注入丢弃（`src/engine-claude/agent.ts:321`）。
+- 命中的技能渲染成 `<skill_content>` XML（名称/路径/provider 转义）作为 `source: { kind: 'skill-invocation', form: 'instructions' }` 的用户消息**追加**到本步批次，随批次落 `user/message`（`src/engine-claude/agent.ts:303-329`）。
+- 加载期间 step 被取消：整批注入丢弃（`src/engine-claude/agent.ts:322`）。
 
 这条路径同时是技能内容进入模型的**唯一**通道——渲染结果随下次 query 的 prompt 序列化进 `<user>` 段。
 
@@ -188,16 +188,17 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 |---|---|---|
 | `permissionMode` | 五选一，缺省 = 跟随会话旋钮 | 每个 query 的权限裁决，见第 5 节 |
 | `env` | `Record<string,string>`，默认 `{}` | 叠加在 scrubbed 父环境之上传给 SDK（`src/engine-claude/sdk.ts:87-90`） |
-| `model` | 缺省 = 不钉模型（标签记 `'default'`，实际模型由 Claude Code 原生设置决定） | **双重作用**：request header 与消息 source 的模型标签（`src/engine-claude/agent.ts:504-506`、`:727`），且作为 SDK `model` override 传给 query（`src/engine-claude/agent.ts:574`、`src/engine-claude/sdk.ts:102`）——**但会话选择优先**：每个 step 取 `sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`），会话选了一条真实 dsh 模型时用它作 `Options.model`（Claude Code 收裸 model id/alias，不带 provider），`config.model` 只是会话没选时的回落 |
+| `model` | 缺省 = 不钉模型（标签记 `'default'`，实际模型由 Claude Code 原生设置决定） | **双重作用**：request header 与消息 source 的模型标签（`src/engine-claude/agent.ts:521`、`:751`），且作为 SDK `model` override 传给 query（`src/engine-claude/agent.ts:598`、`src/engine-claude/sdk.ts:102`）——**但会话选择优先**：每个 step 取 `handover?.model ?? sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`、`src/driver-core/model-handover.ts`），会话选了一条真实 dsh 模型时用它作 `Options.model`（Claude Code 收裸 model id/alias，不带 provider），`config.model` 只是会话没选时的回落 |
+| （会话选真实 dsh 模型时）端点与凭据 | 非配置项 | 每个 step 解析一次（`resolveModelHandover`，`src/driver-core/model-handover.ts`，调用点 `src/engine-claude/agent.ts:587`），把结果叠进 `Options.env`：`ANTHROPIC_BASE_URL` = dsh 的 `baseURL`、`ANTHROPIC_AUTH_TOKEN` = 解析出的凭据（`src/engine-claude/agent.ts:592-596`）。SDK 的 `Options.env` 是**整体替换**语义，所以 `sdk.ts:87-90` 已经先铺 `scrubbedParentEnv()` 再叠 `spec.env`，叠加安全。锚定 `anthropic-messages`（dsh 的 `api` 恰是它）：Claude Code 只说 `/v1/messages`，映射规则与 warn 行为见 `docs/driver-core.md` §7.7。选 `external/default` 或没有选择、或端点解析不到时**不注入**（后者 warn 一次），Claude Code 用自己那份配置 |
 | `disposeGraceMs` | 默认 3000，须为正有限数且 ≤ `MAX_TIMER_DELAY_MS` | 子进程树终止宽限（`src/engine-claude/process.ts:59`） |
 | `maxTurns` | 正整数，缺省不限 | SDK `maxTurns`（`src/engine-claude/sdk.ts:103`） |
 
-会话级输入（非配置项）：`sandbox/mode` 与 `approval/policy` 旋钮事件（第 5 节）、session 元数据里的 `cwd`（每个 query 的工作目录，缺失则 step 直接报错，`src/engine-claude/agent.ts:468-471`）。
+会话级输入（非配置项）：`sandbox/mode` 与 `approval/policy` 旋钮事件（第 5 节）、session 元数据里的 `cwd`（每个 query 的工作目录，缺失则 step 直接报错，`src/engine-claude/agent.ts:469-472`）。
 
 ## 9. 错误处理与已知边界
 
 - **配置边界**：`disposeGraceMs` 非法在构造时抛（`src/engine-claude/loop.ts:64-72`）；schemastery 对非法枚举/类型在 compose 时拒绝。原则是无头部署的误配必须响亮失败。
-- **query 失败**：SDK result 错误 → `LlmError`（`CLAUDE_CODE_*` 码）→ `turn/end` 记 `error` + `agent/error` 事件；空流 → `CLAUDE_CODE_NO_RESULT`；无 cwd → 普通 Error，错误码 `UNKNOWN`（`src/engine-claude/agent.ts:419-424`）。
+- **query 失败**：SDK result 错误 → `LlmError`（`CLAUDE_CODE_*` 码）→ `turn/end` 记 `error` + `agent/error` 事件；空流 → `CLAUDE_CODE_NO_RESULT`；无 cwd → 普通 Error，错误码 `UNKNOWN`（`src/engine-claude/agent.ts:420-425`）。
 - **静默降级**：技能加载失败/不存在/不可调用跳过；无 `approval` 服务时 ask 策略落 deny；无 `skills` 服务时手势不注入；无 `commands` 服务时斜杠菜单不注册。这些都有意不 fail-loud，因为可选宿主服务可能缺席（`src/index.ts:82-89`）。
 - **已知边界**：
   - 图片不转录，以占位文本代替（`src/driver-core/prompt.ts:20-21`）；思维链不进 prompt（每次 query 重新思考，`src/driver-core/prompt.ts:34-37`）。
@@ -220,6 +221,6 @@ claude 引擎的测试在 `tests/engine-claude/`（另有 `tests/commands.spec.t
 
 撰写本文时发现，供后续修正：
 
-1. **`loop.ts:45` 的 `model` 配置 JSDoc 不完整**：注释说 "Model label for the logged request header; Claude Code native settings own the actual model"，但实现同时把 `config.model` 作为 SDK `model` override 传给每次 query（`src/engine-claude/agent.ts:505`、`src/engine-claude/sdk.ts:102`）。钉了 `model` 就是钉了实际推理模型，不只是日志标签。`sdk.ts:40` 对同一字段的注释（"Model override for the SDK"）才是准确的。
+1. **`loop.ts:45` 的 `model` 配置 JSDoc 不完整**：注释说 "Model label for the logged request header; Claude Code native settings own the actual model"，但实现同时把 `config.model` 作为 SDK `model` override 传给每次 query（`src/engine-claude/agent.ts:506`、`src/engine-claude/sdk.ts:102`）。钉了 `model` 就是钉了实际推理模型，不只是日志标签。`sdk.ts:40` 对同一字段的注释（"Model override for the SDK"）才是准确的。
 2. **`mapping.ts:137-152` JSDoc 重复**：`toolResultContent` 的 docblock 逐字出现了两遍。
 3. **任务背景材料的偏差**（非源码问题）：driver-core 的 `context-files.ts` 不被 claude 引擎引用，它服务 codex/pi/kimi 的技能 provider；claude 的技能发现在 `src/skills.ts` 内自包含。

@@ -45,6 +45,7 @@ import {
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
+import { resolveModelHandover } from '../driver-core/model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
@@ -577,12 +578,22 @@ export class ClaudeCodeAgent implements Agent {
       // so a model changed mid-conversation reaches the next query. Claude Code
       // takes a bare model id/alias (`Options.model`), so only the model half of
       // the override travels; the provider is a dsh routing fact it does not
-      // speak.
-      const model = sessionModelOverrideOf(this.loopCtx, this.session)?.model ?? this.config.model
+      // speak. When dsh discloses that model's ENDPOINT, the driver hands it over
+      // too — `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` in `Options.env` (the
+      // SDK's documented way to point Claude Code at a gateway), so the query
+      // runs on dsh's endpoint with dsh's credential. A selection dsh cannot
+      // resolve injects nothing and Claude Code keeps its own configuration.
+      const override = sessionModelOverrideOf(this.loopCtx, this.session)
+      const handover = await resolveModelHandover(this.loopCtx, override)
+      const model = handover?.model ?? override?.model ?? this.config.model
       const options = claudeQueryOptions({
         cwd,
         ...this.queryPermission(),
-        env: this.config.env,
+        env: handover === undefined ? this.config.env : {
+          ...this.config.env,
+          ANTHROPIC_BASE_URL: handover.baseURL,
+          ANTHROPIC_AUTH_TOKEN: handover.apiKey,
+        },
         disposeGraceMs: this.config.disposeGraceMs,
         ...model === undefined ? {} : { model },
         ...this.config.maxTurns === undefined ? {} : { maxTurns: this.config.maxTurns },

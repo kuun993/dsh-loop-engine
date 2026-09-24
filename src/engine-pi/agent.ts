@@ -34,6 +34,8 @@ import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
+import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
+import { piAgentDir } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import { resolveSessionPermission, toolsForSandbox, type PiPermission } from './permission.ts'
@@ -181,8 +183,8 @@ export class PiAgent implements Agent {
    * never reuses one: the step teardown disposes it and the next step respawns
    * a fresh child.
    */
-  private rpcClient(cwd: string): PiRpcClient {
-    const client = PiRpcClient.create(this.spawnSpec(cwd), this.spawn)
+  private rpcClient(cwd: string, handover: DshModelHandover | undefined): PiRpcClient {
+    const client = PiRpcClient.create(this.spawnSpec(cwd, handover), this.spawn)
     this.rpc = client
     return client
   }
@@ -515,8 +517,15 @@ export class PiAgent implements Agent {
    * of the argv for that step. A step with neither a selection nor a pin sends
    * no `--model` at all and lets Pi's own configuration decide. Read every step,
    * so a model picked mid-conversation lands on the next child.
+   *
+   * When dsh also discloses that model's ENDPOINT, the child is pointed at it:
+   * `--provider` names the provider pi's `models.json` declares, `--api-key`
+   * carries the credential, and `PI_CODING_AGENT_DIR` redirects pi's agent
+   * directory to the plugin-owned one holding that `models.json`
+   * ({@link piAgentDir}) — so the child runs on dsh's endpoint instead of its
+   * own `~/.pi` configuration, which is never touched.
    */
-  private spawnSpec(cwd: string): PiSpawnSpec {
+  private spawnSpec(cwd: string, handover: DshModelHandover | undefined): PiSpawnSpec {
     const argv: string[] = []
     const override = sessionModelOverrideOf(this.loopCtx, this.session)
     const model = override === undefined ? this.config.model : `${override.provider}/${override.model}`
@@ -528,6 +537,9 @@ export class PiAgent implements Agent {
     } else if (this.config.thinkingLevel !== undefined) {
       argv.push('--model', `:${this.config.thinkingLevel}`)
     }
+    // A handover implies an override, so `model` above is already
+    // `"<provider>/<model>"` for the same provider this names.
+    if (handover !== undefined) argv.push('--provider', handover.provider, '--api-key', handover.apiKey)
     const permission = this.queryPermission()
     if (permission.tools.length > 0) argv.push(TOOLS_FLAG, permission.tools.join(','))
     return {
@@ -538,7 +550,9 @@ export class PiAgent implements Agent {
         ...argv,
       ],
       cwd,
-      env: this.config.env,
+      env: handover === undefined
+        ? this.config.env
+        : { ...this.config.env, PI_CODING_AGENT_DIR: piAgentDir(handover) },
     }
   }
 
@@ -576,6 +590,14 @@ export class PiAgent implements Agent {
     this.assertRequestHeader()
     signal.throwIfAborted()
 
+    // The session's model selection, and — when dsh discloses it — that model's
+    // endpoint and credential, resolved fresh on every step so a mid-session
+    // change reaches the next child.
+    const handover = await resolveModelHandover(
+      this.loopCtx,
+      sessionModelOverrideOf(this.loopCtx, this.session),
+    )
+
     const controller = new AbortController()
     const cancel = (): void => {
       /* v8 ignore start -- a phase signal fires once; the controller cannot already be aborted when its single listener runs */
@@ -612,7 +634,7 @@ export class PiAgent implements Agent {
         }
         return live
       }
-      const client = this.rpcClient(cwd)
+      const client = this.rpcClient(cwd, handover)
       signal.throwIfAborted()
       await client.newSession()
       client.clearEvents()

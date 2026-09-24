@@ -12,6 +12,7 @@ import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
+import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
 const loopPlugin = loopPluginFor(KimiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
@@ -1172,6 +1173,108 @@ describe('KimiAgent request header', () => {
       const headers = agent.session.snapshotEvents().filter(event => event.type === 'request/header')
       expect(headers).toHaveLength(2)
       expect(headers[1]).toMatchObject({ data: { reason: 'resume' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('KimiAgent dsh endpoint handover', () => {
+  /** The spawn spec the Nth child was created from. */
+  function specAt(index: number): { argv: string[]; env: Record<string, string> } {
+    const spec = mock.created[index]?.spec as { argv: string[]; env: Record<string, string> } | undefined
+    if (spec === undefined) throw new Error(`no kimi child spawned at index ${index}`)
+    return spec
+  }
+
+  it('points the child at the dsh endpoint through kimi\'s env-model path', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(specAt(0).env).toMatchObject({
+        KIMI_MODEL_NAME: DSH_ENDPOINT.model,
+        KIMI_MODEL_API_KEY: DSH_ENDPOINT.apiKey,
+        KIMI_MODEL_BASE_URL: DSH_ENDPOINT.baseURL,
+        KIMI_MODEL_PROVIDER_TYPE: 'anthropic',
+      })
+      // The env model is kimi's default, so the raw dsh id is never asked for as
+      // a kimi model ALIAS through `session/set_model`.
+      expect(mock.client.setModel).not.toHaveBeenCalled()
+      // The credential reaches the child's environment, never the session log.
+      expect(JSON.stringify(agent.session.snapshotEvents())).not.toContain(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('hands nothing over for the hosted seat, leaving kimi its own configuration', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness({ model: 'deployment-pinned' })
+    try {
+      provideDshEndpoint(ctx)
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-hosted-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: 'external', model: 'default' })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect('KIMI_MODEL_NAME' in specAt(0).env).toBe(false)
+      expect('KIMI_MODEL_BASE_URL' in specAt(0).env).toBe(false)
+      // With nothing handed over, the deployment pin still reaches set_model.
+      expect(mock.client.setModel).toHaveBeenCalledWith('sess_1', 'deployment-pinned')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects nothing and warns once when the endpoint cannot be resolved', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-unresolved-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      agent.followup(message('again'))
+      await agent.whenIdle()
+
+      expect('KIMI_MODEL_NAME' in specAt(0).env).toBe(false)
+      // With no endpoint, the model name is still asked for by name.
+      expect(mock.client.setModel).toHaveBeenCalledWith('sess_1', DSH_ENDPOINT.model)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reuses the child while the endpoint is unchanged, and respawns it when it changes', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      const endpoint = provideDshEndpoint(ctx, { baseURL: 'https://first.example.com/litellm' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-change-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      expect(specAt(0).env.KIMI_MODEL_BASE_URL).toBe('https://first.example.com/litellm')
+
+      // An unchanged endpoint re-resolves to the SAME environment object, so the
+      // cached child is kept rather than respawned for an identical spec.
+      agent.followup(message('two'))
+      await agent.whenIdle()
+      expect(mock.created).toHaveLength(1)
+
+      endpoint.update({ baseURL: 'https://second.example.com/litellm' })
+      agent.followup(message('three'))
+      await agent.whenIdle()
+      expect(mock.created).toHaveLength(2)
+      expect(specAt(1).env.KIMI_MODEL_BASE_URL).toBe('https://second.example.com/litellm')
     } finally {
       await ctx.fiber.dispose()
     }
