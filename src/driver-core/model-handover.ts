@@ -32,6 +32,11 @@
  * and never a guess. The warning names the provider and the model, never a
  * credential.
  *
+ * What counts as "recognized" is deliberately narrow: a non-empty `baseURL` and
+ * a resolvable credential. The wire protocol is handed over when the deployment
+ * declares one, but its absence does NOT refuse the handover — see
+ * {@link resolveModelHandover} and {@link SHIPPED_ROUTE_APIS}.
+ *
  * @module dsh-loop-engine/driver-core/model-handover
  */
 
@@ -56,10 +61,36 @@ export interface DshModelHandover {
   readonly model: string
   /** Endpoint base as dsh configured it. */
   readonly baseURL: string
-  /** dsh's wire protocol name for this endpoint. */
-  readonly api: string
+  /**
+   * dsh's wire protocol name for this endpoint, when the deployment declares
+   * one (or {@link SHIPPED_ROUTE_APIS} knows it for a shipped route). `undefined`
+   * is a normal answer, not a failure: engines that need a protocol degrade the
+   * way each one documents, and engines that do not (`claude-code`) ignore it.
+   */
+  readonly api: string | undefined
   /** The resolved credential value; never logged, never evented. */
   readonly apiKey: string
+}
+
+/**
+ * Wire protocols of provider routes whose ADAPTER owns the wire, so the settings
+ * section never carries an `api` for them.
+ *
+ * A route like `deepseek-official` is registered by the harness's own adapter
+ * plugin, and that adapter's settings schema has no `api` field at all — the
+ * wire is a property of the code that speaks to the endpoint, not something the
+ * operator configures or a user declares. Reading the profile therefore finds
+ * `baseURL` and `apiKeyEnv` but never a protocol, and refusing the handover over
+ * that would leave the engine free to send dsh's model id to ITS OWN endpoint
+ * (the misleading failure this table exists to prevent).
+ *
+ * The entry is verified, not guessed: the harness's DeepSeek adapter posts to
+ * `{baseURL}/chat/completions` (`packages/llm/llm-deepseek/src/adapter.ts:651`,
+ * "OpenAI-compatible"), which is exactly OpenAI Chat Completions. Re-verify
+ * before adding a route here — a wrong entry is a silently wrong protocol.
+ */
+const SHIPPED_ROUTE_APIS: Record<string, string> = {
+  'deepseek-official': 'openai-completions',
 }
 
 /**
@@ -103,7 +134,8 @@ export interface CredentialsService {
 /** The three profile fields this module reads out of a provider's settings section. */
 interface ProviderProfile {
   readonly baseURL: string
-  readonly api: string
+  /** dsh's wire protocol name, when the profile declares one. */
+  readonly api: string | undefined
   /** Credential reference (environment-variable name), when the profile names one. */
   readonly apiKeyEnv: string | undefined
 }
@@ -144,6 +176,11 @@ function settingsAddress(
  * Read one provider's endpoint fields from its dsh settings section, walking the
  * registry's own path and validating every shape. `undefined` means "not a
  * shape this module can hand over", which the caller reports and falls back on.
+ *
+ * Only `baseURL` is required: it is the one fact without which there is no
+ * endpoint to hand over. `api` describes the WIRE, and a route whose adapter
+ * owns that wire has no such field — a missing protocol is answered by the
+ * caller, not treated as an unusable profile.
  */
 function readProviderProfile(
   ctx: Context,
@@ -159,10 +196,9 @@ function readProviderProfile(
   const record = node as Record<string, unknown>
   const { baseURL, api, apiKeyEnv } = record
   if (typeof baseURL !== 'string' || baseURL.length === 0) return undefined
-  if (typeof api !== 'string' || api.length === 0) return undefined
   return {
     baseURL,
-    api,
+    api: typeof api === 'string' && api.length > 0 ? api : undefined,
     apiKeyEnv: typeof apiKeyEnv === 'string' && apiKeyEnv.length > 0 ? apiKeyEnv : undefined,
   }
 }
@@ -189,8 +225,16 @@ async function readApiKey(ctx: Context, apiKeyEnv: string | undefined): Promise<
  * `undefined` is the answer in exactly two situations: the selection names no
  * real dsh model ({@link SessionModelOverride} is already `undefined` for the
  * hosted seat), or a real model whose endpoint/credential dsh does not disclose
- * to this read. The second case warns once — it is a deployment-shape gap the
- * operator can see and fix, not a silent downgrade.
+ * to this read — no `baseURL`, or no credential. Both warn once: they are
+ * deployment-shape gaps the operator can see and fix, not a silent downgrade.
+ *
+ * The wire protocol is NOT such a gate. A profile that names no `api` still
+ * hands over its endpoint (with `api: undefined`), because refusing would let
+ * the engine send dsh's model id to the engine's OWN endpoint — a failure that
+ * reads like an auth or model problem while the real one is "wrong endpoint".
+ * Shipped routes whose adapter owns the wire are named in
+ * {@link SHIPPED_ROUTE_APIS} so they hand over a real protocol; anything still
+ * unknown degrades per engine, which is the engine's call to make.
  *
  * Called fresh on every step by each driver, so a model or provider picked
  * mid-conversation reaches the engine's next request rather than being frozen
@@ -210,7 +254,7 @@ export async function resolveModelHandover(
   }
   const profile = readProviderProfile(ctx, address)
   if (profile === undefined) {
-    return refuse(ctx, override, `the "${address.settingsNs}" settings section names no baseURL and wire protocol for it`)
+    return refuse(ctx, override, `the "${address.settingsNs}" settings section names no baseURL for it`)
   }
   const apiKey = await readApiKey(ctx, profile.apiKeyEnv)
   if (apiKey === undefined) {
@@ -220,7 +264,7 @@ export async function resolveModelHandover(
     provider: override.provider,
     model: override.model,
     baseURL: profile.baseURL,
-    api: profile.api,
+    api: profile.api ?? SHIPPED_ROUTE_APIS[override.provider],
     apiKey,
   }
 }

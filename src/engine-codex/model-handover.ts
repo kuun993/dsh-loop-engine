@@ -3,17 +3,28 @@
  * overrides and environment that point it at dsh's model.
  *
  * Codex resolves a custom endpoint through `model_providers.<id>` in its own
- * `config.toml` (`base_url`, `wire_api`, and an `env_key` naming the variable
- * the credential is read from), and `codex app-server` accepts those as `-c
- * key=value` overrides — so the handover needs no edit of `~/.codex`. The
+ * `config.toml` (`name`, `base_url`, `wire_api`, and an `env_key` naming the
+ * variable the credential is read from), and `codex app-server` accepts those as
+ * `-c key=value` overrides — so the handover needs no edit of `~/.codex`. The
  * credential travels in the child's environment under {@link CODEX_DSH_API_KEY_ENV},
  * which the `env_key` names.
  *
- * Codex speaks only OpenAI's wires (`responses` or `chat`). A dsh protocol with
- * no codex equivalent (Anthropic Messages) is NOT guessed: `wire_api` is
- * omitted, so codex uses its own default wire against dsh's base URL and fails
- * loud on the request — the honest outcome, since the plugin cannot make codex
- * speak a protocol it does not implement.
+ * `name` is not optional in practice even though the CLI's own docs describe it
+ * as display metadata: codex 0.149.1 (the version this plugin pins) refuses to
+ * load a provider whose `name` is empty — "provider name must not be empty in
+ * `model_providers`" — and that config error kills `app-server` on startup, which
+ * the driver can only report as "process exited unexpectedly". Omitting it looked
+ * correct and failed before any request was ever sent, so every override this
+ * module builds carries it (verified against the pinned binary).
+ *
+ * Codex speaks only OpenAI's `responses` wire as of the version this plugin pins
+ * (0.149.1 dropped `chat`). A dsh protocol with no codex equivalent (Anthropic
+ * Messages, and now OpenAI Chat Completions) is NOT guessed: `wire_api` is
+ * omitted, so codex falls back to its own default wire and fails loud on the
+ * request — the honest outcome, since the plugin cannot make codex speak a
+ * protocol it does not implement. That default is `responses` as of 0.149.1: the
+ * request lands on `<baseURL>/responses`, which an Anthropic Messages or Chat
+ * Completions endpoint does not serve.
  *
  * @module dsh-loop-engine/engine-codex/model-handover
  */
@@ -27,13 +38,15 @@ export const CODEX_DSH_PROVIDER = 'dsh'
 export const CODEX_DSH_API_KEY_ENV = 'DSH_LOOP_ENGINE_API_KEY'
 
 /**
- * Codex `wire_api` for one dsh wire protocol. Only the two OpenAI wires codex
- * implements appear; Anthropic Messages is deliberately absent so the override
- * omits `wire_api` rather than asserting a wire that endpoint does not serve.
+ * Codex `wire_api` for one dsh wire protocol. Only `responses` remains: codex
+ * 0.149.1 removed `chat` outright, so a `wire_api = "chat"` override is now a
+ * FATAL config error — `app-server` refuses to start ("`wire_api = "chat"` is no
+ * longer supported"), exactly like the empty `name` below. `openai-completions`
+ * therefore has no codex equivalent any more and takes the omitted-`wire_api`
+ * path with Anthropic Messages, rather than killing the process at startup.
  */
 const CODEX_WIRE_APIS: Record<string, string> = {
   'openai-responses': 'responses',
-  'openai-completions': 'chat',
 }
 
 /** Quote one value as a TOML basic string for a codex `-c` override. */
@@ -56,13 +69,15 @@ export interface CodexModelConfig {
  * The provider id ({@link CODEX_DSH_PROVIDER}) is a plugin-owned name: it exists
  * only in this child's command line, so it cannot collide with a provider the
  * user configured, and the model itself is still handed over as the thread's own
- * `model` param.
+ * `model` param. The provider's `name` repeats that id because codex rejects an
+ * empty one at config load, before any request is made.
  * @param handover - the resolved dsh endpoint for the session's selection.
  * @returns the argv entries and environment to spawn the app-server with.
  */
 export function codexModelConfig(handover: DshModelHandover): CodexModelConfig {
-  const wire = CODEX_WIRE_APIS[handover.api]
+  const wire = handover.api === undefined ? undefined : CODEX_WIRE_APIS[handover.api]
   const profile = [
+    `name=${tomlString(CODEX_DSH_PROVIDER)}`,
     `base_url=${tomlString(handover.baseURL)}`,
     ...wire === undefined ? [] : [`wire_api=${tomlString(wire)}`],
     `env_key=${tomlString(CODEX_DSH_API_KEY_ENV)}`,

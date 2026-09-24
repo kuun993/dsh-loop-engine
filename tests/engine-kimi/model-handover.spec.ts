@@ -44,4 +44,14 @@ describe('kimiModelEnv', () => {
     })
     expect('KIMI_MODEL_PROVIDER_TYPE' in env).toBe(false)
   })
+
+  it('still hands the endpoint over when dsh named no protocol, omitting only the provider type', () => {
+    const env = kimiModelEnv(handover({ api: undefined }))
+    expect(env).toEqual({
+      KIMI_MODEL_NAME: 'deepseek-flash',
+      KIMI_MODEL_API_KEY: 'sk-secret',
+      KIMI_MODEL_BASE_URL: 'https://ai.example.com/litellm',
+    })
+    expect('KIMI_MODEL_PROVIDER_TYPE' in env).toBe(false)
+  })
 })

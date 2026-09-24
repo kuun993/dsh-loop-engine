@@ -1592,6 +1592,7 @@ describe('CodexAgent dsh endpoint handover', () => {
       expect(argv).toContain('model_provider="dsh"')
       expect(argv.some(entry => entry.startsWith('model_providers.dsh={'))).toBe(true)
       const profile = argv.find(entry => entry.startsWith('model_providers.dsh={'))!
+      expect(profile).toContain('name="dsh"')
       expect(profile).toContain(`base_url="${DSH_ENDPOINT.baseURL}"`)
       expect(profile).toContain('wire_api="responses"')
       expect(profile).toContain('env_key="DSH_LOOP_ENGINE_API_KEY"')

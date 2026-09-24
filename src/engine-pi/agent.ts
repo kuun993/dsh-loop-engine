@@ -593,10 +593,18 @@ export class PiAgent implements Agent {
     // The session's model selection, and — when dsh discloses it — that model's
     // endpoint and credential, resolved fresh on every step so a mid-session
     // change reaches the next child.
-    const handover = await resolveModelHandover(
+    const resolved = await resolveModelHandover(
       this.loopCtx,
       sessionModelOverrideOf(this.loopCtx, this.session),
     )
+    // Pi is the one engine that cannot run a provider it was handed no wire
+    // protocol for: its `models.json` rejects a provider without `api` (verified
+    // against pi 0.84.3 — `{"status":"invalid","reason":"invalid_state"}`), and
+    // the plugin will not write a document it knows pi refuses. So a handover
+    // that names no protocol is dropped here rather than materialized into a
+    // broken agent directory. It is unreachable for every route
+    // `SHIPPED_ROUTE_APIS` names, which today is the only way `api` goes missing.
+    const handover = resolved?.api === undefined ? undefined : resolved
 
     const controller = new AbortController()
     const cancel = (): void => {

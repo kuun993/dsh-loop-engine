@@ -28,15 +28,33 @@ describe('codexModelConfig', () => {
     expect(codexModelConfig(handover())).toEqual({
       argv: [
         '-c', 'model_provider="dsh"',
-        '-c', 'model_providers.dsh={base_url="https://ai.example.com/litellm",wire_api="responses",env_key="DSH_LOOP_ENGINE_API_KEY"}',
+        '-c', 'model_providers.dsh={name="dsh",base_url="https://ai.example.com/litellm",wire_api="responses",env_key="DSH_LOOP_ENGINE_API_KEY"}',
       ],
       env: { DSH_LOOP_ENGINE_API_KEY: 'sk-secret' },
     })
   })
 
-  it('maps OpenAI Chat Completions to codex\'s `chat` wire', () => {
+  // codex 0.149.1 rejects a provider whose `name` is empty at config load, which
+  // kills app-server before it serves a single request ("provider name must not
+  // be empty in `model_providers`", verified against the pinned binary).
+  it('names the provider, because codex refuses to load an unnamed one', () => {
+    expect(codexModelConfig(handover()).argv[3]).toContain('name="dsh"')
+    expect(codexModelConfig(handover({ api: 'anthropic-messages' })).argv[3]).toContain('name="dsh"')
+  })
+
+  // codex 0.149.1 removed `chat` outright, so asserting it is a FATAL config
+  // error ("`wire_api = "chat"` is no longer supported"), not a downgrade.
+  it('omits wire_api for OpenAI Chat Completions, because codex no longer has that wire', () => {
     const { argv } = codexModelConfig(handover({ api: 'openai-completions' }))
-    expect(argv[3]).toContain('wire_api="chat"')
+    expect(argv[3]).not.toContain('wire_api')
+    expect(argv[3]).toContain('base_url="https://ai.example.com/litellm"')
+  })
+
+  it('omits wire_api when dsh named no protocol at all, leaving codex its own default wire', () => {
+    const { argv } = codexModelConfig(handover({ api: undefined }))
+    expect(argv[3]).not.toContain('wire_api')
+    expect(argv[3]).toContain('base_url="https://ai.example.com/litellm"')
+    expect(argv[3]).toContain('env_key="DSH_LOOP_ENGINE_API_KEY"')
   })
 
   it('omits wire_api for a protocol codex does not speak, leaving codex its own default wire', () => {

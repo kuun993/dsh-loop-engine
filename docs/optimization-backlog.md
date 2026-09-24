@@ -20,20 +20,31 @@
 
 **优先级**：P0
 
-**现象**：codex 的 dsh 端点透传完全靠 `codex app-server -c model_provider=dsh -c model_providers.dsh={base_url,wire_api,env_key}`（`src/engine-codex/model-handover.ts:63-76`），`wire_api` 只映射两个 OpenAI wire（`:34-37`：`openai-responses`→`responses`、`openai-completions`→`chat`）。这套 `-c` 语法、`{...}` 内联 TOML 的解析、以及 `wire_api` 与真实网关的匹配**从未对真机跑过**。
+**状态**：**基本已验**（2026-09-24，对插件钉住的 `@openai/codex` 0.149.1 二进制；复现脚本 `.probe/codex-handover-e2e.mjs`，gitignore 内）。
+- ✅ **`-c` 形状本身被接受，但内联表里 `name` 是必填**：裸起 `codex app-server` 且只给 `{base_url,wire_api,env_key}` 时，进程**启动即死**——
+  `Error: error loading default config after config error: model_providers.dsh: provider name must not be empty in \`model_providers\``，退出码 1。
+  逐字段写法（`-c model_providers.dsh.base_url=…`）、单级内联表（`-c model_providers={dsh={…}}`）、以及本插件原先的两级内联表**三者同样报这个错**——差别不在语法，只在缺 `name`。补上 `name="dsh"` 后三种写法全部正常启动。**已修**（`src/engine-codex/model-handover.ts`），并加了钉住 `name` 的回归测试。这个错误在真机上表现为 `codex app-server process exited unexpectedly`（`src/engine-codex/appserver/client.ts:79`，驱动只能看到子进程退出，看不到 stderr 里的原因），所以排障时**必须直接手搓 `-c` 起 app-server 看 stderr**，否则会误判成协议问题。
+- ✅ **`wire_api="responses"` 走通到端点**：把 `-c` 钉在 dsh 那边配的 `openai-responses` provider（`https://ai.meicloud.com/litellm/v1`）上，`initialize` / `thread/start`（`provider=dsh`）/ `turn/start` **全部被接受**，请求确实打到 **`<baseURL>/responses`**（`https://ai.meicloud.com/litellm/v1/responses`），网关回的是 litellm 的 **401**（`Invalid proxy server token passed`）——用的是探针自带的假 key，所以这是**鉴权层**的拒绝，不是路由或 wire 不认。**协议映射与端点拼接得到确证。**
+- ✅ **`wire_api="chat"` 在 0.149.1 已被移除，是致命错误**（同日发现并修）：`Error: error loading default config after config error: \`wire_api = "chat"\` is no longer supported.` → `app-server` 起不来。原先 `openai-completions`→`chat` 的映射因此**必然**让 codex 在启动阶段就死，与 `name` 那次同型。已把该映射删掉（`openai-completions` 归入"无等价 wire、省略 `wire_api`"），并改了钉住它的测试。
+- ⚠️ **codex 现在实际上只有 `responses` 一条 wire**：所以任何非 `openai-responses` 的 dsh provider 交给 codex，都只能走"省略 `wire_api` → codex 用自己的默认 `responses` 打 dsh 端点 → 报错"这条路。「codex 能不能用一个 dsh 模型」现在等价于「那个网关吃不吃 Responses 协议」。
+- ✅ **省略 `wire_api` 时，codex 0.149.1 的默认 wire 是 `responses`**（不是 `chat`）：同样打法、base 去掉 `/v1`，请求落在 `https://ai.meicloud.com/litellm/responses`。所以「codex 无等价 wire 时退回自己的默认」这条路径，实际发出的仍是一个 Responses 载荷。
+- ❌ **仍未用真实凭据跑通一整轮**：探针没有读用户凭据（避免把 key 带进日志），所以「真 key 下模型正常回答」还没有证据。这一条留一句：真机复测请在 dsh web 里把会话切到 codex、选那条 `responses` 模型发一轮。
 
-**证据**：`src/engine-codex/model-handover.ts:34-37`、`:63-76`；调用点 `src/engine-codex/agent.ts:222-228`；未验证声明 `docs/proposals/dsh-model-into-hosted-engines.md:249`、`:25`。
+**现象**：codex 的 dsh 端点透传完全靠 `codex app-server -c model_provider=dsh -c model_providers.dsh={name,base_url,wire_api,env_key}`（`src/engine-codex/model-handover.ts:77-92`），`wire_api` 现在只剩一条映射（`:48-50`：`openai-responses`→`responses`）。
 
-**影响**：若 codex 不认这个 `-c` 形状、或网关只开 anthropic-messages 而配置里又没有漏掉 `wire_api` 的路径，会话会在第一步就失败——而单测全绿，值班的人不会预期到。**protocol 不匹配时的报错形态**（是 codex 解析错误、还是 HTTP 4xx、还是 wire 不认）也没记录，排障时会误判。
+**证据**：`src/engine-codex/model-handover.ts:48-50`、`:77-92`；调用点 `src/engine-codex/agent.ts:222-228`；未验证声明 `docs/proposals/dsh-model-into-hosted-engines.md:249`、`:25`；上述结论均为 2026-09-24 真机复现（对本仓 `node_modules/@openai/codex/bin/codex.js`，0.149.1）。
+
+**影响**：`name` 与 `chat` 这两条都已真机咬过，都是「单测全绿但真机启动即死」——单测用假 app-server 夹具，只证明参数被注入了 argv，不证明 codex 接受它。这两条的共同教训：**任何 `-c` 形状的改动都要拿真二进制起一次 app-server**。
 
 **怎么验**（一条最小命令，不动 dsh）：
 ```sh
 # 用会话里那条真实 dsh 模型的 baseURL/apiKey，直接起一个 app-server 并让它跑一次
-codex app-server -c 'model_provider=dsh' \
-  -c 'model_providers.dsh={base_url="<dsh baseURL>",wire_api="responses",env_key="DSH_LOOP_ENGINE_API_KEY"}' \
-  # env 里带 DSH_LOOP_ENGINE_API_KEY=<key>，再走一次 initialize/newConversation/turn
+node node_modules/@openai/codex/bin/codex.js app-server \
+  -c 'model_provider=dsh' \
+  -c 'model_providers.dsh={name="dsh",base_url="<dsh baseURL>",wire_api="responses",env_key="DSH_LOOP_ENGINE_API_KEY"}' \
+  # env 里带 DSH_LOOP_ENGINE_API_KEY=<key>，再走一次 initialize/thread/start/turn/start
 ```
-或最小等价做法：在 dsh web 里把某会话切到 codex、选一条真实 dsh 模型，发一轮，看 codex 子进程 stderr 与 dsh 侧日志。要同时确认：① `-c` 被接受（无解析错）；② `wire_api=responses`/`chat` 与网关是否对得上；③ 故意传一个网关不支持的协议（如 anthropic-messages，此时 `wire_api` 被省略）时**报错形态**。
+或最小等价做法：在 dsh web 里把某会话切到 codex、选一条真实 dsh 模型，发一轮，看 codex 子进程 stderr 与 dsh 侧日志。
 
 **验不过时怎么退**：把 `Config.model` 钉在 codex 自己的原生模型上、把 dsh 模型选择留给 in-process 会话；或在 codex 的 `CODEX_WIRE_APIS` 上收紧为「只有确证网关支持的 wire 才注入」，其余仍省略 `wire_api`（现状语义：不假装支持，让 codex 自己报错）。
 
@@ -240,6 +251,32 @@ codex app-server -c 'model_provider=dsh' \
 **谁修**：主仓（能力标志）；本仓（若要做近似）。
 
 **验收标准**：决定「做/不做近似」并记录理由；若做，明确列出三处代价并在 `docs/per-session-engine.md` 用户语义一节说明。
+
+### BL-19 dsh 模型移交不了时，托管引擎会拿 dsh 的模型名去打**它自己的**端点
+
+**优先级**：P1
+
+**状态**：**已修**（0.1.5-rc5 工作区，2026-09-24）。准入条件从「`baseURL` **且** `api`」收缩为「`baseURL` 且凭据」，`api` 缺失不再是拒绝理由；shipped 路由用一行表 `SHIPPED_ROUTE_APIS` 补协议。下表保留原始复现与分析，便于将来回看"为什么当初会错"。
+
+**现象**（2026-09-24 真机复现，修复前）：在 dsh web 里把会话切到 codex、选 **`deepseek-official` 的 `deepseek-flash`**，报的不是"这个模型 codex 用不了"，而是别的东西。链路是：
+
+1. `resolveModelHandover` 读 `llm-deepseek` 段（`settingsPath = []`，整个段就是这个 provider 的 profile）。`ctx.settings.get(ns)` 会套 schema 默认值，所以 `baseURL`（用户设的 `https://api.deepseek.com`）与 `apiKeyEnv`（schema 默认 `DEEPSEEK_API_KEY`）都拿得到——**但 `api` 拿不到**，因为 `deepseek-official` 由主仓的 DeepSeek adapter 自己拥有 wire（`packages/llm/llm-deepseek/src/adapter.ts:651` 打 `{baseURL}/chat/completions`），那个 schema 里根本没有 `api` 这个字段（`packages/llm/llm-deepseek/src/index.ts:187-196`）。
+2. 形状判定要求 `api` 非空 → **refuse** → 不注入任何 `-c`，只 `warn` 一次。
+3. 于是 codex 以**自己的** `~/.codex/config.toml` 起：`model_provider = "custom"` → `https://ai.meicloud.com/litellm`、`wire_api = "responses"`；而 driver 仍然把 dsh 的模型名 `deepseek-flash` 当 thread 的 `model` 下发。
+4. 结果：`403 Forbidden: key not allowed to access model. This key can only access models=['6dd28e9b/custom_openai/…']`——**模型名发去了错的地方**。
+
+**为什么当初"不注入"是错的**：插件确实无法从注册表知道那个 adapter 的 wire（`LlmConfigurableProvider` 只给 `provider` / `displayName` / `settingsNs` / `settingsPath` / `declared`，`packages/llm/llm/src/types.ts:218-241`；`declared` 只区分"用户声明的网关路由"与"adapter 自带的"，**不含协议**）。但把"移不了"表达成"引擎拿自己的配置接着跑"，用户看到的是一个 403——像是鉴权问题，实际是**端点错了**。这是 BL-08 的同源问题：**移交的事实要说出来**。
+
+**已实施的修法**（选项 B 的一般化）：
+- `readProviderProfile` 只要求 `baseURL`；`api` 缺失 → `DshModelHandover.api = undefined`，**照常交出端点与凭据**。
+- shipped 路由表 `SHIPPED_ROUTE_APIS`（`src/driver-core/model-handover.ts`）补协议：`deepseek-official → openai-completions`，依据是该 adapter 自己就 POST `{baseURL}/chat/completions`（不是猜）；profile 里声明了 `api` 则永远优先。
+- 各引擎自行降级：codex 省略 `wire_api`（用默认 `responses` 打**正确端点**）、kimi 省略 `KIMI_MODEL_PROVIDER_TYPE`、claude 本就不用协议；**pi 例外**——它的 provider 声明要求 `api` 存在，所以 `api` 为 `undefined` 时整份 handover 被丢弃（不写它明知 pi 会拒的 `models.json`）。
+
+**仍未证实（留给真机）**：`https://api.deepseek.com/responses` 到底存不存在。该网关对任何路径（含 `POST /nonexistent-xyz`）都先返 401，路径探测分不出来，需要真 key 跑一轮。若不存在，codex + `deepseek-official` 仍是失败——但那将是一个**指向正确端点**的失败，不再是伪装成鉴权问题的错端点 403。
+
+**谁修**：本仓（已修）；若将来主仓给 adapter 目录补上"协议"字段（`LlmConfigurableProvider` 加一个 wire 名），`SHIPPED_ROUTE_APIS` 应退役。
+
+**验收标准**：真机复测"codex + `deepseek-official` 模型"时，请求落在 `api.deepseek.com` 而不是 codex 自有配置的端点；结论（含 `/responses` 是否存在）回写本文件与 `docs/engine-codex.md`。
 
 ## 四、工程债
 

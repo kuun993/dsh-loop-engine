@@ -163,13 +163,56 @@ describe('resolveModelHandover', () => {
     expect(ctx.logger.warn).toHaveBeenCalledTimes(1)
   })
 
-  it('injects nothing when the profile names no wire protocol', async () => {
+  it('hands the endpoint over with no protocol when the profile names no wire', async () => {
     const ctx = mount({
       providers: [address('meicloud', 'llm-pi-ai')],
       section: { providers: { meicloud: profile({ api: undefined }) } },
+      credentials: { resolve: () => Promise.resolve({ value: 'sk-secret' }) },
     })
-    await expect(resolveModelHandover(ctx, OVERRIDE)).resolves.toBeUndefined()
-    expect(ctx.logger.warn).toHaveBeenCalledTimes(1)
+    // The missing wire is NOT a refusal: refusing would let the engine send dsh's
+    // model id to its own endpoint, which reads like an auth problem and is not.
+    await expect(resolveModelHandover(ctx, OVERRIDE)).resolves.toEqual({
+      provider: 'meicloud',
+      model: 'deepseek-flash',
+      baseURL: 'https://ai.example.com/litellm',
+      api: undefined,
+      apiKey: 'sk-secret',
+    })
+    expect(ctx.logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('supplies the wire for a shipped route whose adapter owns it', async () => {
+    const ctx = mount({
+      providers: [address('deepseek-official', 'llm-deepseek', [])],
+      // The harness's own deepseek adapter has no `api` field to read; its
+      // settings section carries the endpoint and the credential reference
+      // (`apiKeyEnv` comes from that schema's default) and nothing else.
+      section: { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      credentials: { resolve: () => Promise.resolve({ value: 'sk-official' }) },
+    })
+    await expect(resolveModelHandover(ctx, { provider: 'deepseek-official', model: 'deepseek-flash' }))
+      .resolves.toEqual({
+        provider: 'deepseek-official',
+        model: 'deepseek-flash',
+        baseURL: 'https://api.deepseek.com',
+        api: 'openai-completions',
+        apiKey: 'sk-official',
+      })
+    expect(ctx.logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('prefers a declared protocol over the shipped-route table', async () => {
+    const ctx = mount({
+      providers: [address('deepseek-official', 'llm-deepseek', [])],
+      section: {
+        baseURL: 'https://api.deepseek.com',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        api: 'openai-responses',
+      },
+      credentials: { resolve: () => Promise.resolve({ value: 'sk-official' }) },
+    })
+    await expect(resolveModelHandover(ctx, { provider: 'deepseek-official', model: 'deepseek-flash' }))
+      .resolves.toMatchObject({ api: 'openai-responses' })
   })
 
   it('injects nothing when the profile names no credential reference', async () => {

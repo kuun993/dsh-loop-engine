@@ -17,6 +17,10 @@
  * user's own `~/.pi` skills/auth/theme. That is the trade the deployment makes
  * by selecting a real dsh model on pi.
  *
+ * pi's provider schema requires a wire protocol (`api`), so this is the one
+ * engine that cannot express a handover without one; the driver drops such a
+ * handover before it reaches here instead of writing a file pi rejects.
+ *
  * @module dsh-loop-engine/engine-pi/model-handover
  */
 

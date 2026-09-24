@@ -43,7 +43,7 @@ const KIMI_PROVIDER_TYPES: Record<string, string> = {
  * @returns the `KIMI_MODEL_*` entries to layer over the child's environment.
  */
 export function kimiModelEnv(handover: DshModelHandover): Record<string, string> {
-  const type = KIMI_PROVIDER_TYPES[handover.api]
+  const type = handover.api === undefined ? undefined : KIMI_PROVIDER_TYPES[handover.api]
   return {
     KIMI_MODEL_NAME: handover.model,
     KIMI_MODEL_API_KEY: handover.apiKey,

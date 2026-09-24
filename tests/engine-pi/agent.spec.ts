@@ -1031,6 +1031,26 @@ describe('PiAgent dsh endpoint handover', () => {
     }
   })
 
+  it('hands nothing over when dsh named no protocol, because Pi cannot express such a provider', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      // An empty `api` is the profile shape a route whose adapter owns the wire
+      // has; pi's `models.json` rejects a provider without one, so the driver
+      // drops the handover instead of materializing a directory pi refuses.
+      provideDshEndpoint(ctx, { api: '' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-noproto-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(specAt(0).env.PI_CODING_AGENT_DIR).toBeUndefined()
+      expect(specAt(0).argv).not.toContain('--api-key')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('hands nothing over for the hosted seat, leaving Pi its own configuration', async () => {
     const ctx = await harness()
     try {
