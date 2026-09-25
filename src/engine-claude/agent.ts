@@ -679,6 +679,24 @@ export class ClaudeCodeAgent implements Agent {
                 .map(([, text]) => ({ type: 'reasoning' as const, text }))
               content = [...synthesized, ...content]
             }
+            // Project each tool call onto dsh's vocabulary exactly once and
+            // feed the SAME values to both writers: the assistant message's
+            // `tool-call` block and the `tool/call` event must carry
+            // byte-identical name and arguments for the same id, or Session V4
+            // refuses the log on load. `mapAssistantMessage` builds `content`
+            // and `toolCalls` in one pass, so every tool-call block's id
+            // resolves in `toolCalls`. dsh's spelling wins on both sides.
+            const normalizedCalls = new Map(mapped.toolCalls.map(call => [
+              call.callId,
+              normalizeHostedToolCall('claude-code', call.name, call.arguments),
+            ]))
+            content = content.map(block => {
+              if (block.type !== 'tool-call') return block
+              // `mapAssistantMessage` builds `content` and `toolCalls` in one
+              // pass, so a tool-call block's id always has a projected call.
+              const normalized = normalizedCalls.get(block.id)!
+              return { ...block, name: normalized.name, arguments: normalized.arguments }
+            })
             if (content.length > 0) {
               // This message begins the next assistant segment.
               this.beginSegment(phase)
@@ -710,7 +728,7 @@ export class ClaudeCodeAgent implements Agent {
               }
             }
             for (const call of mapped.toolCalls) {
-              const normalized = normalizeHostedToolCall('claude-code', call.name, call.arguments)
+              const normalized = normalizedCalls.get(call.callId)!
               this.session.append('tool/call', {
                 turn: phase.turn,
                 step: phase.step,
@@ -720,7 +738,8 @@ export class ClaudeCodeAgent implements Agent {
               })
               // `TodoWrite` is a plan, not a tool row: the dsh todo panel reads
               // the `todo/write` event, which the in-process tool handler would
-              // have appended. The assistant message keeps the engine spelling.
+              // have appended. Its `tool-call` block in the assistant message
+              // carries the same projected name and arguments as this event.
               const todos = planTodosOfHostedTool('claude-code', call.name, call.arguments)
               if (todos !== undefined) this.session.append('todo/write', { todos: [...todos] })
             }

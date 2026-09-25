@@ -575,8 +575,42 @@ describe('ClaudeCodeAgent turn mapping', () => {
         data: {
           turn: 1,
           step: 1,
-          message: { content: [{ type: 'tool-call', id: 'toolu_1', name: 'Read', arguments: '{"file_path":"a.txt"}' }] },
+          message: { content: [{ type: 'tool-call', id: 'toolu_1', name: 'read', arguments: '{"file_path":"a.txt"}' }] },
         },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('writes the same projected name and arguments to the message block and the tool/call event', async () => {
+    // Session V4 pairs the two by id and refuses a log whose block and event
+    // disagree, so the assistant block and the event must both carry dsh's
+    // projected spelling (`Read` → `read`).
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        assistantToolUse('toolu_1', 'Read', { file_path: 'a.txt' }),
+        toolResultMessage('toolu_1', 'contents of a'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('invariant-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read a.txt' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const call = events.find(event => event.type === 'tool/call')!
+      const block = events
+        .filter(event => event.type === 'assistant/message')
+        .flatMap(event => (event.data as { message: { content: { type: string; id?: string; name?: string; arguments?: string }[] } }).message.content)
+        .find(entry => entry.type === 'tool-call' && entry.id === 'toolu_1')!
+      expect(block).toEqual({ type: 'tool-call', id: 'toolu_1', name: 'read', arguments: '{"file_path":"a.txt"}' })
+      expect(block).toMatchObject({
+        name: (call.data as { name: string }).name,
+        arguments: (call.data as { arguments: string }).arguments,
       })
     } finally {
       await ctx.fiber.dispose()
@@ -769,10 +803,10 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(events.find(event => event.type === 'todo/write')).toMatchObject({
         data: { todos: [{ content: 'first', status: 'pending' }, { content: 'second', status: 'completed' }] },
       })
-      // The engine's own assistant block keeps its spelling: only the tool/call
-      // event is projected onto dsh's vocabulary.
+      // The assistant block and the tool/call event both carry dsh's projected
+      // spelling: they must agree for Session V4 to pair them by id.
       expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
-        data: { message: { content: [{ type: 'tool-call', id: 'toolu_todo', name: 'TodoWrite' }] } },
+        data: { message: { content: [{ type: 'tool-call', id: 'toolu_todo', name: 'todo_write' }] } },
       })
     } finally {
       await ctx.fiber.dispose()

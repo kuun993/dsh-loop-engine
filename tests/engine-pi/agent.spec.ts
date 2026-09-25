@@ -422,6 +422,45 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
+  it('writes the same projected name and arguments to the message block and the tool/call event', async () => {
+    // Session V4 pairs the two by id and refuses a log whose block and event
+    // disagree, so both writers must receive the SAME projected values. Pi
+    // keys its read path as `path`, which the projection reshapes onto dsh's
+    // `file_path` — so this also covers the arguments half of the invariant.
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'message_start', message: assistantMessage('reading') },
+        messageDelta({ type: 'toolcall_start', contentIndex: 1, id: 'call-r', toolName: 'read' }),
+        messageDelta({ type: 'toolcall_end', contentIndex: 1, toolCall: { id: 'call-r', name: 'read', arguments: { path: 'a.txt' } } }),
+        { type: 'tool_execution_start', toolCallId: 'call-r', toolName: 'read', args: { path: 'a.txt' } },
+        { type: 'tool_execution_end', toolCallId: 'call-r', toolName: 'read', result: { content: [{ type: 'text', text: 'body' }] }, isError: false },
+        turnEnd(),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('invariant-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('read a.txt'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const call = events.find(event => event.type === 'tool/call')!
+      const block = events
+        .filter(event => event.type === 'assistant/message')
+        .flatMap(event => (event.data as { message: { content: { type: string; id?: string; name?: string; arguments?: string }[] } }).message.content)
+        .find(entry => entry.type === 'tool-call' && entry.id === 'call-r')!
+      expect(block).toEqual({ type: 'tool-call', id: 'call-r', name: 'read', arguments: '{"file_path":"a.txt"}' })
+      expect(block).toMatchObject({
+        name: (call.data as { name: string }).name,
+        arguments: (call.data as { arguments: string }).arguments,
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('folds tool-call blocks into the assistant message so a model resume stays paired', async () => {
     const ctx = await harness()
     try {

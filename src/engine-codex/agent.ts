@@ -890,9 +890,12 @@ export class CodexAgent implements Agent {
                 // shape.
                 this.beginSegment(phase)
                 const activity = mapCommandExecution(item as { id: string; command?: string; aggregatedOutput?: string | null; exitCode?: number | null; status?: string })
-                foldToolCall(activity.call)
-                flushHeld()
+                // Project exactly once: the message block folded below and the
+                // `tool/call` event must carry byte-identical name and
+                // arguments for the same id, or Session V4 refuses the log.
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
+                foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
@@ -901,9 +904,9 @@ export class CodexAgent implements Agent {
               } else if (item.type === 'fileChange') {
                 this.beginSegment(phase)
                 const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
-                foldToolCall(activity.call)
-                flushHeld()
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
+                foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
@@ -912,9 +915,9 @@ export class CodexAgent implements Agent {
               } else if (item.type === 'mcpToolCall') {
                 this.beginSegment(phase)
                 const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
-                foldToolCall(activity.call)
-                flushHeld()
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
+                foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
+                flushHeld()
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })

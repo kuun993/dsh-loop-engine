@@ -9,10 +9,14 @@
  * dsh's own tool names and argument shapes, while a hosted engine names its
  * tools differently: Claude's `Write`/`Edit`/`Read`/`Bash`, Codex's
  * `apply_patch`/`command_execution`, Kimi's title-cased `Bash`, Pi's
- * `path`-keyed arguments. This module normalizes the event a driver appends
- * while leaving the durable assistant message — and therefore the next step's
- * serialized prompt — in the engine's own vocabulary. Session pairing is by
- * callId, so the two spellings coexist.
+ * `path`-keyed arguments. This module projects a hosted call onto dsh's
+ * vocabulary, and each driver feeds the projected values to BOTH writers — the
+ * durable `tool/call` event and the matching `tool-call` block in the assistant
+ * message that advertised it. Session V4 pairs the two by `id` and rejects a
+ * log whose block and event disagree on `name` or `arguments`, so the two sides
+ * must be byte-identical and both carry dsh's spelling. That spelling also lets
+ * an assistant message replayed into an in-process turn name a tool dsh's
+ * registry actually has (`bash`, not `Bash`).
  *
  * Only lossless projections are applied. A call whose arguments do not carry
  * the dsh fields is passed through unchanged and simply renders as a generic
@@ -205,9 +209,10 @@ const VOCABULARIES: Readonly<Record<HostedEngineId, HostedToolVocabulary>> = {
 }
 
 /**
- * Project one hosted tool call onto dsh's `tool/call` vocabulary. The engine's
- * own assistant-message block is untouched; only the event this returns is
- * normalized, so the next step's serialized prompt keeps the engine's spelling.
+ * Project one hosted tool call onto dsh's `tool/call` vocabulary. A driver
+ * calls this once per call and writes the SAME name and arguments to both the
+ * assistant message's `tool-call` block and the durable `tool/call` event, so
+ * Session V4's id-and-payload pairing holds.
  * @param engine - the hosted engine the call came from.
  * @param name - the engine's own tool name.
  * @param argumentsJson - the engine's arguments JSON, verbatim.

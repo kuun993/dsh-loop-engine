@@ -809,10 +809,17 @@ export class KimiAgent implements Agent {
   private flushSegment(phase: RunningPhase): void {
     const calls = this.segmentCalls
     this.segmentCalls = []
-    this.flushAssistant(phase, calls)
-    for (const call of calls) {
-      const normalized = normalizeHostedToolCall('kimi', call.name, call.arguments)
-      this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: normalized.name, arguments: normalized.arguments })
+    // Normalize each call exactly once and feed the SAME values to both
+    // writers: the assistant message's `tool-call` block and the `tool/call`
+    // event must carry byte-identical name and arguments for the same id, or
+    // Session V4 refuses the log on load. dsh's spelling wins on both sides.
+    const normalized = calls.map(call => {
+      const projection = normalizeHostedToolCall('kimi', call.name, call.arguments)
+      return { callId: call.callId, name: projection.name, arguments: projection.arguments }
+    })
+    this.flushAssistant(phase, normalized)
+    for (const call of normalized) {
+      this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments })
     }
   }
 

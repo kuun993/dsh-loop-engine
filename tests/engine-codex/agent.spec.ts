@@ -445,7 +445,7 @@ describe('CodexAgent turn mapping', () => {
     ['mcpToolCall', mcpToolCall()],
   ])('splits the stream at a %s item interleaved between two agent messages', async (kind, toolItem) => {
     const expectedToolCall = {
-      commandExecution: { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+      commandExecution: { type: 'tool-call', id: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' },
       fileChange: { type: 'tool-call', id: 'patch-1', name: 'apply_patch', arguments: '[{"path":"src/a.ts","kind":"update"}]' },
       mcpToolCall: { type: 'tool-call', id: 'mcp-1', name: 'docs/search', arguments: '{"q":"cordis"}' },
     }[kind]
@@ -489,6 +489,39 @@ describe('CodexAgent turn mapping', () => {
       ])
       expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
       expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('writes the same projected name and arguments to the message block and the tool/call event', async () => {
+    // Session V4 pairs the two by id and refuses a log whose block and event
+    // disagree, so the assistant block and the event must both carry dsh's
+    // projected spelling (`command_execution` → `bash`).
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        itemCompleted(commandItem()),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('invariant-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('run it'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const call = events.find(event => event.type === 'tool/call')!
+      const block = events
+        .filter(event => event.type === 'assistant/message')
+        .flatMap(event => (event.data as { message: { content: { type: string; id?: string; name?: string; arguments?: string }[] } }).message.content)
+        .find(entry => entry.type === 'tool-call' && entry.id === 'cmd-1')!
+      expect(block).toEqual({ type: 'tool-call', id: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' })
+      expect(block).toMatchObject({
+        name: (call.data as { name: string }).name,
+        arguments: (call.data as { arguments: string }).arguments,
+      })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -571,7 +604,7 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'text', text: 'first' },
         { type: 'reasoning', text: 'think' },
-        { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+        { type: 'tool-call', id: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' },
       ])
       expect(assistants[0]?.data.usage).toBeUndefined()
       expect(assistants[1]?.data.message.content).toEqual([{ type: 'text', text: 'second' }])
@@ -619,7 +652,7 @@ describe('CodexAgent turn mapping', () => {
       expect(assistants).toHaveLength(1)
       expect(assistants[0]?.data.message.content).toEqual([
         { type: 'reasoning', text: 'think' },
-        { type: 'tool-call', id: 'cmd-1', name: 'command_execution', arguments: '{"command":"ls -la"}' },
+        { type: 'tool-call', id: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' },
       ])
       expect(embeddedChunks(assistants[0]!)).toEqual([
         { type: 'block-start', index: 0, blockType: 'reasoning' },

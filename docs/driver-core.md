@@ -22,7 +22,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 | `session-lifetime.ts` | 一个活会话的生命周期资源（在 `ctx.sessions` store 里的条目 + 存放它事件的写句柄）由**哪个 agent 持有**：原地换手时整个对象从旧机器交到继任者手里，所以会话不会离开 `ctx.sessions`，也就不会发出 `session/disposed`（见 §4） |
 | `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
 | `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
-| `hosted-tool-vocabulary.ts` | 把托管引擎的工具名与参数归一化到 dsh 词汇（只改 `tool/call` 事件），并抽出计划工具的 `todo/write` 列表 |
+| `hosted-tool-vocabulary.ts` | 把托管引擎的工具名与参数归一化到 dsh 词汇（同一组值喂给 `tool/call` 事件与 assistant 消息的 `tool-call` block），并抽出计划工具的 `todo/write` 列表 |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
 | `agents-md-skill-provider.ts` | "逐目录指令文件 + 技能目录"这套发现的**算法**，由各引擎用一份数据 spec 参数化 |
@@ -326,21 +326,21 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
   - codex：`command_execution→bash`；`apply_patch` 是多文件补丁，没有单文件 dsh 等价物，**刻意保留原名**；
   - kimi：`title` 级映射 `Bash/Read/Write/Edit → bash/read/write/edit`；
   - pi：名字本就是 dsh 拼写，只重塑参数——`path→file_path`（保留 `offset`/`limit` 等未知字段），单条 `edits[0]` 的 `{oldText,newText}` 摊平成 `old_string/new_string`；多条 edit 无单条等价物，保留原参数。
-- 归一化**只落在 driver 新 append 的 `tool/call` 事件上**，durable `assistant/message` 的 tool-call block 保持引擎原拼写。会话按 callId 配对（`../../../deepseek-harness/packages/core/session/src/invariant.ts:122-140`、`repair.ts`），所以两种拼写共存合法；下一次查询的 prompt（`prompt.ts` 从 assistant 消息序列化）因此仍是引擎自己的词汇，不会让模型看到陌生的工具名。
+- 归一化后的 `{ name, arguments }` 会**同时**喂给两个写入方：driver 新 append 的 `tool/call` 事件，以及该调用所属 `assistant/message` 里同 `id` 的 `tool-call` block。Session V4 按 `id` 配对这两者并要求 `name` 与 `arguments` **逐字节相同**（`../../deepseek-harness/packages/session/session-format-v3-to-v4/src/relationships.ts` 的 `ToolState`），否则每次加载该日志都抛 `tool/call <id> does not match one advertised tool call`——会话不可加载。因此两侧都取 dsh 拼写：`tool/call` 是 Web 工具行与 dsh 工具词汇的读取面，而 assistant 消息若被回放进 in-process turn，也必须命名一个 dsh 注册表里真实存在的工具（`bash`，不是 `Bash`）。
 - 参数 JSON 解析失败、或不是对象时，名字照常投影、参数原样保留——宁可退化成通用行，也不误渲染。
 - `planTodosOfHostedTool(engine, name, argumentsJson)` 读出计划工具的整表快照，形状对齐 `todo/write` 的 `TodoItem`。目前只有 Claude 的 `TodoWrite` 有明确映射（其 `status` 枚举与 dsh 完全相同）；未知状态与畸形条目被丢弃而不是抛错。
 - 因为插件只是 append 这个事件、从不 import `@deepseek-ai/dsh-tool-todo` 包，`todo/write` 的 `SessionEventMap` 成员在本模块用 `declare module '@deepseek-ai/dsh-session/types'` 镜像了一份；profile 总会装载真实包，两份同形声明合并为同一接口。
 
 ### 哪些引擎怎么用
 
-四个 agent 在自己的 `tool/call` append 处调用归一化：
+四个 agent 都在**构造消息与事件之前**对一个调用只调用一次归一化，把同一组 `{ name, arguments }` 喂给两个写入方：
 
-| 引擎 | 调用点 |
+| 引擎 | 归一化点（同一组值喂给 block 与事件） |
 |---|---|
-| claude | `src/engine-claude/agent.ts` 的 `mapped.toolCalls` 循环（同时为 `TodoWrite` append `todo/write`） |
-| codex | `src/engine-codex/agent.ts` 的 `commandExecution`/`fileChange`/`mcpToolCall` 三个 `item-completed` 分支 |
-| pi | `src/engine-pi/agent.ts` 的 `callsToLog` 循环 |
-| kimi | `src/engine-kimi/agent.ts` 的 `flushSegment` |
+| claude | `src/engine-claude/agent.ts` 的 `assistant` 分支：由 `mapped.toolCalls` 建 `id→归一化值` 表，用它重写 `mapped.content` 里的 `tool-call` block，并驱动 `tool/call` 事件（`TodoWrite` 另 append `todo/write`） |
+| codex | `src/engine-codex/agent.ts` 的 `commandExecution`/`fileChange`/`mcpToolCall` 三个 `item-completed` 分支：先归一化，再把归一化值折进 `held`（`foldToolCall`），并用同一值 append 事件 |
+| pi | `src/engine-pi/agent.ts` 的 `emitToolCall`：登记时归一化，归一化值同时进 `pendingToolCalls`（→ assistant block）与 `pendingCallLog`（→ 事件） |
+| kimi | `src/engine-kimi/agent.ts` 的 `flushSegment`：归一化整段调用列表，再喂给 `flushAssistant` 与 `tool/call` 事件 |
 
 ### 未接入的部分（已知缺口）
 
@@ -351,7 +351,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 
 ### 改它会波及谁
 
-改映射表会同时改变四个引擎的 UI 呈现与产出文件行，但不改变引擎侧 prompt 与会话配对。测试上：`tests/driver-core/hosted-tool-vocabulary.spec.ts` 覆盖全部投影分支；每个引擎的 `tests/engine-*/agent.spec.ts` 断言归一化后的 `tool/call` 事件（注意：assistant 消息内容断言仍是引擎原拼写）。
+改映射表会同时改变四个引擎的 UI 呈现、产出文件行，以及 assistant 消息里 tool-call block 的工具名（它现在与 `tool/call` 事件取同一投影），但不改变会话配对。测试上：`tests/driver-core/hosted-tool-vocabulary.spec.ts` 覆盖全部投影分支；每个引擎的 `tests/engine-*/agent.spec.ts` 既断言投影后的 `tool/call` 事件，也断言 assistant 消息里同 `id` 的 tool-call block 与之**逐字节相同**（`name` 与 `arguments` 都覆盖）。
 
 ## 7.6 session-model.ts：模型选择的透传判据
 
@@ -430,7 +430,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 | `assistant-stream.ts` 帧与分段压缩 | 四条流式路径的 live 帧与内嵌 stream | `tests/driver-core/assistant-stream.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
 | `agents-md-skill-provider.ts` 算法/候选构造 | codex、pi、kimi 三个 provider 的全部发现行为 | 三个 `tests/engine-*/skills.spec.ts`（**缺一不可**：分支散布在三份 spec 里，见 §9） |
-| `hosted-tool-vocabulary.ts` 映射/重塑/计划 | 四个引擎的 UI 工具行与产出文件呈现；claude 的待办面板 | `tests/driver-core/hosted-tool-vocabulary.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
+| `hosted-tool-vocabulary.ts` 映射/重塑/计划 | 四个引擎的 UI 工具行与产出文件呈现；assistant 消息里 tool-call block 的工具名（与 `tool/call` 事件同投影）；claude 的待办面板 | `tests/driver-core/hosted-tool-vocabulary.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
 | `skills.ts` `parseSkillFile` | claude provider + 共享 provider（codex/pi/kimi）的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |

@@ -304,7 +304,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
           message: {
             content: [
               { type: 'text', text: 'Let me ' },
-              { type: 'tool-call', id: '0:call_1', name: 'Bash', arguments: '{"command":"ls"}' },
+              { type: 'tool-call', id: '0:call_1', name: 'bash', arguments: '{"command":"ls"}' },
             ],
           },
         },
@@ -312,6 +312,11 @@ describe('KimiAgent turn mapping (streamed)', () => {
       const call = events.find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: '0:call_1', name: 'bash', arguments: '{"command":"ls"}' } })
       expect(call!.seq).toBeGreaterThan(assistant!.seq)
+      // The invariant: the block and the event carry byte-identical projected
+      // name and arguments for the same id, or Session V4 refuses the log.
+      const block = (assistant!.data as { message: { content: { type: string; id?: string; name?: string; arguments?: string }[] } })
+        .message.content.find(entry => entry.type === 'tool-call' && entry.id === '0:call_1')
+      expect(block).toMatchObject({ name: (call!.data as { name: string }).name, arguments: (call!.data as { arguments: string }).arguments })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -334,7 +339,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
         .map(event => event.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({ data: { arguments: '{}' } })
       expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
-        data: { message: { content: [{ type: 'tool-call', id: '0:call_2', name: 'Bash', arguments: '{}' }] } },
+        data: { message: { content: [{ type: 'tool-call', id: '0:call_2', name: 'bash', arguments: '{}' }] } },
       })
     } finally {
       await ctx.fiber.dispose()
@@ -400,8 +405,8 @@ describe('KimiAgent turn mapping (streamed)', () => {
         .filter(event => event.type === 'assistant/message')
         .map(event => (event.data as { message: { content: unknown } }).message.content)
       expect(contents).toEqual([
-        [{ type: 'text', text: 'first ' }, { type: 'tool-call', id: 'c1', name: 'Bash', arguments: '{"command":"a"}' }],
-        [{ type: 'text', text: 'second ' }, { type: 'tool-call', id: 'c2', name: 'Read', arguments: '{"path":"f"}' }],
+        [{ type: 'text', text: 'first ' }, { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"a"}' }],
+        [{ type: 'text', text: 'second ' }, { type: 'tool-call', id: 'c2', name: 'read', arguments: '{"path":"f"}' }],
         [{ type: 'text', text: 'third' }],
       ])
       // Each segment is its OWN dsh step. One ACP prompt runs kimi's whole
@@ -766,7 +771,7 @@ describe('KimiAgent tool and chunk edges', () => {
       // The orphan call folds into the trailing text's single message, so the
       // chat view still renders the reasoning/text beside its tool row.
       expect(events.find(event => event.type === 'assistant/message')).toMatchObject({
-        data: { message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool-call', id: '0:call_orphan', name: 'Bash', arguments: '{}' }] } },
+        data: { message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool-call', id: '0:call_orphan', name: 'bash', arguments: '{}' }] } },
       })
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({
         data: { callId: '0:call_orphan', name: 'bash', arguments: '{}' },

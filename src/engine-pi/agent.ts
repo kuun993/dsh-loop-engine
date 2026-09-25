@@ -712,10 +712,11 @@ export class PiAgent implements Agent {
         }
         held = undefined
         // The message just committed owns these calls; log them after it.
+        // `emitToolCall` already projected them onto dsh's vocabulary, so the
+        // event and the message block carry byte-identical name and arguments.
         for (const call of callsToLog) {
-          const normalized = normalizeHostedToolCall('pi', call.name, call.arguments)
           this.session.append('tool/call', {
-            turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: normalized.name, arguments: normalized.arguments,
+            turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments,
           })
         }
         callsToLog = []
@@ -740,11 +741,15 @@ export class PiAgent implements Agent {
         if (emittedToolCalls.has(callId)) return
         emittedToolCalls.add(callId)
         const argumentsValue = typeof rawArguments === 'string' ? rawArguments : JSON.stringify(rawArguments ?? {})
+        // Normalize once: the assistant message block and the `tool/call`
+        // event must carry byte-identical projected name and arguments for
+        // the same id, or Session V4 refuses the log on load.
+        const normalized = normalizeHostedToolCall('pi', name, argumentsValue)
         // The assistant message that requested this call must carry its
         // tool-call block, otherwise a later resume on the in-process engine
         // derives a `tool` result with no preceding assistant `tool_calls`.
-        pendingToolCalls.push({ type: 'tool-call', id: ToolCallId(callId), name, arguments: argumentsValue })
-        pendingCallLog.push({ callId, name, arguments: argumentsValue })
+        pendingToolCalls.push({ type: 'tool-call', id: ToolCallId(callId), name: normalized.name, arguments: normalized.arguments })
+        pendingCallLog.push({ callId, name: normalized.name, arguments: normalized.arguments })
       }
 
       /**
