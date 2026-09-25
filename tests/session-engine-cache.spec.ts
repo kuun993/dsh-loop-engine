@@ -662,6 +662,40 @@ describe('the turn-status row the session on screen paints', () => {
     expect(removed).toBe(1)
   })
 
+  it('paints only the live 0.1.7 row, gated on both the session and the row', () => {
+    // The regression this pins: a session-level gate alone re-paints EVERY row
+    // on screen while any turn runs, and the 0.1.7 line keeps one row per turn.
+    // The row selector must therefore also pick out the live row (`:disabled`,
+    // ui-chat's "this turn cannot be collapsed"), while the 0.1.5 selector stays
+    // plain — that row only exists while its turn runs.
+    const dataset = fakeDocument()
+    const tags: Array<{ textContent: string }> = []
+    ;(globalThis as { document?: unknown }).document = {
+      documentElement: { dataset },
+      head: { appendChild: () => {} },
+      createElement: () => {
+        const tag = { dataset: {}, textContent: '', remove: () => {} }
+        tags.push(tag)
+        return tag
+      },
+    }
+
+    installTurnStatusStyles({ effect: (body: () => () => void) => { body() } } as never)
+    const css = tags[0]!.textContent
+
+    // Both attributes gate every rule, so an idle session paints nothing at all.
+    expect(css).toContain('html[data-loop-engine][data-loop-engine-running]')
+    // The 0.1.7 row carries `:disabled`; the unguarded form must not appear.
+    expect(css).toContain('button[data-turn-process]:disabled [class$="_label"]')
+    expect(css).not.toContain('button[data-turn-process] [class$="_label"]')
+    // The 0.1.5 row keeps the plain class selector.
+    expect(css).toContain('[class$="_turnStatus"]')
+    // ...and each engine still gets its own glyph rule.
+    for (const engine of ['claude-code', 'codex', 'pi', 'kimi']) {
+      expect(css).toContain(`html[data-loop-engine="${engine}"][data-loop-engine-running]`)
+    }
+  })
+
   it('writes nothing when there is no document, so a non-browser boot cannot throw', () => {
     focusTurnStatusSession('s1')
     expect(() => { reflectTurnStatusEngine('s1', 'pi') }).not.toThrow()

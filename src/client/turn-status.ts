@@ -47,16 +47,26 @@
  * paints by it, and a leftover attribute is inert on a page whose turn-status row
  * is not rendered.
  *
- * The paint is also gated on the session being MID-TURN, through a second
- * document-level attribute ({@link RUNNING_ATTR}, written from the same
- * reflection). On the 0.1.5 line the row only exists while a turn is in flight,
- * so the engine attribute alone was enough; on the 0.1.7 line that same button
- * stays on screen after the turn ends, as the collapsed summary that reads
- * "用时 4秒" — an engine-only gate leaves the glyph and the sweep animating on a
- * finished turn, which is not what the live line means. The gate is a surface's
- * own answer (`session.running`, which every session-scoped seat receives), so a
- * surface that cannot answer passes nothing and leaves it alone rather than
- * guessing.
+ * The paint is gated TWICE, and both gates are needed on the 0.1.7 line.
+ *
+ * First, on the session being MID-TURN, through a second document-level
+ * attribute ({@link RUNNING_ATTR}, written from the same reflection). On the
+ * 0.1.5 line the row only exists while a turn is in flight, so the engine
+ * attribute alone was enough; on the 0.1.7 line that same button stays on screen
+ * after the turn ends, as the collapsed summary that reads "用时 4秒" — an
+ * engine-only gate leaves the glyph and the sweep animating on a finished turn,
+ * which is not what the live line means. The gate is a surface's own answer
+ * (`session.running`, which every session-scoped seat receives), so a surface
+ * that cannot answer passes nothing and leaves it alone rather than guessing.
+ *
+ * Second, and this is the one a session-level gate cannot express: on the
+ * 0.1.7 line EVERY turn's row stays on screen, so while turn N runs, turns
+ * 1..N-1 are still there. A session-wide gate turns the whole sheet on for all
+ * of them — the finished rows would wear the glyph again for as long as any
+ * later turn ran. The row selector therefore carries `:disabled` (see
+ * {@link ROW_SELECTORS}), which is how ui-chat marks the live row. The two
+ * gates answer different questions — "is a turn in flight for this session" and
+ * "is this row the one it belongs to" — and neither alone is enough.
  *
  * Three facts about the harness markup make that safe and specific:
  *   - the row has one stable handle per harness generation — an
@@ -88,8 +98,8 @@ const ENGINE_ATTR = 'data-loop-engine'
 
 /**
  * Attribute on `<html>` marking that the session on screen is mid-turn; absent
- * means it is not. Gate of the whole sheet, because the 0.1.7 row outlives the
- * turn it belongs to.
+ * means it is not. Session-level half of the gate: the 0.1.7 row outlives the
+ * turn it belongs to, and the per-row half lives in {@link ROW_SELECTORS}.
  */
 const RUNNING_ATTR = 'data-loop-engine-running'
 
@@ -101,12 +111,36 @@ const PLUGIN_ID = 'dsh-loop-engine'
  * generation's selector, and whichever the running app renders matches while
  * the other stays inert. The row moved between generations, so the selector is
  * data here rather than baked into the CSS.
+ *
+ * The two generations need DIFFERENT precision, and that difference is the
+ * whole reason this is a list of selectors rather than one:
+ *
+ *   - the 0.1.5 row exists only while its turn runs, so "the row" and "the live
+ *     turn" are the same thing and the plain class selector is exact;
+ *   - the 0.1.7 row is a `button[data-turn-process]` that STAYS on screen after
+ *     its turn ends, as the collapsed "用时 …" summary — one per turn, all of
+ *     them still rendered. So the session-wide mid-turn gate alone is not
+ *     enough: while turn N runs, turns 1..N-1 (all normally finished, all
+ *     enabled buttons) are on screen too and would be painted with it. The
+ *     `:disabled` in the selector is what picks out the live one — ui-chat sets
+ *     `disabled={!canCollapse}` and `canCollapse` is false exactly while the
+ *     turn is open (`turnProcessAlwaysOpen`, and the chevron renders under the
+ *     same condition, so the live row is the one with no chevron).
+ *
+ * Known edge: `turnProcessAlwaysOpen` is ALSO true for a turn that ended
+ * `aborted` or `error`, so such a row stays disabled forever and keeps the
+ * glyph while a later turn runs. The DOM carries the end reason nowhere a
+ * selector can reach, so this stays a documented limit rather than a rule.
  */
 const ROW_SELECTORS = [
   /** 0.1.5 line: the turn-status row, whose class name ends `_turnStatus`. */
   '[class$="_turnStatus"]',
-  /** 0.1.7 line: the turn-process button (`data-turn-process`); its status text is the label span. */
-  'button[data-turn-process] [class$="_label"]',
+  /**
+   * 0.1.7 line: the LIVE turn-process button — `disabled` is ui-chat's "this
+   * turn cannot be collapsed", which is true only while the turn is open — and
+   * its status text is the label span.
+   */
+  'button[data-turn-process]:disabled [class$="_label"]',
 ] as const
 
 /** Emit the sheet once for one generation's row selector. */

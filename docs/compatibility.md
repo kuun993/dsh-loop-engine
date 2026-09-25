@@ -137,7 +137,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 |---|---|---|
 | Remote contribution 的 strict codec | `{ schema }` → `{ create: () => schema }` | 会话级 Remote 从没挂上，**对话页引擎选择器永远「读取中」**，而设置页（另一条路径）正常 |
 | agent-presets roster 读法 | `read(id)` → `readDocument(id)` | `Unknown agent preset: loop-engine-claude-code`——预设根本没写出来，恢复会话失败 |
-| turn-status 行挂点 | `[class$="_turnStatus"]` → `button[data-turn-process] [class$="_label"]` | 0.1.7 上托管引擎那一行**没有字形/扫光** |
+| turn-status 行挂点 | `[class$="_turnStatus"]` → `button[data-turn-process]:disabled [class$="_label"]` | 0.1.7 上托管引擎那一行**没有字形/扫光**；`:disabled`（= ui-chat 的"这一轮不可折叠"，只在轮次进行中为真）是**逐行**区分"在跑的这行"与"已经收尾但仍留在屏上的那些行"的唯一手段——只按会话门控时，新一轮开始会把前面所有已结束的行一起重新涂上 |
 | turn-status 行的生命周期 | 0.1.5 行随轮次消失 → 0.1.7 行**结束后仍留在屏上**（折叠摘要「用时 X 秒」） | **对话结束后动画还在** |
 | CSS Modules 命名 | `[hash]_[local]`：真实类名是 `<hash>_label`，**不存在**字面量 `.label` | 选择器匹配不到任何元素（静默失效） |
 | `dataset` 键拼写 | `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError` | 整条反射路径带塌（只能写 camelCase 的 `dataset.loopEngine`） |
