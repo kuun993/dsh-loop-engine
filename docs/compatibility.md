@@ -18,13 +18,30 @@
 | `0.1.5-rc1` / `0.1.5-rc2` | `0.1.5-rc.1` | 单代 |
 | `1.0.0-rc8` … `1.0.0-rc15` | `0.1.2-rc.1` | 单代（旧命名法） |
 
-**已逐个核对过的 harness 小版本**（每条都跑过 `typecheck` + 两代测试，见 §6 步骤 5）：
+**已逐个核对过的 harness 小版本**（"支持"= 跑过 `typecheck` + 两代测试，**且启动过一次 `dsh web` 看启动日志**）：
 
-| harness | 结论 | 依据 |
+| harness | 状态 | 依据 / 未决项 |
 |---|---|---|
-| `0.1.5-rc.1` … `0.1.5-rc.3` | 支持 | `.compat-015/` 兼容作业 |
-| `0.1.7-rc.1` | 支持 | 本仓 devDependencies |
-| `0.1.7-rc.2` | 支持 | 插件依赖的 API 面在 rc.1→rc.2 之间**逐个 diff 过、未变**：`TurnProcessNodeView.tsx`（turn-status 行）、`ui-session` 的 `SessionStandardProps`、`preset/agent-presets`、`settings`、`typert/registry` 的 codec 校验、`core/session` 的事件表、`session-format-v3-to-v4` 的关系校验、`api-session-controller` 的快照、`ui-settings`、`typert/protocol`、两个槽位声明（`conversation.input.right` / `conversation.session.header.actions`）与 `cssModules: '[hash]_[local]'` 命名、`IconChevronDownOutlineRegular`。rc.1→rc.2 共 346 个提交，但落在这张清单上的**只有 `llm/llm` 一处（+32/−9）**，插件只用它的类型，typecheck 与测试均通过。 |
+| `0.1.5-rc.1` … `0.1.5-rc.3` | 支持（单代） | `.compat-015/` 兼容作业；0.1.5 上托管引擎的**老会话恢复**仍会撞 `$.prefix`（见 §9） |
+| `0.1.7-rc.1` | 支持 | 本仓 devDependencies；启动日志无插件报错 |
+| `0.1.7-rc.2` | ⚠️ **不完全** | 见下面那段——装得上、跑得通、启动不报错，但**托管引擎的 preset 授权在启动时失败** |
+
+> ⚠️ **`0.1.7-rc.2` 的未决缺陷（2026-09-25 实测）**：启动日志里
+> `~/.dsh/logs/startup-<时间>-<id>.log` 会出现
+> `loop-engine: engine preset authoring failed: RemoteError: Unknown agent preset: standard`，
+> 而把 `~/.dsh/.agent-presets/loop-engine-*` 清掉后重启，**这些 preset 不会被重新写出来**——也就是说
+> 托管引擎（claude-code / codex / pi / kimi）在 rc.2 上**可能创建或恢复不了会话**（症状会是
+> `Unknown agent preset: loop-engine-<engine>`）。抛出点是
+> `packages/preset/agent-preset-registry/src/index.ts` 的 `readDocument()`（注册表当时还没有 `standard`
+> 这条定义），所以**先怀疑授权时机/重试窗口**，而不是解析逻辑。rc.1→rc.2 该包确实改过
+> （去掉 `modeSelectionEnabled`、`remoteExportList` 形状变化），但都不解释"定义还没装载"。
+> **在修掉并复测之前，别把 rc.2 列进"受支持"。**
+
+> **踩过的坑（导致上一版结论错了一次）**：逐个 diff 的路径必须**真实存在**，否则 `git diff` 不报错、
+> 静默输出空 → 读起来像"没变"。本轮就误写了 `packages/preset/agent-presets/src/index.ts`（该包不存在，
+> 真名是 `packages/preset/agent-preset-registry`），于是漏掉了 registry 的改动。
+> 现在用 `git cat-file -e <tag>:<path>` 先确认路径存在，或把命令换成 `git diff <旧> <新> -- <包目录>`
+> （目录不存在时同样要警惕）。判定"要不要动代码"，**最终仍以启动一次 `dsh web` 看日志为准**。
 
 > 新增一个小版本的**判定成本很低**：按 §5 的清单逐个 `git diff <旧tag> <新tag> -- <路径>`，落在清单外的改动不用看。这条命令就是"要不要动代码"的答案。
 
@@ -137,24 +154,28 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 以"支持 `0.1.8-rc.1`（同时保留 0.1.5 与 0.1.7）"为例：
 
-1. **先判断"要不要动代码"**。**同一条线内的小版本**（如 `0.1.7-rc.1` → `0.1.7-rc.2`，几百个提交）绝大多数时候**不用改任何代码**：只 diff §5 那张表里的面就够了，命令是
+1. **先判断"要不要动代码"**。**同一条线内的小版本**（如 `0.1.7-rc.1` → `0.1.7-rc.2`，几百个提交）多数时候不用改代码：先 diff §5 那张表里的面。**每个路径先确认存在**（不存在时 `git diff` 会静默输出空，读起来像"没变"）：
 
    ```sh
    cd deepseek-harness
+   OLD=dsh-v0.1.7-rc.1 NEW=dsh-v0.1.7-rc.2
    for p in packages/client/ui-chat/src/client/chat/TurnProcessNodeView.tsx \
             packages/client/tsdown.client.ts \
             packages/client/ui-session/src/client/index.ts \
-            packages/preset/agent-presets/src/index.ts \
-            packages/settings/settings/src/index.ts \
-            packages/typert/registry/src/service.ts \
+            packages/preset/agent-preset-registry/src \
+            packages/preset/persona/src \
+            packages/settings/settings/src \
+            packages/typert/registry/src \
             packages/core/session/src/known-event-types.ts \
             packages/session/session-format-v3-to-v4/src/relationships.ts \
-            packages/api/session-controller/src/client/contract/snapshot.ts; do
-     printf '%-78s ' "$p"; git diff --shortstat dsh-v0.1.7-rc.1 dsh-v0.1.7-rc.2 -- "$p" | tr -d '\n'; echo
+            packages/api/session-controller/src/client/contract/snapshot.ts \
+            packages/client/ui-conversation/src/client/contract/slots.ts; do
+     git cat-file -e "$NEW:$p" 2>/dev/null || { printf '%-62s %s\n' "$p" '!! 路径不存在，别信空输出'; continue; }
+     printf '%-62s ' "$p"; git diff --shortstat "$OLD" "$NEW" -- "$p" | tr -d '\n'; echo
    done
    ```
 
-   落在清单外的改动（`client/ui-schedule` 之类）不用看。**这一步是"要不要动代码"的答案**；§1 的表里记着已核对过的版本与结论。
+   落在清单外的改动（`client/ui-schedule` 之类）不用看。**这只是"要不要动代码"的第一道筛子**；最终必须**真启动一次 `dsh web` 并读启动日志**（§1 的记录就是这么来的——rc.2 正是过了这道筛子却在启动日志里报错）。
 
    **跨 minor（如 `0.1.7` → `0.1.8`）**才需要走完整流程：不要凭 CHANGELOG 猜，直接对新 checkout 的 `packages/**/lib/types/**/*.d.ts`（或 `src/`）做结构化 diff。重点仍是 §5 表里那几类：服务类/方法、事件名、codec/typert 形状、`SessionEventMap`、插槽 props（`SessionStandardProps`）、preset roster、CSS Modules 命名。
 2. **先跑一次兼容作业**，让差异自己冒出来：把新 harness 装进一个新的隔离依赖集（照 `.compat-015/` 复制一份 `.compat-018/`），`vitest.config` 别名过去，跑同一批 spec。**这一步是探针，比读代码快**。
