@@ -168,14 +168,43 @@ ls .compat-0*/ && cat vitest.config.compat0*.ts
 
 ---
 
-## 8. 已知不做的事（避免以后重复判断）
+## 8. 老 V3 会话日志的数据修复（一次性工具）
+
+**症状**：在 0.1.7 上打开一条 0.1.5 时期写的会话，报
+
+```
+Session migration from v3 to v4 refuses the transformed artifact:
+tool/call <id> has no advertised tool lifecycle; source v3 artifact remains unchanged
+```
+
+（或同族的 `tool/result <id> has no advertised tool lifecycle`、`system/message requires a protected first surface head`、`step/end leaves unresolved tool call`。）
+
+**成因**：托管引擎的会话是由**插件的驱动**写durable日志的。2026-09-19 之前的驱动构建（`71ccdea` / `c293e25` / `5de4b91` / `1c94078` 这几个修复之前）写出的 transcript，**v3 读得下去、v4 的生命周期规则不接受**。v4 的规则在 `packages/session/session-format-v3-to-v4/src/relationships.ts`：一个 `tool/call` 必须**先**被某条 `assistant/message` 的 `tool-call` 内容块广告过（`id` 相同，且 `name`/`arguments` 与 `tool/call` 的数据一致），`tool/result` 同理。当前构建已经按这个顺序写（`src/engine-kimi/agent.ts` 的 `flushSegment` → `flushAssistant`），所以**只有老日志受影响**。
+
+**工具**：`scripts/repair-v3-tool-calls.mjs`（仓库根下）。它不参与运行时、不发布，纯修复路径只用 Node 标准库：
+
+```sh
+node scripts/repair-v3-tool-calls.mjs --check          # 只报告（扫 $DSH_SESSIONS_ROOT 或 ~/.dsh/sessions）
+node scripts/repair-v3-tool-calls.mjs <file...>        # 原地修复（先写 <file>.v3.bak）
+node --import tsx/esm scripts/repair-v3-tool-calls.mjs --verify <file...>   # 修完再用 harness 真迁移验证
+```
+
+`--verify` 会调兄弟仓 `deepseek-harness` 里**真实的** v3→v4 迁移 + v4 关系校验跑一遍结果与备份（这是唯一需要 harness checkout 的路径；默认 `../deepseek-harness`，可用 `--harness <dir>` 覆盖）。修不动就落空：不改动时文件字节不变，写入走同目录临时文件 + rename。
+
+它修的是**一整族**当时的驱动缺陷，不止广告缺失：广告迟到（消息排在它自己的 `tool/call` 之后）、`tool/result` 重复写入、结果落在错误的 step（v4 在 `step/end` 清空该 step 的开放调用）、无结果的未完成调用（用 harness 自己的 `@deepseek-ai/dsh-session/repair` 收尾：`TOOL_OUTCOME_UNKNOWN` / `TOOL_NOT_STARTED`）、system 头错位（补一条空 `system/message` 头，与运行时 `src/driver-core/system-head.ts` 同一手法）。结构修完后 `seq` 重排密集、payload 里对 seq 的引用一并重映射。
+
+**仍有一族没修**：广告**存在但 `name`/`arguments` 与调用不一致**（v4 报 `tool/call <id> does not match one advertised tool call`）——修它等于改写"这次调用声称做了什么"，属于另一个判断（很可能只是驱动把引擎原名规范化到 `tool/call`、消息块里留了原名），因此**故意不放进这个工具**。另有极少数 `format v3 inherited cut disagrees with its source marker`。要处理这两类，另开一轮，先确认"改写的那个名字才是对的"。
+
+---
+
+## 9. 已知不做的事（避免以后重复判断）
 
 - **0.1.5 上"恢复一条用托管引擎跑过的老会话"仍会失败**（`agent-presets: preset "loop-engine-<engine>" failed to mount: invalid config: $.prefix missing required value`）。0.1.7 的 persona 行要求 `prefix`，插件给 0.1.5 授权的托管 preset 里没有这个字段；**0.1.5 上新建会话完全正常**，只有"升级前就存在的、由托管引擎驱动过的会话"在 0.1.5 上恢复会撞这个。已评估为**不修**（收益小、改动面落在 preset 授权逻辑上），修的话应在 `src/preset.ts` 的授权路径按代际补 `prefix`。
 - **代理半的 legacy 路径没有单测**（`src/client/**` 不在覆盖率内），只做代码审查 + 产物自检 + 真机冒烟。
 
 ---
 
-## 9. 相关文档
+## 10. 相关文档
 
 - `docs/architecture.md` §8 —— 跨代兼容的架构解释（§4.1/§8.1-8.6）。
 - `docs/per-session-engine.md` §5 —— 引擎切换的落地方式（与代际无关，但兼容改动常波及）。
