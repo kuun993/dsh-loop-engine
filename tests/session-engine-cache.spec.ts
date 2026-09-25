@@ -34,7 +34,7 @@ import {
   type SessionEngineRemote, type SessionEngineReport, type SessionEngineResult,
 } from '../src/client/session-engine.ts'
 import {
-  blurTurnStatusSession, focusTurnStatusSession, reflectTurnStatusEngine,
+  blurTurnStatusSession, focusTurnStatusSession, installTurnStatusStyles, reflectTurnStatusEngine,
 } from '../src/client/turn-status.ts'
 import {
   RELOAD_RETURN_KEY, armReloadReturn, browserPage, installReloadReturn, restoreReloadReturn,
@@ -132,6 +132,12 @@ function fakeSessions(initial: { phase: 'pending' | 'ready'; ids: readonly strin
  * object stores exactly this key).
  */
 const ENGINE_KEY = 'loopEngine'
+
+/**
+ * The `dataset` key of the mid-turn gate — the CAMELCASED spelling of the
+ * `data-loop-engine-running` attribute the stylesheet also selects on.
+ */
+const RUNNING_KEY = 'loopEngineRunning'
 
 /**
  * Install a minimal `document` and hand back the root dataset the turn-status
@@ -574,10 +580,10 @@ describe('the copy one refused switch reads as', () => {
  * @param sessionId - the session whose surface is on screen.
  * @returns the release the hook installs as its cleanup.
  */
-function reflectAsSurface(cache: SessionEngineCache, sessionId: string): () => void {
+function reflectAsSurface(cache: SessionEngineCache, sessionId: string, running?: boolean): () => void {
   focusTurnStatusSession(sessionId)
   const report = cache.read(sessionId)
-  reflectTurnStatusEngine(sessionId, report === undefined ? undefined : hostedEngineOf(report.engine))
+  reflectTurnStatusEngine(sessionId, report === undefined ? undefined : hostedEngineOf(report.engine), running)
   return () => { blurTurnStatusSession(sessionId) }
 }
 
@@ -603,9 +609,65 @@ describe('the turn-status row the session on screen paints', () => {
     expect(ENGINE_KEY in dataset).toBe(false)
   })
 
+  it('gates the paint on the turn being live, so a finished row goes back to stock', () => {
+    const dataset = fakeDocument()
+    focusTurnStatusSession('s1')
+
+    // Mid-turn: the engine is named AND the gate is on.
+    reflectTurnStatusEngine('s1', 'pi', true)
+    expect(dataset[ENGINE_KEY]).toBe('pi')
+    expect(RUNNING_KEY in dataset).toBe(true)
+
+    // The turn ended: the gate goes off. On the 0.1.7 line the row is still on
+    // screen as the finished turn's summary, so this is what stops its glyph and
+    // sweep — the regression this gate exists for.
+    reflectTurnStatusEngine('s1', 'pi', false)
+    expect(dataset[ENGINE_KEY]).toBe('pi')
+    expect(RUNNING_KEY in dataset).toBe(false)
+
+    // And a surface with no answer leaves the gate as the one that has one left
+    // it: no `running` is not "not running".
+    reflectTurnStatusEngine('s1', 'pi', true)
+    reflectTurnStatusEngine('s1', 'codex')
+    expect(RUNNING_KEY in dataset).toBe(true)
+  })
+
+  it('clears both attributes when the sheet is torn down', () => {
+    const dataset = fakeDocument()
+    let disposer: (() => void) | undefined
+    let removed = 0
+    const ctx = {
+      effect: (body: () => () => void, name: string) => {
+        expect(name).toBe('loop-engine: per-engine turn status styles')
+        disposer = body()
+      },
+    }
+    // The install path writes to `document.head` and later removes the tag.
+    ;(globalThis as { document?: unknown }).document = {
+      documentElement: { dataset },
+      head: { appendChild: () => {} },
+      createElement: () => ({ dataset: {}, textContent: '', remove: () => { removed += 1 } }),
+    }
+
+    installTurnStatusStyles(ctx as never)
+    focusTurnStatusSession('s1')
+    reflectTurnStatusEngine('s1', 'pi', true)
+    expect(dataset[ENGINE_KEY]).toBe('pi')
+    expect(RUNNING_KEY in dataset).toBe(true)
+
+    // Tearing the sheet down names no engine and leaves no turn live.
+    disposer?.()
+    expect(ENGINE_KEY in dataset).toBe(false)
+    expect(RUNNING_KEY in dataset).toBe(false)
+    expect(removed).toBe(1)
+  })
+
   it('writes nothing when there is no document, so a non-browser boot cannot throw', () => {
     focusTurnStatusSession('s1')
     expect(() => { reflectTurnStatusEngine('s1', 'pi') }).not.toThrow()
+    // The gate's own write path is in the same no-document boat.
+    expect(() => { reflectTurnStatusEngine('s1', 'pi', true) }).not.toThrow()
+    expect(() => { reflectTurnStatusEngine('s1', 'pi', false) }).not.toThrow()
   })
 
   it('lets no session but the one on screen paint the row', () => {

@@ -50,6 +50,7 @@ import { interruptedTurnClosers, SessionId, SessionLogOffset, SessionPreparation
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { Scope } from '@deepseek-ai/dsh-scope'
+import { LEGACY_HARNESS } from '../compat.ts'
 import { FactoryOwnership, raceAbort, raceAbortCall } from './ownership.ts'
 import { SessionLifetime } from './session-lifetime.ts'
 
@@ -108,8 +109,8 @@ interface PreparedAgent<TAgent extends HostedAgent> {
   agent: TAgent
   /** Aborts when the factory unloads, the caller cancels, or teardown begins — ends any setup await. */
   signal: AbortSignal
-  /** Enter registries, announce, notify session-start, and start the machine. */
-  publish(source: SessionStartSource): HostedAgentHandle
+  /** Enter registries, announce (`agent/created`), and start the machine. */
+  publish(source: SessionStartSource): Promise<HostedAgentHandle>
   /** Reverse teardown: stop the machine, release the session, unwind the scope. Memoized. */
   dispose(): Promise<void>
 }
@@ -125,9 +126,9 @@ interface StoredSession {
  *
  * Creation and resume follow the registry factory contract and the shared
  * publication transaction: prepare, run setup, then publish through both
- * registries, announce, and emit `agent/session-start`. {@link swap} follows the
- * same transaction onto a session another agent entered, which is the only
- * difference between taking a session over and owning it from birth.
+ * registries and await the serial `agent/created` announcement. {@link swap}
+ * follows the same transaction onto a session another agent entered, which is
+ * the only difference between taking a session over and owning it from birth.
  */
 export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> implements AgentFactory {
   /** Validated configuration owned by this engine instance. */
@@ -285,7 +286,7 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
       return {
         agent,
         signal: abort.signal,
-        publish: (source) => {
+        publish: async (source) => {
           assertLive()
           // A swap JOINS a session another machine already entered and
           // announced, so it owes only the agent half of the publication:
@@ -296,9 +297,23 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
           detachAgent = loopCtx.agents.enter(agent, parentAgent)
           if (!joining) agent.ctx.sessions.announce(session)
           assertLive()
-          loopCtx.agents.announce(agent)
-          assertLive()
-          emitAgentEvent(loopCtx, agent, 'agent/session-start', { source })
+          /* v8 ignore start -- legacy 0.1.5 announcement; the coverage job runs on 0.1.7 and vitest.config.compat015.ts takes this arm */
+          if (LEGACY_HARNESS) {
+            // 0.1.5: `announce` is synchronous and only registers the agent, so
+            // the caller owes the separate `agent/session-start` edge. The
+            // announcement is scoped by the agent's own carrier, exactly as the
+            // harness loop emits it. The registry is viewed through its legacy
+            // one-argument signature, which the installed 0.1.7 type dropped.
+            ;(loopCtx.agents as unknown as { announce(agent: Agent): void }).announce(agent)
+            assertLive()
+            emitAgentEvent(loopCtx, agent, 'agent/session-start' as never, { source })
+          } else {
+            // 0.1.7: `announce` awaits the serial `agent/created` listeners; it
+            // IS the creation announcement, so the separate session-start emit
+            // is gone.
+            await loopCtx.agents.announce(agent, source, abort.signal)
+          }
+          /* v8 ignore stop */
           assertLive()
           return { agent, dispose, retire, lifetime }
         },

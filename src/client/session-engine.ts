@@ -89,8 +89,9 @@ export type { SessionEngineReport } from '../agent-preset-ids.ts'
 /**
  * The standard seat members this half reads off a session-scope slot.
  *
- * Only the identity: the engine itself is no longer read from a framework hook,
- * it is asked of the host through this plugin's own Remote.
+ * The identity, plus the one live fact the turn-status row needs: whether the
+ * session is mid-turn. The engine itself is no longer read from a framework
+ * hook, it is asked of the host through this plugin's own Remote.
  */
 export interface SessionSeat {
   /**
@@ -99,6 +100,25 @@ export interface SessionSeat {
    * (which only ever renders with a session) shows nothing.
    */
   sessionId?: string
+  /**
+   * Selector hook over the current Session's snapshot (`SessionStandardProps` of
+   * every session-scoped seat). Optional for the same reason as the identity: a
+   * caller with no such seat — or a test rendering one directly — has none, and
+   * the turn-status gate is then left alone rather than guessed.
+   */
+  useSession?: SnapshotSelector
+}
+
+/**
+ * The selector-hook shape this half needs from `useSession`: a read of one field
+ * of the Session snapshot, with no equality function of its own.
+ */
+export type SnapshotSelector = <S>(select: (snapshot: SessionRunningState) => S) => S
+
+/** The one field of the Session snapshot the turn-status row reads. */
+export interface SessionRunningState {
+  /** Whether a turn is in flight for this session. */
+  readonly running: boolean
 }
 
 /** Cordis service key AND wire namespace of the plugin's own Remote. */
@@ -263,12 +283,31 @@ export function switchNeedsReload(current: SessionEngine, target: LoopEngineId):
 // restated below (client `validateContribution` / `requireStrictDescriptor`).
 // ---------------------------------------------------------------------------
 
-/** A codec of one wire field (harness: `TypertCodec`, strict branch). */
+/** One boundary schema of a wire field (a zod schema, as the Gateway holds it). */
+interface RemoteSchema {
+  parse(value: unknown): unknown
+}
+
+/**
+ * A codec of one wire field (harness: `TypertCodec`, strict branch).
+ *
+ * The two harness generations read DIFFERENT members of this object and each
+ * validates only its own: the 0.1.5 line's registry and client parse through
+ * `schema`, while the 0.1.7 line's registry requires a `create()` factory and
+ * parses through `codec.create()` (`typert: … strict codec has no create()
+ * factory`). One build serves both, so the codec carries both fields.
+ */
 interface RemoteCodec {
   readonly mode: 'strict'
   /** Stable identity of the field's declared type, for diagnostics. */
   readonly typeSymbol: string
-  readonly schema: { parse(value: unknown): unknown }
+  /** The 0.1.5 line's read: the boundary schema itself. */
+  readonly schema: RemoteSchema
+  /**
+   * The 0.1.7 line's read: a factory returning the boundary schema.
+   * @returns the same boundary schema.
+   */
+  readonly create: () => RemoteSchema
 }
 
 /** One ordered business parameter (harness: `InvocationParameterDescriptor`). */
@@ -448,12 +487,14 @@ function descriptor(
         mode: 'strict',
         typeSymbol: `${LOOP_ENGINE_PACKAGE}#${LOOP_ENGINE_REMOTE_NAMESPACE}/${method}:request`,
         schema: request,
+        create: () => request,
       },
     }],
     result: {
       mode: 'strict',
       typeSymbol: `${LOOP_ENGINE_PACKAGE}#${LOOP_ENGINE_REMOTE_NAMESPACE}/${method}:result`,
       schema: result,
+      create: () => result,
     },
   }
 }

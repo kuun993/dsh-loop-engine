@@ -70,10 +70,10 @@
  */
 
 import { useRef, useState, type CSSProperties, type JSX } from 'react'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   Button,
   FishLogo,
-  IconChevronDownOutline14,
   Menu,
   Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -118,6 +118,21 @@ export type LoopEngineComposerSelectProps =
   & Partial<InjectFace<LoopEngineComposerSelectInjected>>
 
 type ComposerFace = InjectFace<LoopEngineComposerSelectInjected> & SessionSeat
+
+/** A chevron glyph component, as both primitives generations type it. */
+type ChevronGlyph = (props: { size?: number }) => JSX.Element
+
+/**
+ * The chevron glyph, picked at runtime: the 0.1.7 primitives renamed
+ * `IconChevronDownOutline14` to `IconChevronDownOutlineRegular` (size is a prop
+ * on both), so one bundle serves either generation by reading whichever the
+ * running primitives export.
+ */
+const IconChevronDown = ((
+  primitives as Record<string, unknown>
+).IconChevronDownOutlineRegular ?? (
+  primitives as Record<string, unknown>
+).IconChevronDownOutline14) as ChevronGlyph
 
 const ENGINE_OPTIONS: readonly { value: LoopEngineId; key: keyof typeof en }[] = [
   { value: 'in-process', key: 'engineInProcess' },
@@ -318,13 +333,20 @@ const noticeDetail: CSSProperties = {
  * @returns the picker, or null while the picker is unavailable or switched off.
  */
 export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): JSX.Element | null {
-  const { controller, useSnapshot, sessionId, sessionEngines, switchEngine, t } = props as ComposerFace
+  const { controller, useSnapshot, sessionId, sessionEngines, switchEngine, useSession, t } = props as ComposerFace
   const { status, engine: defaultEngine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  // The session's own live state, read here (not in the hook) because this is the
+  // seat that has it: `useSession` is the session-scoped standard kit every seat
+  // receives, and its `running` is what tells the turn-status sheet to keep
+  // painting the row or let it go back to stock — the 0.1.7 row stays on screen
+  // as the finished turn's summary. Called unconditionally, before every early
+  // return below, so the hook order is the same on every render.
+  const running = useSession?.(snapshot => snapshot.running)
   // The session's own engine, as the plugin's Remote reports it. Until the host
   // answers — and for a session whose engine is not recorded at all — the picker
   // claims nothing: it never falls back to the settings default, and never keeps
   // showing a stale hint.
-  const resolved = useEngineOfSession(sessionEngines, sessionId)
+  const resolved = useEngineOfSession(sessionEngines, sessionId, running)
   const { label, engine, selectedId, pending } = sessionId === undefined
     ? defaultFace(defaultEngine)
     : resolved === undefined ? READING : triggerFace(resolved)
@@ -499,7 +521,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
             {engine === undefined ? null : <span style={triggerIcon} aria-hidden>{engineGlyph(engine, 14)}</span>}
             <span style={triggerLabel}>{labelText}{pendingText}</span>
             <span style={open ? chevronOpen : chevron} aria-hidden>
-              <IconChevronDownOutline14 size={14} />
+              <IconChevronDown size={14} />
             </span>
           </button>
         )}

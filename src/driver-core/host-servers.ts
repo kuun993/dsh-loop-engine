@@ -34,8 +34,10 @@ export interface SkillsService {
 export interface AgentPresetsService {
   /** The effective default preset id. */
   readonly defaultId: string
-  /** Read one preset's composition text. */
-  read(id: string): Promise<string>
+  /** 0.1.5 line: read one preset's composition text directly. */
+  read?(id: string): Promise<string>
+  /** 0.1.7 line: read one preset's document; its `content` is the composition text. */
+  readDocument?(id: string): Promise<{ readonly content: string }>
 }
 
 /** The host settings service's mutation seam, as this plugin uses it. */

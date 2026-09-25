@@ -61,16 +61,25 @@ import type { SessionEngineCache } from './session-engine.ts'
  *
  * One effect does the whole thing, so the three steps cannot come apart: declare
  * this session as the row's subject (`focusTurnStatusSession`), reflect its
- * engine by that declaration (`reflectTurnStatusEngine`), and release the
- * declaration when this surface goes away (`blurTurnStatusSession`, which
- * withdraws it only while it is still this session's).
+ * engine and its mid-turn gate by that declaration (`reflectTurnStatusEngine`),
+ * and release the declaration when this surface goes away
+ * (`blurTurnStatusSession`, which withdraws it only while it is still this
+ * session's).
+ *
+ * `running` is the session's own live state (`session.running`, from the
+ * session-scoped standard kit) and it is part of the effect's key: the 0.1.7 row
+ * stays on screen after the turn ends, so the paint has to come off when the turn
+ * does — a surface that does not know the state passes nothing and leaves the
+ * gate alone.
  * @param cache - the cache the plugin mounted.
  * @param sessionId - the session to follow, or undefined off a session scope.
+ * @param running - whether that session is mid-turn, when the surface knows.
  * @returns the engine report, or undefined while it is unknown.
  */
 export function useEngineOfSession(
   cache: SessionEngineCache,
   sessionId: string | undefined,
+  running?: boolean,
 ): SessionEngineReport | undefined {
   const [, bump] = useState(0)
   const report = sessionId === undefined ? undefined : cache.read(sessionId)
@@ -92,11 +101,11 @@ export function useEngineOfSession(
     // row — so the row is left exactly as it is.
     if (sessionId === undefined) return
     focusTurnStatusSession(sessionId)
-    reflectTurnStatusEngine(sessionId, engine)
+    reflectTurnStatusEngine(sessionId, engine, running)
     // React runs a departing component's cleanup in no guaranteed order against
     // an arriving one's, so the withdrawal is guarded: a session that is no
     // longer the row's subject must not un-focus the one that replaced it.
     return () => { blurTurnStatusSession(sessionId) }
-  }, [sessionId, engine])
+  }, [sessionId, engine, running])
   return report
 }

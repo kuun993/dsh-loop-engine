@@ -182,10 +182,28 @@ async function writeIfDifferent(path: string, text: string): Promise<boolean> {
   return true
 }
 
-/** Minimal read seam over the host's preset roster (`AgentPresets.read`). */
+/** Minimal read seam over the host's preset roster, per harness generation. */
 export interface PresetCompositionSource {
-  /** Read one preset's composition text; throws when the id is unknown. */
-  read(id: string): Promise<string>
+  /** 0.1.5 line: read one preset's composition text; throws when the id is unknown. */
+  read?(id: string): Promise<string>
+  /** 0.1.7 line: read one preset's document; `content` is the composition text. */
+  readDocument?(id: string): Promise<{ readonly content: string }>
+}
+
+/**
+ * Read the named preset's composition text through whichever seam the running
+ * roster exposes. The 0.1.5 line's registry answers `read(id)` with the text;
+ * the 0.1.7 rewrite replaced it with `readDocument(id)`, whose `content` is the
+ * same entry-list YAML.
+ * @param source - the roster's composition reader.
+ * @param id - the preset identity to read.
+ * @returns the composition text.
+ * @throws when the running roster exposes neither seam.
+ */
+async function readComposition(source: PresetCompositionSource, id: string): Promise<string> {
+  if (source.readDocument !== undefined) return (await source.readDocument(id)).content
+  if (source.read !== undefined) return source.read(id)
+  throw new Error('loop-engine: the preset roster exposes neither readDocument() nor read()')
 }
 
 /**
@@ -198,7 +216,7 @@ export interface PresetCompositionSource {
  * @throws when the source preset cannot be read or the writes fail.
  */
 export async function ensureEnginePresets(dshHome: string, source: PresetCompositionSource): Promise<boolean> {
-  const composition = await source.read(SOURCE_PRESET_ID)
+  const composition = await readComposition(source, SOURCE_PRESET_ID)
   const stripped = `${MANAGED_HEADER}\n${stripPresetRows(composition)}`
   let changed = false
   for (const engine of HOSTED_ENGINE_IDS) {

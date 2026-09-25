@@ -44,6 +44,7 @@ import {
 } from './mapping.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover } from '../driver-core/model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
@@ -444,6 +445,7 @@ export class ClaudeCodeAgent implements Agent {
         this.session.append('step/start', { turn, step })
         phase.step = step
         try {
+          appendSystemHeadIfMissing(this.session, turn, step)
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }

@@ -24,47 +24,18 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, LlmAdapter, LlmRuntime, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { apply, type Config } from '../src/index.ts'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { SOURCE_PRESET_ID } from '../src/preset.ts'
+import { createLiveLoopConfig } from './helpers/fake-settings.ts'
 import { fakeSessionProjections } from './helpers/session-projections.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
-
-const NS_BRANDED = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL as SettingsNamespace
 
 /** The provider route the canned adapter serves. */
 const PROVIDER = 'canned'
 /** The model id every request in this suite asks for. */
 const MODEL = 'canned-model'
-
-/**
- * In-memory settings provider, so the mount path runs the composition the web
- * profile runs and nothing reaches a real on-disk settings file.
- */
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown>
-
-  constructor(ctx: Context, doc?: Record<string, unknown>) {
-    super(ctx)
-    this.doc = structuredClone(doc ?? {})
-  }
-
-  get writable(): boolean {
-    return true
-  }
-
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.doc))
-  }
-
-  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.doc[ns] = structuredClone(section)
-    return Promise.resolve()
-  }
-}
 
 /** One scripted assistant step: a text block, usage, and a normal stop. */
 function textResponse(text: string): StreamChunk[] {
@@ -193,15 +164,14 @@ async function boot(script: StreamChunk[][]): Promise<App> {
   const adapter = new CannedAdapter(script)
   ctx.llm.registerAdapter([PROVIDER], adapter)
 
-  const settingsFiber = ctx.plugin(MemorySettings, { [NS_BRANDED]: { engine: 'in-process' } })
-  await settingsFiber
-  cleanups.push(async () => { await settingsFiber.dispose() })
-
   const probeFiber = ctx.plugin(toolReadingPromptProbe())
   await probeFiber
   cleanups.push(async () => { await probeFiber.dispose() })
 
-  const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml') }
+  // The plugin's own live Config fields: a minimal profile supplies both
+  // references, and `in-process` is the composed default.
+  const live = createLiveLoopConfig(ctx, { engine: 'in-process' })
+  const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml'), ...live.config }
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
     apply: (pluginCtx: Context) => { apply(pluginCtx, config) },

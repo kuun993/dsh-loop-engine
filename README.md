@@ -22,7 +22,7 @@ A **published** dsh needs no extra setup. Booting the harness from its **source 
 
 ## Version compatibility
 
-dsh-loop-engine is versioned **in lockstep with the harness it targets**: `<harness version>-rcN`. `0.1.5-rc3` targets harness `0.1.5-rc.2`; `0.1.5-rc1`/`0.1.5-rc2` target `0.1.5-rc.1`; `1.0.0-rc8` … `1.0.0-rc15` target `0.1.2-rc.1`; `1.0.0-rc7` and earlier target `0.1.1-rc.2`. Every harness package it consumes is pinned exactly in `peerDependencies`, and the two must be matched — a mismatch fails loudly at boot or session resume. To use the plugin with an older harness, install the release matching it (each GitHub Release states the harness version it targets).
+dsh-loop-engine is versioned **in lockstep with the harness it targets**: `<harness version>-rcN`. From `0.1.7-rc1` on, **one release serves two harness generations**: the 0.1.5 line (`>=0.1.5-rc.1 <0.1.6-0`, all sharing the old settings API) and `0.1.7-rc.1` (`>=0.1.7-rc.1 <0.1.8-0`). It detects the running generation at load and takes the matching code path, so a single published package installs onto either. Every harness package it consumes declares that union range in `peerDependencies`; a harness outside it fails loudly at boot or session resume. `0.1.5-rc3` … `0.1.5-rc5` target harness `0.1.5-rc.2`; `0.1.5-rc1`/`0.1.5-rc2` target `0.1.5-rc.1`; `1.0.0-rc8` … `1.0.0-rc15` target `0.1.2-rc.1`; `1.0.0-rc7` and earlier target `0.1.1-rc.2`.
 
 ### Requirements
 

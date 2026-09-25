@@ -85,8 +85,12 @@ const pill: CSSProperties = {
  * the session's engine is not known yet (or not recorded at all).
  */
 export function LoopEngineBadge(props: LoopEngineBadgeProps): JSX.Element | null {
-  const { sessionId, sessionEngines, t } = props as BadgeFace
-  const report = useEngineOfSession(sessionEngines, sessionId)
+  const { sessionId, sessionEngines, useSession, t } = props as BadgeFace
+  // The session's live state, so the row stops painting when the turn ends —
+  // the badge is a surface of the session on screen and carries the same
+  // session-scoped kit as the composer. Called before the early returns below.
+  const running = useSession?.(snapshot => snapshot.running)
+  const report = useEngineOfSession(sessionEngines, sessionId, running)
   if (sessionId === undefined || report === undefined) return null
   const engine = report.engine
   // A session the host reads as recording no preset: nothing is claimed for it,

@@ -10,6 +10,7 @@ import {
   mapMcpToolCall,
   mapUsage,
 } from '../../../src/engine-codex/appserver/mapping.ts'
+import { toolResultView } from '../../helpers/harness-generation.ts'
 
 describe('mapUsage', () => {
   it('maps all fields', () => {
@@ -49,12 +50,7 @@ describe('mapCommandExecution', () => {
       name: 'command_execution',
       arguments: '{"command":"ls -la"}',
     })
-    expect(result.result.content).toEqual([{
-      type: 'tool-result',
-      toolCallId: 'cmd-1',
-      content: [{ type: 'text', text: 'file.txt' }],
-      isError: false,
-    }])
+    expect(toolResultView(result.result).content).toEqual([{ type: 'text', text: 'file.txt' }])
   })
 
   it('marks non-zero exit codes as errors', () => {
@@ -65,7 +61,7 @@ describe('mapCommandExecution', () => {
       exitCode: 1,
       status: 'completed',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result.result).isError).toBe(true)
   })
 })
 
@@ -80,7 +76,7 @@ describe('mapFileChange', () => {
       callId: 'patch-1',
       name: 'apply_patch',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 })
 
@@ -97,7 +93,7 @@ describe('mapMcpToolCall', () => {
       callId: 'mcp-1',
       name: 'docs/search',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 
   it('maps a failed tool call', () => {
@@ -108,7 +104,7 @@ describe('mapMcpToolCall', () => {
       arguments: {},
       error: { message: 'not found' },
     })
-    expect(result.result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result.result).isError).toBe(true)
   })
 
   it('maps a tool call without server/tool to mcp_tool_call name', () => {
@@ -147,7 +143,7 @@ describe('mapMcpToolCall', () => {
       arguments: {},
       error: null as unknown as { message?: string },
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 
   it('maps a tool call with error but no message', () => {
@@ -158,7 +154,7 @@ describe('mapMcpToolCall', () => {
       arguments: {},
       error: {},
     })
-    expect(result.result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result.result).isError).toBe(true)
   })
 
   it('maps a tool call with null result', () => {
@@ -169,7 +165,7 @@ describe('mapMcpToolCall', () => {
       arguments: {},
       result: null as unknown as { content?: unknown[] },
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 })
 
@@ -182,7 +178,7 @@ describe('mapCommandExecution edge cases', () => {
       exitCode: 0,
       status: 'completed',
     })
-    expect(result.result.content[0]).toMatchObject({ content: [{ type: 'text', text: '' }] })
+    expect(toolResultView(result.result).content).toMatchObject([{ type: 'text', text: '' }])
   })
 
   it('maps a command with null exitCode', () => {
@@ -193,7 +189,7 @@ describe('mapCommandExecution edge cases', () => {
       exitCode: null,
       status: 'completed',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 
   it('maps a command with failed status', () => {
@@ -204,7 +200,7 @@ describe('mapCommandExecution edge cases', () => {
       exitCode: 0,
       status: 'failed',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result.result).isError).toBe(true)
   })
 
   it('maps a command with undefined command', () => {
@@ -233,7 +229,7 @@ describe('mapFileChange edge cases', () => {
       id: 'patch-1',
       changes: [],
     })
-    expect(result.result.content[0]).toMatchObject({ isError: false })
+    expect(toolResultView(result.result).isError).toBe(false)
   })
 
   it('maps a patch with failed status', () => {
@@ -242,6 +238,6 @@ describe('mapFileChange edge cases', () => {
       changes: [],
       status: 'failed',
     })
-    expect(result.result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result.result).isError).toBe(true)
   })
 })

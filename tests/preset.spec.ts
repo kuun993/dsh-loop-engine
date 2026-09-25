@@ -319,6 +319,23 @@ describe('ensureEnginePresets', () => {
     await expect(readdir(join(home, USER_PRESET_DIR))).rejects.toThrow()
   })
 
+  it('reads the composition through readDocument when the 0.1.7 roster exposes it', async () => {
+    const home = await tempDir()
+    const changed = await ensureEnginePresets(home, {
+      readDocument: (id) => id === SOURCE_PRESET_ID
+        ? Promise.resolve({ content: '- id: persona\n' })
+        : Promise.reject(new Error(`unknown preset "${id}"`)),
+    })
+    expect(changed).toBe(true)
+    expect((await presetOf(home, enginePresetId('claude-code'))).composition)
+      .toContain('Managed by dsh-loop-engine')
+  })
+
+  it('throws when the roster exposes neither read seam', async () => {
+    const home = await tempDir()
+    await expect(ensureEnginePresets(home, {})).rejects.toThrow('neither readDocument() nor read()')
+  })
+
   it('propagates an unwritable target instead of swallowing it', async () => {
     const home = await tempDir()
     // A directory occupying the first engine's composition path: the read fails

@@ -15,6 +15,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { PiLoop } from '../../src/engine-pi/loop.ts'
 import type { PiAssistantMessageEvent, PiMessage, PiToolResult } from '../../src/engine-pi/rpc/types.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { toolResultRole, toolResultView } from '../helpers/harness-generation.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
@@ -409,19 +410,12 @@ describe('PiAgent turn mapping', () => {
       expect(call).toMatchObject({ data: { callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' } })
       expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
       const result = events.find(event => event.type === 'tool/result')
-      expect(result).toMatchObject({
-        data: {
-          message: {
-            role: 'user',
-            content: [{
-              type: 'tool-result',
-              toolCallId: 'call-1',
-              content: [{ type: 'text', text: 'file.txt' }],
-              isError: false,
-            }],
-          },
-        },
-        surfaceOp: 'append',
+      expect(result).toMatchObject({ surfaceOp: 'append' })
+      expect(toolResultView(result?.data.message)).toMatchObject({
+        role: toolResultRole(),
+        toolCallId: 'call-1',
+        content: [{ type: 'text', text: 'file.txt' }],
+        isError: false,
       })
     } finally {
       await ctx.fiber.dispose()
@@ -455,7 +449,8 @@ describe('PiAgent turn mapping', () => {
       expect(assistant!.content.some(block => block.type === 'tool-call'
         && (block as { id?: string }).id === 'call-1')).toBe(true)
       const assistantIndex = messages.indexOf(assistant!)
-      const resultIndex = messages.findIndex(m => m.role === 'user' && m.content.some(block => block.type === 'tool-result'))
+      // The result message's role differs by generation; its call id does not.
+      const resultIndex = messages.findIndex(m => toolResultView(m).toolCallId === 'call-1')
       expect(resultIndex).toBeGreaterThan(assistantIndex)
     } finally {
       await ctx.fiber.dispose()
@@ -481,7 +476,7 @@ describe('PiAgent turn mapping', () => {
       const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'call-2', name: 'read', arguments: '{"file_path":"x"}' } })
       const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]).toMatchObject({ isError: true })
+      expect(toolResultView(result?.data.message).isError).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -527,7 +522,7 @@ describe('PiAgent turn mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'ran' })
+      expect(toolResultView(result?.data.message).content[0]).toMatchObject({ text: 'ran' })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1468,7 +1463,7 @@ describe('PiAgent skill injection', () => {
       const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } })
       const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'out' })
+      expect(toolResultView(result?.data.message).content[0]).toMatchObject({ text: 'out' })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1488,7 +1483,7 @@ describe('PiAgent skill injection', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: 'ran' })
+      expect(toolResultView(result?.data.message).content[0]).toMatchObject({ text: 'ran' })
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1640,7 +1635,7 @@ describe('PiAgent edge mapping', () => {
       agent.followup(message('go'))
       await agent.whenIdle()
       const result = agent.session.snapshotEvents().findLast(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]?.content[0]).toMatchObject({ text: '(no content)' })
+      expect(toolResultView(result?.data.message).content[0]).toMatchObject({ text: '(no content)' })
     } finally {
       await ctx.fiber.dispose()
     }

@@ -12,6 +12,7 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { toolResultRole, toolResultView } from '../helpers/harness-generation.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
@@ -1060,19 +1061,12 @@ describe('CodexAgent turn mapping', () => {
         data: { callId: 'cmd-1', name: 'bash', arguments: '{"command":"ls -la"}' },
       })
       const result = events.find(event => event.type === 'tool/result')
-      expect(result).toMatchObject({
-        data: {
-          message: {
-            role: 'user',
-            content: [{
-              type: 'tool-result',
-              toolCallId: 'cmd-1',
-              content: [{ type: 'text', text: 'file.txt' }],
-              isError: false,
-            }],
-          },
-        },
-        surfaceOp: 'append',
+      expect(result).toMatchObject({ surfaceOp: 'append' })
+      expect(toolResultView(result?.data.message)).toMatchObject({
+        role: toolResultRole(),
+        toolCallId: 'cmd-1',
+        isError: false,
+        content: [{ type: 'text', text: 'file.txt' }],
       })
     } finally {
       await ctx.fiber.dispose()
@@ -1096,7 +1090,7 @@ describe('CodexAgent turn mapping', () => {
       const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call')
       expect(call).toMatchObject({ data: { callId: 'cmd-1', name: 'bash' } })
       const result = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(result?.data.message.content[0]).toMatchObject({ isError: true })
+      expect(toolResultView(result?.data.message).isError).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -1126,7 +1120,7 @@ describe('CodexAgent turn mapping', () => {
       expect(calls.map(event => event.data.name)).toEqual(['docs/search', 'apply_patch'])
       const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
       expect(results).toHaveLength(2)
-      expect(results[0]?.data.message.content[0]).toMatchObject({ isError: false })
+      expect(toolResultView(results[0]?.data.message).isError).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }

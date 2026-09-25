@@ -33,6 +33,7 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
 import { kimiModelEnv } from './model-handover.ts'
@@ -415,6 +416,7 @@ export class KimiAgent implements Agent {
         this.session.append('step/start', { turn, step })
         phase.step = step
         try {
+          appendSystemHeadIfMissing(this.session, turn, step)
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }

@@ -11,6 +11,7 @@ import SessionStore, { SessionId, type SessionEvent, type Session } from '@deeps
 import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
+import { toolResultView } from '../helpers/harness-generation.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
@@ -264,7 +265,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       expect(toolCall_).toMatchObject({ data: { callId: '0:call_1', name: 'bash' } })
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       // Each update carries the call's whole content, so the settled one wins.
-      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'b' }] }] } } })
+      expect(toolResultView(toolResult_?.data.message).content).toMatchObject([{ type: 'text', text: 'b' }])
       // The step still publishes the assistant message that requested the call,
       // as its parent, exactly once.
       expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
@@ -359,9 +360,8 @@ describe('KimiAgent turn mapping (streamed)', () => {
         .filter(event => event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'tool/result')
         .map(event => event.type)).toEqual(['assistant/message', 'tool/call', 'tool/result'])
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({ data: { arguments: '{}' } })
-      expect(events.find(event => event.type === 'tool/result')).toMatchObject({
-        data: { message: { content: [{ content: [{ type: 'text', text: '(no content)' }] }] } },
-      })
+      expect(toolResultView(events.find(event => event.type === 'tool/result')?.data.message).content)
+        .toMatchObject([{ type: 'text', text: '(no content)' }])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -465,7 +465,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'hi\n' }] }] } } })
+      expect(toolResultView(toolResult_?.data.message).content).toMatchObject([{ type: 'text', text: 'hi\n' }])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -484,7 +484,7 @@ describe('KimiAgent turn mapping (streamed)', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'partial output' }] }] } } })
+      expect(toolResultView(toolResult_?.data.message).content).toMatchObject([{ type: 'text', text: 'partial output' }])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -794,7 +794,7 @@ describe('KimiAgent tool and chunk edges', () => {
       await agent.whenIdle()
       const toolResult_ = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
       // The content-less frame leaves the last snapshot standing.
-      expect(toolResult_).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'seen' }] }] } } })
+      expect(toolResultView(toolResult_?.data.message).content).toMatchObject([{ type: 'text', text: 'seen' }])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -811,7 +811,7 @@ describe('KimiAgent tool and chunk edges', () => {
       agent.followup(message('hi'))
       await agent.whenIdle()
       const toolResult = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
-      expect(toolResult).toMatchObject({ data: { message: { content: [{ content: [{ type: 'text', text: 'abc' }] }] } } })
+      expect(toolResultView(toolResult?.data.message).content).toMatchObject([{ type: 'text', text: 'abc' }])
       // A tool-only step still publishes an (empty) assistant/message parent.
       expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
     } finally {

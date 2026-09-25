@@ -35,8 +35,6 @@ import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-ag
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, SessionSeq, canonicalHeader, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import z from '@deepseek-ai/schemastery'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import {
@@ -47,9 +45,9 @@ import {
 import { ClaudeCodeAgent } from '../src/engine-claude/agent.ts'
 import { apply, type Config } from '../src/index.ts'
 import { ModelSelectionReset } from '../src/model-selection-reset.ts'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { SOURCE_PRESET_ID, enginePresetId } from '../src/preset.ts'
 import { isHostedProviderRoute } from '../src/provider-route.ts'
+import { createLiveLoopConfig, installFakeSettings } from './helpers/fake-settings.ts'
 import { fakeSessionProjections } from './helpers/session-projections.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
 
@@ -68,7 +66,7 @@ const DEFAULT_PROVIDER = 'deployment'
 const DEFAULT_MODEL = 'deployment-model'
 
 /** The host's settings namespace for its default model selection. */
-const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
+const AGENT_DEFAULT_MODEL_NS = 'agent-default-model'
 /**
  * The model a deployment composes as its own default — the settings `base` layer
  * a saved (user-layer) default overrides. The base bundle composes exactly such
@@ -78,38 +76,6 @@ const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
  */
 const COMPOSED_PROVIDER = 'composed'
 const COMPOSED_MODEL = 'composed-model'
-/** Schema of the composed default-model section, as the host declares it. */
-const AGENT_DEFAULT_MODEL_SCHEMA = z.object({
-  provider: z.string(),
-  model: z.string(),
-  reasoningEffort: z.string(),
-})
-
-/**
- * In-memory settings provider, so the mount path runs the composition the web
- * profile runs and nothing reaches a real on-disk settings file.
- */
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown>
-
-  constructor(ctx: Context, doc?: Record<string, unknown>) {
-    super(ctx)
-    this.doc = structuredClone(doc ?? {})
-  }
-
-  get writable(): boolean {
-    return true
-  }
-
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.doc))
-  }
-
-  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.doc[ns] = structuredClone(section)
-    return Promise.resolve()
-  }
-}
 
 /** The deployment default a switch restores, as the host's service answers it. */
 function deploymentDefault(reasoningEffort?: string) {
@@ -257,8 +223,6 @@ async function tempDir(): Promise<string> {
   return dir
 }
 
-const NS_BRANDED = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL as SettingsNamespace
-
 /**
  * Boot the services the plugin's composition assumes, then mount the plugin.
  *
@@ -266,14 +230,14 @@ const NS_BRANDED = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL as SettingsNamespace
  * writes and the presets `apply` authors land in the test's temp directory
  * instead of the developer's real `~/.dsh`.
  *
- * The deployment's own COMPOSED default model is installed as a real settings
- * section, because that is how a real profile carries it: the base bundle
- * composes the `agent-default-model` row with its provider and model
- * (`packages/bundle/base/cordis.patch.yml`), which is what makes the settings
- * descriptor carry the `base` layer the plugin falls back to. Installing the
- * section makes that layer real rather than fabricated, while the resolved
- * default a session reads is still the `agentDefaultModel` service this fixture
- * provides.
+ * The deployment's own COMPOSED default model is registered as a real settings
+ * namespace carrying a `base` layer, because that is how a real profile carries
+ * it: the base bundle composes the `agent-default-model` row with its provider
+ * and model (`packages/bundle/base/cordis.patch.yml`), which is what makes the
+ * settings descriptor carry the `base` layer the plugin falls back to.
+ * Registering the section makes that layer real rather than fabricated, while
+ * the resolved default a session reads is still the `agentDefaultModel` service
+ * this fixture provides.
  * @param opts - the default-model service to compose (`'missing'` for a
  *   deployment whose profile composes none), and the model its own composition
  *   declares (`'none'` for a profile that declares no such row at all).
@@ -308,22 +272,19 @@ async function boot(opts: {
   })
 
   if (opts.settings !== 'missing') {
-    const settingsFiber = ctx.plugin(MemorySettings, { [NS_BRANDED]: { engine: 'in-process' } })
-    await settingsFiber
-    cleanups.push(async () => { await settingsFiber.dispose() })
-  }
-  if (opts.settings !== 'missing' && opts.composed !== 'none') {
-    const composed = opts.composed ?? { provider: COMPOSED_PROVIDER, model: COMPOSED_MODEL }
-    ctx.settings.installSection(
-      ctx,
-      AGENT_DEFAULT_MODEL_NS,
-      AGENT_DEFAULT_MODEL_SCHEMA,
-      composed,
-      { setSource: () => {}, onChange: () => {} },
-    )
+    const settings = installFakeSettings(ctx)
+    // A profile that declares no such composition row registers nothing here.
+    if (opts.composed !== 'none') {
+      settings.register(AGENT_DEFAULT_MODEL_NS, {
+        base: opts.composed ?? { provider: COMPOSED_PROVIDER, model: COMPOSED_MODEL },
+      })
+    }
   }
 
-  const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml') }
+  // The plugin's own live Config fields: a minimal profile supplies both, and
+  // `in-process` is the composed default.
+  const live = createLiveLoopConfig(ctx, { engine: 'in-process' })
+  const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml'), ...live.config }
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
     apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
@@ -811,6 +772,9 @@ describe('a session the harness loop is building', () => {
     // build ran a hosted engine, and the harness loop is building it again. The
     // host would read that header back as this session's selection.
     const started = await createInProcessSession(app, 'guard-recorded')
+    // A request header is only meaningful inside a turn (the session format
+    // enforces it on read), so the recorded engine request opens one first.
+    started.session.append('turn/start', { turn: 1 })
     started.session.append('request/header', {
       header: canonicalHeader({ config: { provider: ENGINE_LABEL, model: ENGINE_MODEL } }),
       reason: 'initial',

@@ -14,9 +14,9 @@
  */
 
 import { useId, useRef, useState, type CSSProperties, type JSX } from 'react'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   Button,
-  IconChevronDownOutline14,
   Menu,
   Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -41,6 +41,21 @@ export interface LoopEngineSectionInjected {
 
 /** Props delivered by the slot outlet (the renderer erases the share boundary). */
 export type LoopEngineSectionProps = Partial<InjectFace<LoopEngineSectionInjected>>
+
+/** A chevron glyph component, as both primitives generations type it. */
+type ChevronGlyph = (props: { size?: number }) => JSX.Element
+
+/**
+ * The chevron glyph, picked at runtime: the 0.1.7 primitives renamed
+ * `IconChevronDownOutline14` to `IconChevronDownOutlineRegular` (size is a prop
+ * on both), so one bundle serves either generation by reading whichever the
+ * running primitives export.
+ */
+const IconChevronDown = ((
+  primitives as Record<string, unknown>
+).IconChevronDownOutlineRegular ?? (
+  primitives as Record<string, unknown>
+).IconChevronDownOutline14) as ChevronGlyph
 
 type SectionFace = InjectFace<LoopEngineSectionInjected>
 
@@ -205,7 +220,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
             onClick={() => { setOpen(!open) }}
           >
             {label}
-            <IconChevronDownOutline14 size={14} />
+            <IconChevronDown size={14} />
           </button>
         )}
       />

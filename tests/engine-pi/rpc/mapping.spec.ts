@@ -11,6 +11,7 @@ import {
   mapUsage,
   resultText,
 } from '../../../src/engine-pi/rpc/mapping.ts'
+import { toolResultRole, toolResultView } from '../../helpers/harness-generation.ts'
 
 describe('mapUsage', () => {
   it('maps all provided fields', () => {
@@ -48,8 +49,8 @@ describe('mapToolResult', () => {
       result: { content: [{ type: 'text', text: 'file.txt' }], details: {} },
       isError: false,
     })
-    expect(result.content[0]).toMatchObject({
-      type: 'tool-result',
+    expect(toolResultView(result)).toMatchObject({
+      role: toolResultRole(),
       toolCallId: 'call-1',
       content: [{ type: 'text', text: 'file.txt' }],
       isError: false,
@@ -62,12 +63,12 @@ describe('mapToolResult', () => {
       result: { content: [{ type: 'text', text: 'boom' }] },
       isError: true,
     })
-    expect(result.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(result).isError).toBe(true)
   })
 
   it('falls back to a placeholder for an empty/unstructured result', () => {
     const result = mapToolResult({ toolCallId: 'call-3', result: {}, isError: false })
-    expect(result.content[0]?.content[0]).toMatchObject({ text: '(no content)' })
+    expect(toolResultView(result).content[0]).toMatchObject({ text: '(no content)' })
   })
 })
 

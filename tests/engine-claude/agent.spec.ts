@@ -18,7 +18,9 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
+import { LEGACY_HARNESS } from '../../src/compat.ts'
 import { loopPluginFor, mountHarness } from '../helpers/agent-harness.ts'
+import { toolResultRole, toolResultView } from '../helpers/harness-generation.ts'
 import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
 import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
 
@@ -266,6 +268,14 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(types).toContain('assistant/message')
       expect(types).toContain('step/end')
       expect(types).toContain('turn/end')
+
+      // A session STARTED on a hosted engine gets the protected system head the
+      // harness loop would have logged, so switching it to in-process later does
+      // not leave a mid-surface `system/message` the v3→v4 migration refuses.
+      // The head is a 0.1.7-line (format v4) need; the 0.1.5 line stays headless.
+      const firstSurface = agent.session.snapshotEvents()
+        .find(event => (event as { surfaceOp?: unknown }).surfaceOp !== undefined)
+      expect(firstSurface?.type).toBe(LEGACY_HARNESS ? 'user/message' : 'system/message')
 
       const assistant = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
       expect(assistant).toMatchObject({
@@ -679,18 +689,11 @@ describe('ClaudeCodeAgent turn mapping', () => {
         data: { callId: 'toolu_999', name: 'read', arguments: '{"file_path":"x.txt"}' },
       })
       const result = events.find(event => event.type === 'tool/result')
-      expect(result).toMatchObject({
-        data: {
-          message: {
-            role: 'user',
-            content: [{
-              type: 'tool-result',
-              toolCallId: 'toolu_999',
-              content: [{ type: 'text', text: 'the file contents' }],
-            }],
-          },
-        },
-        surfaceOp: 'append',
+      expect(result).toMatchObject({ surfaceOp: 'append' })
+      expect(toolResultView(result?.data.message)).toMatchObject({
+        role: toolResultRole(),
+        toolCallId: 'toolu_999',
+        content: [{ type: 'text', text: 'the file contents' }],
       })
     } finally {
       await ctx.fiber.dispose()

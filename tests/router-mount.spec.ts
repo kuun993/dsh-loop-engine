@@ -24,47 +24,18 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import AgentLoop, { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from '@deepseek-ai/dsh-agent-loop'
 import AgentRegistry, { type AgentFactory } from '@deepseek-ai/dsh-agent'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { apply, type Config } from '../src/index.ts'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { SOURCE_PRESET_ID } from '../src/preset.ts'
 import { RouterLoop } from '../src/router-loop.ts'
+import { createLiveLoopConfig } from './helpers/fake-settings.ts'
+import { LEGACY_HARNESS } from './helpers/harness-generation.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
-
-const NS_BRANDED = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL as SettingsNamespace
-
-/**
- * In-memory settings provider, so the mount path runs the composition the web
- * profile runs (the plugin installs its section, the base loop installs its
- * own) and nothing reaches a real on-disk settings file.
- */
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown>
-
-  constructor(ctx: Context, doc?: Record<string, unknown>) {
-    super(ctx)
-    this.doc = structuredClone(doc ?? {})
-  }
-
-  get writable(): boolean {
-    return true
-  }
-
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.doc))
-  }
-
-  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.doc[ns] = structuredClone(section)
-    return Promise.resolve()
-  }
-}
 
 /**
  * Minimal stand-in for the host session-projection registry.
@@ -137,10 +108,24 @@ async function boot(): Promise<Context> {
   // The router's inject gate is the harness loop's own dependency set, which
   // includes the tool registry its turn machinery reads.
   ctx.provide('tools', fakeToolRuntime())
-  const settingsFiber = ctx.plugin(MemorySettings, { [NS_BRANDED]: { engine: 'in-process' } })
-  await settingsFiber
-  cleanups.push(async () => { await settingsFiber.dispose() })
   return ctx
+}
+
+/**
+ * Mount the plugin as its own fiber, the way its composition row does.
+ *
+ * A minimal profile supplies the plugin's own live Config fields; `in-process`
+ * is the composed default, and no roster settings namespace is registered, so
+ * the default steering no-ops.
+ */
+async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
+  const fiber = ctx.plugin({
+    name: 'loop-engine-under-test',
+    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
+  })
+  await fiber
+  cleanups.push(async () => { await fiber.dispose() })
+  return fiber
 }
 
 /**
@@ -162,15 +147,10 @@ async function mountBaseLoop(ctx: Context): Promise<Fiber> {
   return fiber
 }
 
-/** Mount the plugin as its own fiber, the way its composition row does. */
-async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
-  const fiber = ctx.plugin({
-    name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
-  })
-  await fiber
-  cleanups.push(async () => { await fiber.dispose() })
-  return fiber
+/** Mount the plugin with a live Config for the profile's own fields. */
+function withLive(ctx: Context, config: Config): Config {
+  const live = createLiveLoopConfig(ctx, { engine: 'in-process' })
+  return { ...config, ...live.config }
 }
 
 /** A patch file path inside a fresh temp directory. */
@@ -200,7 +180,7 @@ describe('the router mount retry window', () => {
     expect(ctx.get('agentLoop') instanceof AgentLoop).toBe(true)
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
 
-    await mountPlugin(ctx, { patchPath: await patchPath() })
+    await mountPlugin(ctx, withLive(ctx, { patchPath: await patchPath() }))
     // Settle past several retry ticks with the base row still composed: the
     // mount attempts have been refused — and the window armed — before the row
     // is dropped, so what takes the slot below can only be a retry.
@@ -215,6 +195,16 @@ describe('the router mount retry window', () => {
     }, { timeout: 8000 })
     // No give-up was reported: the window closed by succeeding.
     expect(routerErrors(errorSpy)).toEqual([])
+
+    // The router pins the harness loop's parallel-call cap to the harness
+    // default, expressed per generation: the 0.1.7 line requires a live field
+    // (`super` bypasses the schema transform, so the reference is the router's
+    // own), while the 0.1.5 line keeps a plain number the base loop defaults.
+    const routerConfig = (ctx.get('agentLoop') as RouterLoop).config
+    const cap = LEGACY_HARNESS
+      ? routerConfig.maxParallelToolCalls as unknown as number
+      : (routerConfig.maxParallelToolCalls as unknown as { get(): number }).get()
+    expect(cap).toBe(DEFAULT_MAX_PARALLEL_TOOL_CALLS)
 
     // The retried router is a working factory, not merely a claimed name: an
     // in-process session is served through it.
@@ -232,7 +222,7 @@ describe('the router mount retry window', () => {
     await mountBaseLoop(ctx)
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
 
-    await mountPlugin(ctx, { patchPath: await patchPath() })
+    await mountPlugin(ctx, withLive(ctx, { patchPath: await patchPath() }))
 
     // 40 attempts at 50ms: the window exhausts with the base row still active,
     // and the router's inability to take the slot is reported once.
@@ -256,7 +246,7 @@ describe('the router mount retry window', () => {
     const ctx = await boot()
     const base = await mountBaseLoop(ctx)
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    const fiber = await mountPlugin(ctx, { patchPath: await patchPath() })
+    const fiber = await mountPlugin(ctx, withLive(ctx, { patchPath: await patchPath() }))
 
     // Settle past a few retry ticks: every refused attempt re-arms the timer,
     // so the plugin's cleanup effect definitely finds one pending.
@@ -282,7 +272,7 @@ describe('the router mount retry window', () => {
     ctx.agents.setFactory(fakeAgentFactory())
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
 
-    await mountPlugin(ctx, { patchPath: await patchPath() })
+    await mountPlugin(ctx, withLive(ctx, { patchPath: await patchPath() }))
     await vi.waitFor(() => {
       expect(routerErrors(errorSpy)).toHaveLength(1)
     }, { timeout: 8000 })

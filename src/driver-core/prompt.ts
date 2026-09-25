@@ -15,7 +15,6 @@
  */
 
 import type {
-  AssistantMessage,
   ContentBlock,
   Message,
   ToolResultMessage,
@@ -66,25 +65,64 @@ function renderAssistantBlocks(blocks: readonly ContentBlock[]): string {
 }
 
 /**
- * Render one tool-result message to transcript text. The nested content
- * blocks render verbatim, marked as an error result when the call failed.
- * @param message - the durable tool-result message.
- * @returns the transcript text of the tool result.
+ * Render a block list as transcript text: text verbatim, images as the omitted
+ * notice, everything else dropped. User and tool-result content share it.
+ * @param blocks - the blocks to render.
+ * @returns the joined transcript text, empty when no block renders.
  */
-function renderToolResult(message: ToolResultMessage): string {
-  const block = message.content[0]
-  const body = block.content.map((child) => {
-    switch (child.type) {
+function renderTextBlocks(blocks: readonly ContentBlock[]): string {
+  return blocks.map((block) => {
+    switch (block.type) {
       case 'text':
-        return child.text
+        return block.text
       case 'image':
         return OMITTED_IMAGE_TEXT
       default:
         return ''
     }
   }).filter(section => section !== '').join('\n\n')
-  const tag = block.isError === true ? 'tool-result-error' : 'tool-result'
+}
+
+/**
+ * Render a tool result's own blocks and outcome to transcript text. Both
+ * generations share this tail: the 0.1.7 message and the 0.1.5 nested block
+ * differ only in WHERE the blocks and the error flag live.
+ * @param blocks - the result's content blocks.
+ * @param isError - whether the tool invocation failed.
+ * @returns the framed transcript text of the tool result.
+ */
+function renderToolResult(blocks: readonly ContentBlock[], isError: boolean | undefined): string {
+  const body = renderTextBlocks(blocks)
+  const tag = isError === true ? 'tool-result-error' : 'tool-result'
   return frame(tag, body || '(no content)')
+}
+
+/**
+ * Render one 0.1.7 tool-result message to transcript text. A tool result is a
+ * first-class `tool`-role message there, so its blocks are the message's own
+ * `content` and the failure flag lives on the message. To stay generation-free
+ * the introspector reads the shape structurally, so this is only the
+ * convenience the `tool` arm of {@link serializeHistory} calls.
+ * @param message - the durable tool-result message.
+ * @returns the transcript text of the tool result.
+ */
+function renderModernToolResult(message: ToolResultMessage): string {
+  return renderToolResult(message.content, message.isError)
+}
+
+/**
+ * Render one 0.1.5 tool result, which rides a `user`-role message whose single
+ * `tool-result` block carries the nested blocks and the error flag. Read
+ * structurally so the same source compiles and runs against either generation's
+ * message union.
+ * @param message - the `user`-role tool-result message.
+ * @returns the transcript text of the tool result.
+ */
+function renderLegacyToolResult(message: Message): string {
+  const block = message.content[0] as
+    | { content?: readonly ContentBlock[]; isError?: boolean }
+    | undefined
+  return renderToolResult(block?.content ?? [], block?.isError)
 }
 
 /**
@@ -152,31 +190,29 @@ export function serializeHistory(messages: readonly Message[]): string {
   for (const message of messages) {
     switch (message.role) {
       case 'assistant': {
-        const body = renderAssistantBlocks((message as AssistantMessage).content)
+        const body = renderAssistantBlocks(message.content)
         if (body !== '') sections.push(frame('assistant', body))
         break
       }
       case 'user': {
-        const user = message as UserMessage
-        if (user.source.kind === 'tool') {
-          sections.push(renderToolResult(user as ToolResultMessage))
+        // A 0.1.5 tool result rides a user-role message tagged `source.kind
+        // === 'tool'`; a 0.1.7 tool result is a first-class `tool`-role message
+        // handled below. Discriminating structurally keeps one transcript for
+        // both generations.
+        if (message.source.kind === 'tool') {
+          sections.push(renderLegacyToolResult(message))
         } else {
-          const body = user.content.map((block) => {
-            switch (block.type) {
-              case 'text':
-                return block.text
-              case 'image':
-                return OMITTED_IMAGE_TEXT
-              default:
-                return ''
-            }
-          }).filter(section => section !== '').join('\n\n')
+          const body = renderTextBlocks(message.content)
           sections.push(frame('user', body || '(no content)'))
         }
         break
       }
+      case 'tool': {
+        sections.push(renderModernToolResult(message))
+        break
+      }
       default:
-        // system-role messages never reach the derived conversation surface.
+        // system- and developer-role messages never reach the derived conversation surface.
         break
     }
   }

@@ -20,8 +20,8 @@
  * default, a session running pi included.
  *
  * The reflection's SUBJECT is still a document-level attribute rather than the
- * row's own element: the sheet has to reach a class the harness hashes
- * (`[class$="_turnStatus"]`), which takes an attribute selector on an ancestor,
+ * row's own element: the sheet has to reach a class the harness hashes (see
+ * {@link ROW_SELECTORS}), which takes an attribute selector on an ancestor,
  * and the row offers no session-scoped hook for a plugin to hang it on. A
  * document-level attribute has exactly ONE owner at a time, though — and on this
  * page the WRITERS outnumber the reader: the chip and the composer of every
@@ -47,10 +47,24 @@
  * paints by it, and a leftover attribute is inert on a page whose turn-status row
  * is not rendered.
  *
+ * The paint is also gated on the session being MID-TURN, through a second
+ * document-level attribute ({@link RUNNING_ATTR}, written from the same
+ * reflection). On the 0.1.5 line the row only exists while a turn is in flight,
+ * so the engine attribute alone was enough; on the 0.1.7 line that same button
+ * stays on screen after the turn ends, as the collapsed summary that reads
+ * "用时 4秒" — an engine-only gate leaves the glyph and the sweep animating on a
+ * finished turn, which is not what the live line means. The gate is a surface's
+ * own answer (`session.running`, which every session-scoped seat receives), so a
+ * surface that cannot answer passes nothing and leaves it alone rather than
+ * guessing.
+ *
  * Three facts about the harness markup make that safe and specific:
- *   - the row carries exactly one class whose `[hash]_turnStatus` suffix is
- *     stable across rebuilds (the hash in front is not), so
- *     `[class$="_turnStatus"]` matches it and not the sibling clock;
+ *   - the row has one stable handle per harness generation — an
+ *     `[hash]_turnStatus` class suffix on the 0.1.5 line, and, on the 0.1.7
+ *     line, the `data-turn-process` button whose text is a `<span>` whose hashed
+ *     class ends `_label` — so each generation gets its own copy of the sheet
+ *     ({@link ROW_SELECTORS}) and the one the running app renders matches while
+ *     the other stays inert;
  *   - its gradient paints through the `--dsw-static-deepseek-*` custom
  *     properties, so recoloring is a variable override rather than a fight
  *     over `background` and `background-clip`;
@@ -72,23 +86,36 @@ import type { LoopEngineId } from '../agent-preset-ids.ts'
 /** Attribute on `<html>` naming the engine the session on screen runs; absent means stock. */
 const ENGINE_ATTR = 'data-loop-engine'
 
+/**
+ * Attribute on `<html>` marking that the session on screen is mid-turn; absent
+ * means it is not. Gate of the whole sheet, because the 0.1.7 row outlives the
+ * turn it belongs to.
+ */
+const RUNNING_ATTR = 'data-loop-engine-running'
+
 /** Owning plugin id, stamped on the injected tag for identification. */
 const PLUGIN_ID = 'dsh-loop-engine'
 
 /**
- * The engine-keyed stylesheet.
- *
- * Every selector is gated on the root attribute, so the sheet is inert until
- * {@link reflectTurnStatusEngine} names a hosted engine — with no attribute, no
- * rule sets `content` and no pseudo-element box is ever generated.
- *
- * The glyph must re-declare `color` and `-webkit-text-fill-color`: the row
- * clips its own background to text and sets the fill transparent, and that
- * fill is inherited into the pseudo-element (which has no background of its
- * own to clip), so without the override the glyph would paint nothing.
+ * One harness markup row the sheet restyles — the sheet is emitted once per
+ * generation's selector, and whichever the running app renders matches while
+ * the other stays inert. The row moved between generations, so the selector is
+ * data here rather than baked into the CSS.
  */
-const STYLESHEET = `
-[class$="_turnStatus"]::before {
+const ROW_SELECTORS = [
+  /** 0.1.5 line: the turn-status row, whose class name ends `_turnStatus`. */
+  '[class$="_turnStatus"]',
+  /** 0.1.7 line: the turn-process button (`data-turn-process`); its status text is the label span. */
+  'button[data-turn-process] [class$="_label"]',
+] as const
+
+/** Emit the sheet once for one generation's row selector. */
+const sheetFor = (ROW: string): string => {
+  // Every rule is gated on the engine AND on the turn being live, so the sheet
+  // is inert both for a stock row and for a finished one.
+  const GATE = `html[${ENGINE_ATTR}][${RUNNING_ATTR}]`
+  return `
+${GATE} ${ROW}::before {
   margin-right: 6px;
   background: none;
   -webkit-background-clip: border-box;
@@ -96,18 +123,34 @@ const STYLESHEET = `
 }
 
 /*
- * The row's own sweep, re-asserted for hosted engines.
+ * The engine-colored sweep — and, on the 0.1.7 line, the sweep itself.
  *
- * ui-chat disables that animation under \`prefers-reduced-motion: reduce\`
- * (ChatView.module.css), and a media query carries no specificity — so this
- * attribute-gated rule outranks it. That is deliberate here: deployment images
- * ship with Windows' client-area animation off (SPI_GETCLIENTAREAANIMATION
- * false), and with the guard in force EVERY indicator on this row is frozen —
- * the sweep and the glyph alike. Scoped to hosted engines, so in-process
- * sessions keep the stock reduced-motion behaviour; delete this rule and
- * restore the guard at the foot of the sheet to hand the decision back to the OS.
+ * The 0.1.5 row paints its own gradient (a \`linear-gradient\` over
+ * --dsw-static-deepseek-*, clipped to the text) and only needs its animation
+ * re-asserted; this rule declares that same gradient so the 0.1.7 row, whose
+ * turn-process button is plain tertiary text, gets the sweep back. Either way
+ * the per-engine override below recolors it by swapping the two custom
+ * properties. ui-chat disables the animation under
+ * \`prefers-reduced-motion: reduce\`, and a media query carries no specificity —
+ * so this attribute-gated rule outranks it. That is deliberate here:
+ * deployment images ship with Windows' client-area animation off
+ * (SPI_GETCLIENTAREAANIMATION false), and with the guard in force EVERY
+ * indicator on this row is frozen — the sweep and the glyph alike. Scoped to
+ * hosted engines, so in-process sessions keep the stock reduced-motion
+ * behaviour; delete this rule and restore the guard at the foot of the sheet to
+ * hand the decision back to the OS.
  */
-html[${ENGINE_ATTR}] [class$="_turnStatus"] {
+${GATE} ${ROW} {
+  background: linear-gradient(90deg,
+    var(--dsw-static-deepseek-500) 0%,
+    var(--dsw-static-deepseek-500) 40%,
+    var(--dsw-static-deepseek-200) 50%,
+    var(--dsw-static-deepseek-500) 60%,
+    var(--dsw-static-deepseek-500) 100%);
+  color: #0000;
+  -webkit-text-fill-color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
   background-position: 100% 0;
   background-size: 250% 100%;
   animation: le-shimmer 1.8s linear infinite;
@@ -117,22 +160,22 @@ html[${ENGINE_ATTR}] [class$="_turnStatus"] {
   to { background-position: 0 0; }
 }
 
-html[${ENGINE_ATTR}="claude-code"] [class$="_turnStatus"] {
+html[${ENGINE_ATTR}="claude-code"][${RUNNING_ATTR}] ${ROW} {
   --dsw-static-deepseek-500: #d97757;
   --dsw-static-deepseek-200: #f5bda6;
 }
-html[${ENGINE_ATTR}="claude-code"] [class$="_turnStatus"]::before {
+html[${ENGINE_ATTR}="claude-code"][${RUNNING_ATTR}] ${ROW}::before {
   content: "✻";
   color: #d97757;
   -webkit-text-fill-color: #d97757;
   animation: le-bloom 1.6s ease-in-out infinite;
 }
 
-html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"] {
+html[${ENGINE_ATTR}="codex"][${RUNNING_ATTR}] ${ROW} {
   --dsw-static-deepseek-500: #a9b1c0;
   --dsw-static-deepseek-200: #e6eaf2;
 }
-html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"]::before {
+html[${ENGINE_ATTR}="codex"][${RUNNING_ATTR}] ${ROW}::before {
   content: "•";
   color: #a9b1c0;
   -webkit-text-fill-color: #a9b1c0;
@@ -140,11 +183,11 @@ html[${ENGINE_ATTR}="codex"] [class$="_turnStatus"]::before {
   animation: le-pulse 1.4s ease-in-out infinite;
 }
 
-html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"] {
+html[${ENGINE_ATTR}="pi"][${RUNNING_ATTR}] ${ROW} {
   --dsw-static-deepseek-500: #8e4ec6;
   --dsw-static-deepseek-200: #d6bff0;
 }
-html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"]::before {
+html[${ENGINE_ATTR}="pi"][${RUNNING_ATTR}] ${ROW}::before {
   content: "⠋";
   color: #8e4ec6;
   -webkit-text-fill-color: #8e4ec6;
@@ -152,11 +195,11 @@ html[${ENGINE_ATTR}="pi"] [class$="_turnStatus"]::before {
   animation: le-braille 1s linear infinite;
 }
 
-html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"] {
+html[${ENGINE_ATTR}="kimi"][${RUNNING_ATTR}] ${ROW} {
   --dsw-static-deepseek-500: #e5484d;
   --dsw-static-deepseek-200: #f5b2b4;
 }
-html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"]::before {
+html[${ENGINE_ATTR}="kimi"][${RUNNING_ATTR}] ${ROW}::before {
   content: "🌗";
   color: #e5484d;
   -webkit-text-fill-color: #e5484d;
@@ -213,6 +256,23 @@ html[${ENGINE_ATTR}="kimi"] [class$="_turnStatus"]::before {
 }
 
 `
+}
+
+/**
+ * The engine-keyed stylesheet.
+ *
+ * Every selector is gated on the root attribute, so the sheet is inert until
+ * {@link reflectTurnStatusEngine} names a hosted engine — with no attribute, no
+ * rule sets `content` and no pseudo-element box is ever generated.
+ *
+ * The glyph must re-declare `color` and `-webkit-text-fill-color`: the row
+ * clips its own background to text and sets the fill transparent, and that
+ * fill is inherited into the pseudo-element (which has no background of its
+ * own to clip), so without the override the glyph would paint nothing.
+ *
+ * One copy per generation's row selector ({@link ROW_SELECTORS}).
+ */
+const STYLESHEET = ROW_SELECTORS.map(sheetFor).join('\n')
 
 /**
  * The session whose surfaces are on screen: the row's one declared subject.
@@ -254,6 +314,11 @@ let focusedSessionId: string | undefined
  * clears the attribute, because the sibling surface of the same session is still
  * on screen painting through it.
  *
+ * The MID-TURN gate is written from here as well, but only by a surface that can
+ * answer it (`running` given): the sheet is gated on both, because the 0.1.7 row
+ * outlives its turn, and a surface with no answer must leave the gate as the
+ * surface that has one left it rather than guess.
+ *
  * The NO-OP covers the late reflection as well — the one from the session the
  * user has just left, whose own answer landing after the switch used to paint
  * over the session that replaced it.
@@ -262,13 +327,17 @@ let focusedSessionId: string | undefined
  *   row): such a page has nothing to say about the row, so nothing is written and
  *   nothing is withdrawn — it leaves the row it found alone.
  * @param engine - the engine that session runs, when it is known.
+ * @param running - whether that session is mid-turn, when the surface knows;
+ *   omitted by a surface with no answer, which leaves the gate alone.
  */
 export function reflectTurnStatusEngine(
   sessionId: string | undefined,
   engine: LoopEngineId | undefined,
+  running?: boolean,
 ): void {
   if (sessionId === undefined || sessionId !== focusedSessionId) return
   writeTurnStatusEngine(engine)
+  if (running !== undefined) writeTurnStatusRunning(running)
 }
 
 /**
@@ -329,6 +398,22 @@ function writeTurnStatusEngine(engine: LoopEngineId | undefined): void {
 }
 
 /**
+ * Write — or clear — the document-level mid-turn gate {@link RUNNING_ATTR}.
+ *
+ * The state is a boolean, and the gate is a PRESENCE attribute: the sheet selects
+ * `[data-loop-engine-running]`, so `true` puts the attribute on (empty is enough)
+ * and `false` takes it off.
+ * @param running - whether the focused session is mid-turn.
+ */
+function writeTurnStatusRunning(running: boolean): void {
+  // Non-browser boots of the client tree have no document to paint.
+  if (typeof document === 'undefined') return
+  const root = document.documentElement
+  if (running) root.dataset.loopEngineRunning = ''
+  else delete root.dataset.loopEngineRunning
+}
+
+/**
  * Install the per-engine turn-status stylesheet for the lifetime of `ctx`.
  *
  * This is the sheet and nothing else: which engine it selects is written by
@@ -349,10 +434,11 @@ export function installTurnStatusStyles(ctx: ClientContext): void {
     tag.textContent = STYLESHEET
     document.head.appendChild(tag)
     return () => {
-      // The sheet that selected the attribute goes with it, so no engine is
-      // named any more.
+      // The sheet that selected the attributes goes with it, so no engine is
+      // named any more and no turn is live.
       tag.remove()
       delete document.documentElement.dataset.loopEngine
+      delete document.documentElement.dataset.loopEngineRunning
     }
   }, 'loop-engine: per-engine turn status styles')
 }

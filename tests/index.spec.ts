@@ -12,8 +12,6 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -35,14 +33,22 @@ import {
   MANAGED_BLOCK_BEGIN,
   MANAGED_BLOCK_END,
 } from '../src/patch-manager.ts'
-import { HOSTED_ROUTE_LABEL } from '../src/agent-preset-ids.ts'
+import { HOSTED_ROUTE_LABEL, type LoopEngineId } from '../src/agent-preset-ids.ts'
 import { HostedEngineRouteAdapter } from '../src/provider-route.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
+import {
+  createLiveLoopConfig,
+  installFakeSettings,
+  type FakeSection,
+  type FakeSettings,
+  type LiveLoopConfig,
+} from './helpers/fake-settings.ts'
 import { ClaudeCodeSkillProvider, type SkillProvider, type SkillProviderControl } from '../src/skills.ts'
 import { CodexSkillProvider } from '../src/engine-codex/skills.ts'
 import { PiSkillProvider } from '../src/engine-pi/skills.ts'
 import { KimiSkillProvider } from '../src/engine-kimi/skills.ts'
-import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
+import { LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL, LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
+import { LEGACY_HARNESS } from './helpers/harness-generation.ts'
 import {
   COMPOSITION_FILE,
   enginePresetId,
@@ -95,40 +101,28 @@ beforeEach(async () => {
 })
 
 const NS = LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL
-const NS_BRANDED = NS as SettingsNamespace
 
-/** The resolved loop-engine section, as `apply` seeds it. */
-interface Section {
-  engine: string
-  showInComposer: boolean
+/** The 0.1.5 line's settings-section namespace for the same selection. */
+const LEGACY_NS = LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL
+
+/** The settings namespace of the preset roster (owned by dsh-agent-presets). */
+const AGENT_PRESETS_NS = 'agent-presets'
+
+/** One booted plugin: the context, its settings service, and the live Config fields. */
+interface Booted {
+  readonly ctx: Context
+  /** The profile-backed settings service, or undefined for a settings-less boot. */
+  readonly settings: FakeSettings | undefined
+  /** The plugin's own live Config fields (`engine`, `showInComposer`). */
+  readonly live: LiveLoopConfig
 }
 
-/** Read the loop-engine settings section; `undefined` before it attaches. */
-function sectionOf(ctx: Context): Section | undefined {
-  return ctx.settings.get(NS_BRANDED) as Section | undefined
-}
+/** The live fields of the most recently booted context, for `mountPlugin`. */
+let live: LiveLoopConfig
 
-/** In-memory settings provider (same shape as the shared test fixture). */
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown>
-
-  constructor(ctx: Context, doc?: Record<string, unknown>) {
-    super(ctx)
-    this.doc = structuredClone(doc ?? {})
-  }
-
-  get writable(): boolean {
-    return true
-  }
-
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.doc))
-  }
-
-  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.doc[ns] = structuredClone(section)
-    return Promise.resolve()
-  }
+/** Read the roster's resolved default, or undefined before it registers. */
+function rosterDefault(settings: FakeSettings): string | undefined {
+  return settings.sections.get(AGENT_PRESETS_NS)?.value.default as string | undefined
 }
 
 /**
@@ -165,7 +159,23 @@ function fakeSessionProjections() {
   }
 }
 
-async function boot(doc?: Record<string, unknown>, opts?: { llm?: boolean; projections?: boolean }) {
+/**
+ * Boot the services the plugin's composition assumes.
+ *
+ * The `doc` the tests used to pass as the loop-engine settings section is
+ * reinterpreted: its `loop-engine` entry names the profile's composed default
+ * engine (the plugin's own live Config field), and every other entry is a user
+ * layer seeded into the fake settings service.
+ * @param doc - the deployment's composed defaults (`loop-engine` for the live
+ *   fields, any other key for a settings namespace's user layer).
+ * @param opts - `llm: false` to omit the llm registry, `projections: true` to
+ *   supply the registry and tool services the router's gate needs, and
+ *   `settings: false` to boot a profile with no settings service.
+ */
+async function boot(
+  doc?: Record<string, Record<string, unknown>>,
+  opts?: { llm?: boolean; projections?: boolean; settings?: boolean },
+): Promise<Booted> {
   const ctx = new Context()
   // Unload the whole root last, so every service and fiber this test composed is
   // torn down instead of leaving a `process` exit listener per test behind.
@@ -186,10 +196,32 @@ async function boot(doc?: Record<string, unknown>, opts?: { llm?: boolean; proje
     ctx.provide('sessionProjections', fakeSessionProjections())
     ctx.provide('tools', fakeToolRuntime())
   }
-  const settingsFiber = ctx.plugin(MemorySettings, doc)
-  await settingsFiber
-  cleanups.push(async () => { await settingsFiber.dispose() })
-  return { ctx, provider: ctx.get('settings') as MemorySettings, settingsFiber }
+
+  // The settings service is installed before the live fields, because the driver
+  // that commits a selection must know which channel the running generation
+  // uses: the 0.1.7 line's live Config field, or the 0.1.5 line's settings
+  // section (which `createLiveLoopConfig` drives through the fake service).
+  let settings: FakeSettings | undefined
+  if (opts?.settings !== false) {
+    const seeds: Record<string, Record<string, unknown>> = {}
+    for (const [ns, value] of Object.entries(doc ?? {})) {
+      if (ns !== NS) seeds[ns] = value
+    }
+    // On the 0.1.5 line the composed default engine is a settings section, so the
+    // `loop-engine` doc entry is seeded into the legacy namespace instead.
+    if (LEGACY_HARNESS && doc?.[NS] !== undefined) seeds[LEGACY_NS] = doc[NS]
+    settings = installFakeSettings(ctx, seeds)
+  }
+
+  // The profile's composed default engine rides the plugin's own live Config
+  // field on the 0.1.7 line, so a `loop-engine` doc entry seeds the reference
+  // instead of a settings section.
+  live = createLiveLoopConfig(
+    ctx,
+    { engine: (doc?.[NS]?.engine as LoopEngineId | undefined) ?? 'in-process' },
+    settings,
+  )
+  return { ctx, settings, live }
 }
 
 const cleanups: Array<() => Promise<void>> = []
@@ -212,11 +244,16 @@ async function tempDir(): Promise<string> {
   return dir
 }
 
-/** Mount the plugin as its own fiber, the way its composition row does. */
+/**
+ * Mount the plugin as its own fiber, the way its composition row does.
+ *
+ * The profile's own live Config fields come from the context's boot, so the
+ * `config` here carries only the entry's static knobs.
+ */
 async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
+    apply: (pluginCtx: Context) => { apply(pluginCtx, { ...config, ...live.config }) },
   })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })
@@ -418,7 +455,7 @@ describe('apply managed block', () => {
   it('writes the constant managed block into the patch file', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
-    const { ctx } = await boot({ [NS]: { engine: 'in-process' } })
+    const { ctx, live } = await boot({ [NS]: { engine: 'in-process' } })
     await mountPlugin(ctx, { patchPath: path })
 
     const text = await readFile(path, 'utf8')
@@ -426,9 +463,9 @@ describe('apply managed block', () => {
     expect(text).toContain('- id: agent-loop\n  disabled: true')
     expect(text).toContain(MANAGED_BLOCK_END)
     expect(text).not.toContain(LEGACY_MANAGED_BLOCK_BEGIN)
-    await vi.waitFor(() => {
-      expect(sectionOf(ctx)).toMatchObject({ engine: 'in-process', showInComposer: true })
-    })
+    // The plugin reads its own live Config fields, which the profile composed.
+    expect({ engine: live.engine(), showInComposer: live.showInComposer() })
+      .toEqual({ engine: 'in-process', showInComposer: true })
   })
 
   it('leaves a file that already carries the block byte for byte intact', async () => {
@@ -443,11 +480,15 @@ describe('apply managed block', () => {
     expect(await readFile(path, 'utf8')).toBe(seed)
   })
 
-  it('migrates a legacy block and seeds the section with the engine it named', async () => {
+  it('migrates a legacy block and points the roster default at the engine it named', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
     await writeFile(path, legacyBlockFile('pi'))
-    const { ctx } = await boot({})
+    const { ctx, settings } = await boot({})
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
 
     const text = await readFile(path, 'utf8')
@@ -456,17 +497,21 @@ describe('apply managed block', () => {
     expect(legacyBlockEngineOf(text)).toBeUndefined()
     expect(text).toContain('# seed')
     // The engine the deployment was pinned to survives the upgrade as the
-    // default for new sessions.
+    // default for new sessions: the roster's default is steered to its preset.
+    // The steering waits on the boot-time authoring, so read the files first.
+    await waitForEnginePresets(home)
     await vi.waitFor(() => {
-      expect(sectionOf(ctx)?.engine).toBe('pi')
-    })
+      expect(rosterDefault(settings!)).toBe(enginePresetId('pi'))
+    }, { timeout: 8000 })
   })
 
-  it('rewrites a legacy block naming an unknown engine and seeds in-process', async () => {
+  it('rewrites a legacy block naming an unknown engine and leaves the roster default alone', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     await writeFile(path, legacyBlockFile('future-engine'))
-    const { ctx } = await boot({})
+    const { ctx, settings } = await boot({})
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
 
     // The unrecognized name migrates to the current block like any other
@@ -476,11 +521,10 @@ describe('apply managed block', () => {
     expect(text).not.toContain(LEGACY_MANAGED_BLOCK_BEGIN)
     expect(legacyBlockEngineOf(text)).toBeUndefined()
     expect(text).toContain('# seed')
-    // No engine can be read out of that name, so the deployment keeps running
-    // the in-process engine by default.
-    await vi.waitFor(() => {
-      expect(sectionOf(ctx)?.engine).toBe('in-process')
-    })
+    // No engine can be read out of that name, so the deployment keeps the
+    // in-process engine by default and the roster default is not moved.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
   })
 
   it('logs a failed block write instead of throwing', async () => {
@@ -499,7 +543,7 @@ describe('apply managed block', () => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
     })
     const { ctx } = await boot()
-    expect(() => apply(ctx, { patchPath: path })).toThrow('EACCES')
+    expect(() => apply(ctx, { patchPath: path, ...live.config })).toThrow('EACCES')
   })
 })
 
@@ -520,18 +564,16 @@ const PRESET_FIXTURE = [
   '',
 ].join('\n')
 
-interface RosterScope {
-  get(): { default?: string }
-}
-
 /**
- * Fake agent-presets roster: `defaultId` mirrors the registered settings scope
+ * Fake agent-presets roster: `defaultId` mirrors the registered settings section
  * exactly like the real service (`settings?.get().default ?? config.default`).
  */
-function fakeRoster(scopeRef: { current: RosterScope | undefined }, composition = PRESET_FIXTURE) {
+function fakeRoster(settings: FakeSettings | undefined, composition = PRESET_FIXTURE) {
   return {
     get defaultId() {
-      return scopeRef.current?.get().default ?? SOURCE_PRESET_ID
+      return settings === undefined
+        ? SOURCE_PRESET_ID
+        : rosterDefault(settings) ?? SOURCE_PRESET_ID
     },
     read: vi.fn(async (id: string) => {
       if (id !== SOURCE_PRESET_ID) throw new Error(`unknown preset "${id}"`)
@@ -540,12 +582,9 @@ function fakeRoster(scopeRef: { current: RosterScope | undefined }, composition 
   }
 }
 
-const AGENT_PRESETS_NS = 'agent-presets' as SettingsNamespace
-const AGENT_PRESETS_SCHEMA = z.object({ default: z.string() })
-
 /** Register the roster's settings namespace the way dsh-agent-presets does. */
-function registerRosterNamespace(ctx: Context): RosterScope {
-  return ctx.settings.register(AGENT_PRESETS_NS, AGENT_PRESETS_SCHEMA, { base: { default: SOURCE_PRESET_ID } })
+function registerRosterNamespace(settings: FakeSettings): FakeSection {
+  return settings.register(AGENT_PRESETS_NS, { value: { default: SOURCE_PRESET_ID } })
 }
 
 /** One managed preset's directory under a stubbed DSH_HOME. */
@@ -576,9 +615,9 @@ describe('apply engine presets', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx } = await boot()
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
 
     await waitForEnginePresets(home)
@@ -591,19 +630,19 @@ describe('apply engine presets', () => {
     expect(await readFile(join(presetDir(home, enginePresetId('kimi')), METADATA_FILE), 'utf8'))
       .toContain('name: Kimi Code')
 
-    // The engine the section names is the default NEW sessions open on.
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    // The engine the plugin's own live field names is the default NEW sessions
+    // open on, so committing a new engine steers the roster's default.
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
 
     // A later commit that leaves the engine alone re-judges nothing: the
     // picker's visibility is a presentation knob, not an engine selection.
-    await ctx.settings.update(NS_BRANDED, { showInComposer: false })
-    await vi.waitFor(() => {
-      expect(sectionOf(ctx)?.showInComposer).toBe(false)
-    })
-    expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+    live.setShowInComposer(false)
+    expect(live.showInComposer()).toBe(false)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
   })
 
   it('does not author the presets again when a later switch steers the roster', async () => {
@@ -611,9 +650,9 @@ describe('apply engine presets', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx } = await boot()
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     // The module-level write mock keeps every test's calls, so count from here.
     const start = mockedWriteFile.mock.calls.length
     /** Preset-file writes this test has issued so far. */
@@ -626,9 +665,9 @@ describe('apply engine presets', () => {
     const authored = presetWrites()
     expect(authored).toBe(HOSTED_PRESET_IDS.length * 2)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
     // The switch shares the boot-time pass instead of walking the same eight
     // paths again: two concurrent walks of one path lose a `rename` to EPERM on
@@ -641,14 +680,14 @@ describe('apply engine presets', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx } = await boot({ [NS]: { engine: 'kimi' } })
+    const { ctx, settings } = await boot({ [NS]: { engine: 'kimi' } })
     await mountPlugin(ctx, { patchPath: path })
     // Settle past one retry tick: the roster is not up yet, so there is nothing
     // to author the presets from.
     await new Promise(resolve => setTimeout(resolve, 150))
 
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await waitForEnginePresets(home)
   })
 
@@ -656,16 +695,13 @@ describe('apply engine presets', () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     vi.stubEnv('DSH_HOME', await tempDir())
-    const { ctx, provider } = await boot({ [NS]: { engine: 'kimi' } })
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    const roster = fakeRoster(scopeRef)
+    const { ctx, settings, live } = await boot({ [NS]: { engine: 'kimi' } })
+    registerRosterNamespace(settings!)
+    const roster = fakeRoster(settings)
     roster.read.mockRejectedValue(new Error(`unknown preset "${SOURCE_PRESET_ID}"`))
     ctx.provide('agentPresets', roster)
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
-    const persistOf = provider as unknown as {
-      persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void>
-    }
-    const persistSpy = vi.spyOn(persistOf, 'persist')
+    const mutateSpy = vi.spyOn(settings!, 'mutate')
     await mountPlugin(ctx, { patchPath: path })
 
     await vi.waitFor(() => {
@@ -675,12 +711,12 @@ describe('apply engine presets', () => {
     // and must not point the roster at a preset that is not on disk: pointing
     // there fails every new session loud, so the steered default waits for an
     // authoring that succeeded.
-    await ctx.settings.update(NS_BRANDED, { engine: 'codex' })
+    live.setEngine('codex')
     await vi.waitFor(() => {
       expect(roster.read.mock.calls.length).toBeGreaterThan(1)
     })
-    expect(persistSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS)).toEqual([])
-    expect(scopeRef.current.get().default).toBe(SOURCE_PRESET_ID)
+    expect(mutateSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS)).toEqual([])
+    expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
   })
 
   it('still authors the presets when the profile has no settings service', async () => {
@@ -688,18 +724,13 @@ describe('apply engine presets', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    // A settings-less boot: the section install defers and the default write
-    // skips quietly, but the presets a session may select still land on disk.
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(LocalSubprocessRuntime)
-    ctx.provide('agentPresets', fakeRoster({ current: undefined }))
-    apply(ctx, { patchPath: path })
+    // A settings-less boot: the roster's default write skips quietly, but the
+    // presets a session may select still land on disk.
+    const { ctx, live } = await boot(undefined, { settings: false, llm: false })
+    ctx.provide('agentPresets', fakeRoster(undefined))
+    apply(ctx, { patchPath: path, ...live.config })
 
     await waitForEnginePresets(home)
-    await ctx.fiber.dispose()
   })
 })
 
@@ -888,23 +919,23 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx, provider } = await boot()
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    live.setEngine('in-process')
     // The default the plugin replaced is restored as an explicit value.
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(SOURCE_PRESET_ID)
+      expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
     })
-    expect(provider.doc[AGENT_PRESETS_NS]).toEqual({ default: SOURCE_PRESET_ID })
+    expect(settings!.sections.get(AGENT_PRESETS_NS)!.value).toEqual({ default: SOURCE_PRESET_ID })
   })
 
   it('keeps the deployment default across a hosted-to-hosted switch', async () => {
@@ -912,28 +943,28 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx, provider } = await boot({ 'agent-presets': { default: 'deployment-preset' } })
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    expect(scopeRef.current.get().default).toBe('deployment-preset')
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot({ 'agent-presets': { default: 'deployment-preset' } })
+    registerRosterNamespace(settings!)
+    expect(rosterDefault(settings!)).toBe('deployment-preset')
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
     // Switching between managed presets never overwrites what the deployment
     // itself had chosen.
-    await ctx.settings.update(NS_BRANDED, { engine: 'codex' })
+    live.setEngine('codex')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('codex'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('codex'))
     })
-    await ctx.settings.update(NS_BRANDED, { engine: 'in-process' })
+    live.setEngine('in-process')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe('deployment-preset')
+      expect(rosterDefault(settings!)).toBe('deployment-preset')
     })
-    expect(provider.doc[AGENT_PRESETS_NS]).toEqual({ default: 'deployment-preset' })
+    expect(settings!.sections.get(AGENT_PRESETS_NS)!.value).toEqual({ default: 'deployment-preset' })
   })
 
   it('does not touch the roster when its default already names the engine preset', async () => {
@@ -942,19 +973,19 @@ describe('apply preset steering', () => {
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
     // A deployment whose roster default already points at the managed preset.
-    const { ctx, provider } = await boot({ 'agent-presets': { default: enginePresetId('kimi') } })
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot({ 'agent-presets': { default: enginePresetId('kimi') } })
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(sectionOf(ctx)?.engine).toBe('kimi')
+      expect(live.engine()).toBe('kimi')
     })
     await new Promise(resolve => setTimeout(resolve, 50))
-    // No switch was needed: the doc is exactly what the seed carried.
-    expect(provider.doc[AGENT_PRESETS_NS]).toEqual({ default: enginePresetId('kimi') })
+    // No switch was needed: the section is exactly what the seed carried.
+    expect(settings!.sections.get(AGENT_PRESETS_NS)!.value).toEqual({ default: enginePresetId('kimi') })
   })
 
   it('retries the default switch until the roster namespace registers', async () => {
@@ -962,20 +993,19 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx } = await boot()
+    const { ctx, settings, live } = await boot()
     // The roster service is up but its settings namespace is not — the attach
     // race the retry window exists for.
-    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await new Promise(resolve => setTimeout(resolve, 150))
-    scopeRef.current = registerRosterNamespace(ctx)
+    registerRosterNamespace(settings!)
 
     await vi.waitFor(() => {
-      expect(scopeRef.current!.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
   })
 
@@ -984,21 +1014,20 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx, provider } = await boot()
+    const { ctx, settings, live } = await boot()
     // A provider that cannot enumerate namespaces leaves the write itself as the
     // only signal of the roster's attach race, so the retry rides the message.
-    ;(provider as unknown as { describe?: unknown }).describe = undefined
-    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    ;(settings as unknown as { describe?: unknown }).describe = undefined
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await new Promise(resolve => setTimeout(resolve, 150))
-    scopeRef.current = registerRosterNamespace(ctx)
+    registerRosterNamespace(settings!)
 
     await vi.waitFor(() => {
-      expect(scopeRef.current!.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
   })
 
@@ -1007,14 +1036,13 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx } = await boot()
-    const scopeRef: { current: RosterScope | undefined } = { current: undefined }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    ctx.provide('agentPresets', fakeRoster(settings))
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     // 30 attempts at 100ms: the retry window exhausts and fails loud once.
     await vi.waitFor(() => {
       expect(errorSpy.mock.calls.some(call => String(call[0]).includes('preset default switch failed'))).toBe(true)
@@ -1026,58 +1054,46 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx, settingsFiber } = await boot()
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
-      expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+      expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
 
-    // A profile reload drops the provider: the section falls back to the
-    // composition entry, which asks for the in-process engine again. There is
-    // no settings service left to write a restore through, so the managed
-    // default stays where it was rather than failing the teardown.
-    await settingsFiber.dispose()
+    // A profile reload drops the provider: a later engine change has no settings
+    // service left to write its roster restore through, so the write is skipped
+    // rather than failing, and the managed default stays where it was.
+    settings!.dispose()
+    await vi.waitFor(() => { expect(ctx.get('settings')).toBeUndefined() })
+    live.setEngine('in-process')
     await new Promise(resolve => setTimeout(resolve, 100))
-    expect(ctx.get('settings')).toBeUndefined()
-    expect(scopeRef.current.get().default).toBe(enginePresetId('kimi'))
+    expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
   })
 
   it('fails loud when the settings write itself rejects', async () => {
-    /**
-     * A provider whose persist fails for the roster's namespace. Only that one
-     * namespace fails: the engine selection itself has to be committed for the
-     * plugin to reach the default switch this test is about.
-     */
-    class FailingPersist extends MemorySettings {
-      protected override persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-        return ns === AGENT_PRESETS_NS
-          ? Promise.reject(new Error('disk full'))
-          : super.persist(ns, section)
-      }
-    }
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(LocalSubprocessRuntime)
-    const settingsFiber = ctx.plugin(FailingPersist)
-    await settingsFiber
-    cleanups.push(async () => { await settingsFiber.dispose() })
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
+    // A settings write that fails for the roster's namespace: only that one
+    // namespace fails, so the engine change itself still reaches the plugin.
+    const realMutate = settings!.mutate.bind(settings)
+    settings!.mutate = async (ns, ops) => {
+      if (ns === AGENT_PRESETS_NS) throw new Error('disk full')
+      return realMutate(ns, ops)
+    }
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
 
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => {
       expect(errorSpy.mock.calls.some(call => String(call[0]).includes('preset default switch failed'))).toBe(true)
     })
@@ -1088,32 +1104,29 @@ describe('apply preset steering', () => {
     const path = join(dir, 'cordis.patch.yml')
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
-    const { ctx, provider } = await boot()
-    const scopeRef = { current: registerRosterNamespace(ctx) }
-    ctx.provide('agentPresets', fakeRoster(scopeRef))
+    const { ctx, settings, live } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
 
     // Hold the roster mutation open so its rejection — and the retry it arms —
     // land only after the plugin is gone. Clearing pending timers cannot catch
     // this one, because it is armed from that late continuation. Only the
-    // roster's namespace is held: the engine selection itself must commit.
+    // roster's namespace is held: the engine change itself must commit.
     let failMutation!: (error: unknown) => void
     const held = new Promise<never>((_resolve, reject) => { failMutation = reject })
     held.catch(() => {})
-    const persistOf = provider as unknown as {
-      persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void>
-    }
-    const realPersist = persistOf.persist.bind(provider)
-    const persistSpy = vi
-      .spyOn(persistOf, 'persist')
-      .mockImplementation((ns, section) => (ns === AGENT_PRESETS_NS ? held : realPersist(ns, section)))
+    const realMutate = settings!.mutate.bind(settings)
+    const mutateSpy = vi
+      .spyOn(settings!, 'mutate')
+      .mockImplementation((ns, ops) => (ns === AGENT_PRESETS_NS ? held : realMutate(ns, ops)))
     /** Roster-default writes the plugin has made. */
     const rosterWrites = (): number =>
-      persistSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS).length
+      mutateSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS).length
 
     const fiber = await mountPlugin(ctx, { patchPath: path })
     await waitForEnginePresets(home)
-    await ctx.settings.update(NS_BRANDED, { engine: 'kimi' })
+    live.setEngine('kimi')
     await vi.waitFor(() => { expect(rosterWrites()).toBe(1) })
     await fiber.dispose()
 

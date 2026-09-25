@@ -52,7 +52,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import AgentLoop, { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from '@deepseek-ai/dsh-agent-loop'
 import type {
   Agent,
   AgentHandle,
@@ -62,6 +62,7 @@ import type {
   ResumeAgentOptions,
 } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { LEGACY_HARNESS } from './compat.ts'
 import { HOSTED_DEFAULT_MODEL } from './agent-preset-ids.ts'
 import type { LoopEngineRefusalCode, LoopEngineSelectResult, SessionEngineReport } from './agent-preset-ids.ts'
 import type { HostedAgent, HostedAgentHandle, HostedEngineRuntime } from './driver-core/hosted-engine-runtime.ts'
@@ -199,8 +200,21 @@ export class RouterLoop extends AgentLoop {
     warn: (message: string) => void,
   ) {
     // The declarative `agents` list is the harness loop's own boot-time feature;
-    // this deployment declares none, so the router is a pure dispatcher.
-    super(ctx, { agents: [] })
+    // this deployment declares none, so the router is a pure dispatcher. On the
+    // 0.1.7 line the parallel-call cap is a required live Config field the base
+    // loop reads through `.get()`; `super` bypasses the schema transform, so the
+    // router supplies the reference itself, pinned to the harness default. On
+    // the 0.1.5 line the cap is a plain optional number the base loop already
+    // defaults to `DEFAULT_MAX_PARALLEL_TOOL_CALLS`, so no reference is passed
+    // (and passing one would be read as a number).
+    /* v8 ignore start -- legacy 0.1.5 arm; the coverage job runs on 0.1.7 and vitest.config.compat015.ts takes it */
+    super(ctx, (LEGACY_HARNESS
+      ? { agents: [] }
+      : {
+          agents: [],
+          maxParallelToolCalls: { get: () => DEFAULT_MAX_PARALLEL_TOOL_CALLS },
+        }) as ConstructorParameters<typeof AgentLoop>[1])
+    /* v8 ignore stop */
     this.build = build
     this.records = records
     this.warn = warn

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import type { BetaMessage, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { MessageParam } from '@anthropic-ai/sdk/resources'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import {
   mapAssistantMessage,
   mapStreamEvent,
@@ -17,6 +17,7 @@ import {
   type StreamToolCall,
 } from '../../src/engine-claude/mapping.ts'
 import { serializeHistory, OMITTED_IMAGE_TEXT } from '../../src/driver-core/prompt.ts'
+import { toolResultRole, toolResultView } from '../helpers/harness-generation.ts'
 
 function assistantMessage(overrides: Partial<BetaMessage> = {}): BetaMessage {
   return {
@@ -145,15 +146,12 @@ describe('mapToolResults', () => {
   it('maps a tool_result block to a dsh tool-result message', () => {
     const results = mapToolResults(userParamWithToolResult())
     expect(results).toHaveLength(1)
-    expect(results[0]).toMatchObject({
-      role: 'user',
-      source: { kind: 'tool', callId: 'toolu_01ABC' },
-      content: [{
-        type: 'tool-result',
-        toolCallId: 'toolu_01ABC',
-        content: [{ type: 'text', text: '42' }],
-        isError: false,
-      }],
+    expect(results[0]).toMatchObject({ source: { kind: 'tool', callId: 'toolu_01ABC' } })
+    expect(toolResultView(results[0])).toMatchObject({
+      role: toolResultRole(),
+      toolCallId: 'toolu_01ABC',
+      isError: false,
+      content: [{ type: 'text', text: '42' }],
     })
   })
 
@@ -166,7 +164,7 @@ describe('mapToolResults', () => {
         is_error: true,
       }],
     }))
-    expect(results[0]!.content[0]).toMatchObject({ isError: true })
+    expect(toolResultView(results[0]).isError).toBe(true)
   })
 
   it('maps block-array content to text blocks only', () => {
@@ -178,7 +176,7 @@ describe('mapToolResults', () => {
         is_error: false,
       }],
     }))
-    expect(results[0]!.content[0].content).toMatchObject([{ type: 'text', text: 'line' }])
+    expect(toolResultView(results[0]).content).toMatchObject([{ type: 'text', text: 'line' }])
   })
 
   it('ignores non-tool_result blocks', () => {
@@ -194,7 +192,7 @@ describe('mapToolResults', () => {
     const results = mapToolResults(userParamWithToolResult({
       content: [{ type: 'tool_result', tool_use_id: 'toolu_55' }],
     }))
-    expect(results[0]!.content[0].content).toEqual([{ type: 'text', text: '(no content)' }])
+    expect(toolResultView(results[0]).content).toEqual([{ type: 'text', text: '(no content)' }])
   })
 
   it('skips tool_result children whose text is not a string', () => {
@@ -207,7 +205,7 @@ describe('mapToolResults', () => {
         is_error: false,
       }],
     })
-    expect(results[0]!.content[0].content).toEqual([{ type: 'text', text: '(no content)' }])
+    expect(toolResultView(results[0]).content).toEqual([{ type: 'text', text: '(no content)' }])
   })
 })
 
@@ -335,16 +333,11 @@ describe('serializeHistory', () => {
         ],
         source: { kind: 'model' as const, provider: 'claude-code', model: 'x' },
       },
-      {
-        role: 'user' as const,
-        id: MessageId('m-tool-result-1'),
-        content: [{
-          type: 'tool-result' as const,
-          toolCallId: ToolCallId('t1'),
-          content: [{ type: 'text' as const, text: 'contents of file' }],
-        }],
-        source: { kind: 'tool' as const, callId: ToolCallId('t1') },
-      },
+      createToolResultMessage({
+        callId: ToolCallId('t1'),
+        content: [{ type: 'text' as const, text: 'contents of file' }],
+        isError: false,
+      }),
     ]
     const prompt = serializeHistory(messages)
     expect(prompt).toBe([
@@ -388,17 +381,11 @@ describe('serializeHistory', () => {
         ],
         source: { kind: 'user' as const },
       },
-      {
-        role: 'user' as const,
-        id: MessageId('m-tool-error'),
-        content: [{
-          type: 'tool-result' as const,
-          toolCallId: ToolCallId('e1'),
-          content: [{ type: 'text' as const, text: 'failed' }],
-          isError: true,
-        }],
-        source: { kind: 'tool' as const, callId: ToolCallId('e1') },
-      },
+      createToolResultMessage({
+        callId: ToolCallId('e1'),
+        content: [{ type: 'text' as const, text: 'failed' }],
+        isError: true,
+      }),
     ])
     expect(prompt).toContain(OMITTED_IMAGE_TEXT)
     expect(prompt).toContain('<tool-result-error>')
@@ -421,35 +408,23 @@ describe('serializeHistory', () => {
   })
 
   it('renders tool-result children: images marked, other blocks blank', () => {
-    const prompt = serializeHistory([{
-      role: 'user' as const,
-      id: MessageId('m-tool-child'),
-      content: [{
-        type: 'tool-result' as const,
-        toolCallId: ToolCallId('c1'),
-        content: [
-          { type: 'image' as const, attachment: { attachmentId: AttachmentId('img-1'), bytes: 2, mediaType: 'image/png', width: 4, height: 4 } },
-          { type: 'reasoning' as const, text: 'quiet thinking' },
-        ],
-        isError: false,
-      }],
-      source: { kind: 'tool' as const, callId: ToolCallId('c1') },
-    }])
+    const prompt = serializeHistory([createToolResultMessage({
+      callId: ToolCallId('c1'),
+      content: [
+        { type: 'image' as const, attachment: { attachmentId: AttachmentId('img-1'), bytes: 2, mediaType: 'image/png', width: 4, height: 4 } },
+        { type: 'reasoning' as const, text: 'quiet thinking' },
+      ],
+      isError: false,
+    })])
     expect(prompt).toBe(`<tool-result>\n${OMITTED_IMAGE_TEXT}\n</tool-result>`)
   })
 
   it('renders an empty tool-result body as a placeholder', () => {
-    const prompt = serializeHistory([{
-      role: 'user' as const,
-      id: MessageId('m-empty-tool'),
-      content: [{
-        type: 'tool-result' as const,
-        toolCallId: ToolCallId('c2'),
-        content: [],
-        isError: false,
-      }],
-      source: { kind: 'tool' as const, callId: ToolCallId('c2') },
-    }])
+    const prompt = serializeHistory([createToolResultMessage({
+      callId: ToolCallId('c2'),
+      content: [],
+      isError: false,
+    })])
     expect(prompt).toBe('<tool-result>\n(no content)\n</tool-result>')
   })
 

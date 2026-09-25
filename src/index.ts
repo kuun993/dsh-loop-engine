@@ -29,7 +29,7 @@
  * with no record) — it is no longer the thing that decides a running session's
  * engine.
  *
- * The `agent-loop-engine` settings section carries the DEFAULT engine for new
+ * The plugin's own live `engine` Config field carries the DEFAULT engine for new
  * sessions — which preset the roster's default points at — not a process-wide
  * switch: existing sessions keep the engine they run, and nothing is torn down or
  * reloaded by it. (A PER-SESSION switch is a different thing: it is made from the
@@ -43,7 +43,7 @@ import { readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -71,9 +71,12 @@ import {
   writeFileAtomicSync,
 } from './session-engine-store.ts'
 import type { RouterSurfaceHolder } from './engine-remote.ts'
+import { LEGACY_HARNESS } from './compat.ts'
 import {
-  loopEngineSettingsNamespace,
+  LOOP_ENGINE_ENGINE_SCHEMA,
   LOOP_ENGINE_SETTINGS_SCHEMA,
+  LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA,
+  loopEngineSettingsNamespace,
   type HostedEngineId,
   type LoopEngineId,
   type LoopEngineSettings,
@@ -108,6 +111,48 @@ export interface Config extends ClaudeCodeConfig {
   piThinking?: string
   /** Kimi CLI executable; `'kimi'` resolves through PATH when not pinned to an absolute path. */
   kimiBin?: string
+  /**
+   * Default engine NEW sessions are created on. A live, profile-backed field:
+   * the settings shell edits it and the running plugin reads it through this
+   * volatile reference (`config.engine.get()`).
+   */
+  engine: Volatile<LoopEngineId>
+  /** Whether the chat composer shows the engine picker; a live, profile-backed field. */
+  showInComposer: Volatile<boolean>
+}
+
+/** Rejected input of the composition entry: live fields arrive as plain values and resolve to references. */
+type ConfigInput = Omit<Config, 'engine' | 'showInComposer'> & {
+  engine?: LoopEngineId
+  showInComposer?: boolean
+}
+
+/**
+ * Structural view of the 0.1.5 line's settings service (`SettingsProvider`),
+ * the only shape the legacy branch of {@link apply} calls. The module is typed
+ * against the 0.1.7 service, which deleted `installSection`, so the legacy call
+ * goes through this view rather than the installed type.
+ */
+interface LegacySettingsService {
+  /**
+   * Register a settings section for `ns`.
+   * @param owner - the context that owns the section's lifetime.
+   * @param ns - the section's namespace.
+   * @param schema - the section's schemastery schema.
+   * @param defaults - the seed value written when the section has no stored value.
+   * @param hooks - `setSource` hands back a reader of the current value before the first `onChange`; `onChange` fires on every commit.
+   * @returns the section's disposer.
+   */
+  installSection(
+    owner: Context,
+    ns: SettingsNamespace,
+    schema: unknown,
+    defaults: LoopEngineSettings,
+    hooks: {
+      setSource: (current: () => LoopEngineSettings) => void
+      onChange: () => void
+    },
+  ): unknown
 }
 
 /**
@@ -120,8 +165,15 @@ export interface Config extends ClaudeCodeConfig {
  * omitted deployment tunables fall back to the session). The composition entry
  * is an engine-agnostic superset: every hosted engine's knobs live here at
  * once, because any session may select any engine.
+ *
+ * On the 0.1.7 line `engine` and `showInComposer` are the entry's live fields:
+ * `.volatile()` makes them profile-backed settings the settings shell projects
+ * as form fields, and the runtime reads each one through its reference
+ * (`config.engine.get()`). On the 0.1.5 line there are no live Config fields —
+ * the selection is a settings section (`LOOP_ENGINE_SETTINGS_SCHEMA`), whose
+ * provider owns the storage — so the entry is the engine knobs alone.
  */
-export const Config: z<Config> = z.object({
+export const Config: z<ConfigInput, Config> = z.object({
   profile: z.string(),
   patchFilename: z.string(),
   patchPath: z.string(),
@@ -135,7 +187,13 @@ export const Config: z<Config> = z.object({
   piProvider: z.string(),
   piThinking: z.string(),
   kimiBin: z.string(),
-})
+  // The live fields exist only on the 0.1.7 line; the 0.1.5 line carries the
+  // selection in a settings section instead. The empty arm never runs when the
+  // coverage job is on 0.1.7; the 0.1.5 dep set is exercised by
+  // vitest.config.compat015.ts, which takes it.
+  /* v8 ignore next -- legacy arm, exercised by vitest.config.compat015.ts */
+  ...(LEGACY_HARNESS ? {} : { engine: LOOP_ENGINE_ENGINE_SCHEMA, showInComposer: LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA }),
+}) as z<ConfigInput, Config>
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
 export function resolvePatchPath(config: Config): string {
@@ -486,8 +544,6 @@ export function apply(ctx: Context, config: Config): void {
 
   /** The roster default the plugin replaced, restored when the default returns to in-process. */
   let savedPresetDefault: string | undefined
-  /** The engine the roster default currently points at. */
-  let steeredEngine: LoopEngineId | undefined
 
   /**
    * Point the roster's default at the preset selecting `engine`, so new
@@ -496,7 +552,6 @@ export function apply(ctx: Context, config: Config): void {
    * `in-process` restores whatever default the plugin replaced.
    */
   const steerPresetDefault = (engine: LoopEngineId): void => {
-    steeredEngine = engine
     if (engine === 'in-process') {
       const saved = savedPresetDefault
       savedPresetDefault = undefined
@@ -520,9 +575,6 @@ export function apply(ctx: Context, config: Config): void {
       mutatePresetDefault({ op: 'set', path: ['default'], value: target })
     })
   }
-
-  /** The engine the settings section names, or the legacy block's, for the initial seed. */
-  const seedEngine: LoopEngineId = legacyEngine ?? 'in-process'
 
   /**
    * The plugin's one diagnostic sink: the routing decision, the Remote, and the
@@ -650,23 +702,66 @@ export function apply(ctx: Context, config: Config): void {
     releaseRoutes()
   }, 'loop-engine: cleanup')
 
-  // installSection always calls setSource before the first onChange, so
-  // `source` is guaranteed set here; the assertion is a contract guard.
-  let source: (() => LoopEngineSettings) | undefined
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(
-      ctx,
-      loopEngineSettingsNamespace(),
-      LOOP_ENGINE_SETTINGS_SCHEMA,
-      { engine: seedEngine, showInComposer: true },
-      {
-        setSource: (current) => { source = current },
-        onChange: () => {
-          const next = source!().engine
-          if (next === steeredEngine) return
-          steerPresetDefault(next)
+  /* v8 ignore start -- legacy 0.1.5 settings wiring; the coverage job runs on 0.1.7 and vitest.config.compat015.ts exercises this branch */
+  if (LEGACY_HARNESS) {
+    // 0.1.5: the selection is a settings SECTION the plugin registers on the
+    // shell's provider. `installSection` seeds it with the managed block's
+    // engine, then calls `setSource` and `onChange` — including on the initial
+    // registration — so the roster default is steered at boot and on every
+    // commit through the same hook. `source` is guaranteed set before the first
+    // `onChange`; the assertion is a contract guard.
+    let source: (() => LoopEngineSettings) | undefined
+    // The section's own bookkeeping of the engine it last steered the roster to,
+    // so a commit that does not move the selection stays a no-op.
+    let steered: LoopEngineId | undefined
+    ctx.inject(['settings'], (settingsCtx) => {
+      const settings = settingsCtx.settings as unknown as LegacySettingsService
+      settings.installSection(
+        ctx,
+        loopEngineSettingsNamespace(),
+        LOOP_ENGINE_SETTINGS_SCHEMA,
+        // The managed block's engine survives the upgrade as the section's seed;
+        // a deployment with no block keeps the in-process default.
+        { engine: legacyEngine ?? 'in-process', showInComposer: true },
+        {
+          setSource: (current) => { source = current },
+          onChange: () => {
+            const next = source!().engine
+            if (next === steered) return
+            steered = next
+            steerPresetDefault(next)
+          },
         },
-      },
+      )
+    })
+    return
+  }
+  /* v8 ignore stop */
+
+  // 0.1.7: the plugin ships its own settings page, so it opts its entry out of
+  // the shell's auto-generated form. The policy belongs to this plugin's fiber,
+  // and the disposer is the effect's own cleanup.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.effect(
+      () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
+      'loop-engine: settings page policy',
     )
   })
+
+  // A committed edit reaches the running plugin as a settings document change.
+  // The event names the namespace, but the plugin steers by the resolved value:
+  // an update is classified by whether the reference actually moved, so an
+  // unrelated namespace's change is a no-op. Only a real move re-steers.
+  let observedEngine = config.engine.get()
+  ctx.on('settings/document-updated', () => {
+    const next = config.engine.get()
+    if (next === observedEngine) return
+    observedEngine = next
+    steerPresetDefault(next)
+  })
+
+  // Steer the roster default now that the presets are authored. A legacy managed
+  // block that named one engine keeps that choice; otherwise the live field's
+  // resolved value is the deployment's default.
+  steerPresetDefault(legacyEngine ?? observedEngine)
 }

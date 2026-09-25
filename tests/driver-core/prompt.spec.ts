@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAssistantMessage, createToolResultMessage, ToolCallId, type Message, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { engineSlashPrompt, serializeHistory } from '../../src/driver-core/prompt.ts'
+import { engineSlashPrompt, OMITTED_IMAGE_TEXT, serializeHistory } from '../../src/driver-core/prompt.ts'
 // Loads the `skill-invocation` MessageSourceMap arm this driver injects.
 import type {} from '../../src/driver-core/skill-inject.ts'
 
@@ -93,5 +93,49 @@ describe('serializeHistory', () => {
       '<assistant>\nhello\n</assistant>',
       '<tool-result>\nok\n</tool-result>',
     ].join('\n\n'))
+  })
+
+  // The 0.1.5 line carries a tool result on a user-role message whose single
+  // `tool-result` block nests the result blocks; the introspector reads that
+  // shape structurally, so these cases hold under either generation's message
+  // union and guard the shared transcript text.
+  it('renders a 0.1.5 user-role tool result as the same transcript section', () => {
+    const legacyResult = {
+      id: 'legacy-1',
+      role: 'user',
+      source: { kind: 'tool', callId: 'call-1' },
+      content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'ok' }], isError: false }],
+    } as unknown as Message
+    expect(serializeHistory([legacyResult])).toBe('<tool-result>\nok\n</tool-result>')
+  })
+
+  it('renders a failed 0.1.5 tool result with its nested image omitted', () => {
+    const legacyResult = {
+      id: 'legacy-2',
+      role: 'user',
+      source: { kind: 'tool', callId: 'call-2' },
+      content: [{ type: 'tool-result', toolCallId: 'call-2', content: [{ type: 'image', mediaType: 'image/png', data: 'AAAA' }], isError: true }],
+    } as unknown as Message
+    expect(serializeHistory([legacyResult])).toBe(`<tool-result-error>\n${OMITTED_IMAGE_TEXT}\n</tool-result-error>`)
+  })
+
+  it('renders an empty 0.1.5 tool result as (no content)', () => {
+    const legacyResult = {
+      id: 'legacy-3',
+      role: 'user',
+      source: { kind: 'tool', callId: 'call-3' },
+      content: [{ type: 'tool-result', toolCallId: 'call-3', content: [], isError: false }],
+    } as unknown as Message
+    expect(serializeHistory([legacyResult])).toBe('<tool-result>\n(no content)\n</tool-result>')
+  })
+
+  it('tolerates a 0.1.5 tool-result message carrying no block', () => {
+    const legacyResult = {
+      id: 'legacy-4',
+      role: 'user',
+      source: { kind: 'tool', callId: 'call-4' },
+      content: [],
+    } as unknown as Message
+    expect(serializeHistory([legacyResult])).toBe('<tool-result>\n(no content)\n</tool-result>')
   })
 })

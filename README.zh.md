@@ -22,7 +22,7 @@ dsh plugin --profile web add dsh-loop-engine
 
 ## 版本兼容
 
-`dsh-loop-engine` 与它针对的 harness **同版本对齐**:`<harness version>-rcN`。`0.1.5-rc3` 针对 harness `0.1.5-rc.2`;`0.1.5-rc1`/`0.1.5-rc2` 针对 `0.1.5-rc.1`;`1.0.0-rc8` … `1.0.0-rc15` 针对 `0.1.2-rc.1`;`1.0.0-rc7` 及更早针对 `0.1.1-rc.2`。它消费的每个 harness 包都在 `peerDependencies` 里精确钉住,两者必须匹配——不匹配会在启动或会话恢复时响亮地失败。要在更老的 harness 上使用本插件,请安装与之匹配的版本(每个 GitHub Release 正文会写明它针对的 harness 版本)。
+`dsh-loop-engine` 与它针对的 harness **同版本对齐**:`<harness version>-rcN`。自 `0.1.7-rc1` 起,**一个发布版本同时服务两代 harness**:0.1.5 线(`>=0.1.5-rc.1 <0.1.6-0`,三段 `rc` 共用同一套旧 settings API)与 `0.1.7-rc.1`(`>=0.1.7-rc.1 <0.1.8-0`)。它在加载期探测当前是哪一代、走对应分支,所以同一份已发布产物在两代上都能安装运行。它消费的每个 harness 包都在 `peerDependencies` 里声明这个并集范围;超出范围会在启动或会话恢复时响亮地失败。`0.1.5-rc3` … `0.1.5-rc5` 针对 harness `0.1.5-rc.2`;`0.1.5-rc1`/`0.1.5-rc2` 针对 `0.1.5-rc.1`;`1.0.0-rc8` … `1.0.0-rc15` 针对 `0.1.2-rc.1`;`1.0.0-rc7` 及更早针对 `0.1.1-rc.2`。
 
 ### 环境要求
 

@@ -92,13 +92,13 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 9. `mountProviderRoutes()`：把唯一的共享 provider 标签（`external`）注册为占位路由（见 §3.6）。
 10. `authorEnginePresets()`：把四个寄宿引擎的 preset 写进用户 preset 根（`:649`，实现 `:435-454`，见 §3.5）。启动时就写而不是等第一次选中：插件在整个生命周期里持有槽位，任何会话随时可能要求任何引擎，而 roster 是从**磁盘**读 preset 的（`USER_PRESET_DIR` 的镜像常量在 `src/preset.ts:49-50`）。
 11. 注册清理 effect：置位 `disposed`、清掉各重试 timer、回收 provider 路由（`:650-657`）。
-12. `ctx.inject(['settings'], …)` 安装 `agent-loop-engine` 段，base 用 `{ engine: seedEngine, showInComposer: true }`（`:662-677`）——**settings 从 legacy seed 出发**，用户可见的默认引擎镜像升级前的选择（见 §4.2）。
+12. `ctx.inject(['settings'], …)` 关掉自动生成的设置页（`settings.configure({ auto: false }, ctx.fiber)`），并注册 `ctx.on('settings/document-updated', …)` 监听；boot 时以 `legacyEngine ?? config.engine.get()` 做首次 roster steering。引擎与 composer 开关是插件**自己条目**的两个 `.volatile()` Config 字段（见 §4.1、§4.2）。
 
 注意第 3 步之后**文件不再参与任何决策**：磁盘上的块是常量，`apply()` 不再从它读"当前引擎"。这是与旧模型最大的结构差异——不再有"持久平面与运行时平面必须一致"的对偶。
 
 ### 3.2 为什么 `RouterLoop` 继承 `AgentLoop`
 
-`RouterLoop extends AgentLoop`（`src/router-loop.ts:174`，`AgentLoop` 是主仓 `@deepseek-ai/dsh-agent-loop` 的默认导出），构造时 `super(ctx, { agents: [] })`（`:203`）。继承而不是自己实现 `AgentFactory`，是为了**原样拿到 in-process 的全套语义**：
+`RouterLoop extends AgentLoop`（`src/router-loop.ts`，`AgentLoop` 是主仓 `@deepseek-ai/dsh-agent-loop` 的默认导出），构造时 `super(ctx, { agents: [], maxParallelToolCalls: { get: () => DEFAULT_MAX_PARALLEL_TOOL_CALLS } })`——`0.1.7-rc.1` 起该字段是必填的 `Volatile<number>`，而 `super()` 绕过 schema transform，所以路由器自己提供引用（钉在 harness 默认值上）。继承而不是自己实现 `AgentFactory`，是为了**原样拿到 in-process 的全套语义**：
 
 | 被继承的东西 | 出处 |
 |---|---|
@@ -357,25 +357,27 @@ preset 现在只承担一件事：**agent-plane 组合**——剥掉 dsh 原生�
 
 ### 4.1 零导入模块：namespace 常量与引擎映射
 
-段名 `'agent-loop-engine'` 放在**零运行时导入**的 `src/namespace.ts:9`，引擎↔preset-id 映射放在同样零导入的 `src/agent-preset-ids.ts`。原因（`src/settings.ts:1-14` 的模块注释）：浏览器 bundle 也要引用这些字面量与这条纯映射，而它们原本的同居文件都是宿主侧的——`dsh-settings` 的品牌类型与 `schemastery`（`src/settings.ts`）、`node:fs/promises`（`src/preset.ts`）；若同文件，client bundle 会把整个宿主包拖进浏览器产物。于是 node 半通过 `loopEngineSettingsNamespace()` 把段名断言为品牌类型（`src/settings.ts:47-49`）、用 `LOOP_ENGINE_IDS` 建 schema（`:41-44`），`src/settings.ts:23-27` 与 `src/preset.ts:43` 只是把映射转出去（import 路径与名字不变，node 侧调用点一处没改），浏览器半自己引 `src/agent-preset-ids.ts`。产物侧可验证：`lib/client.js` 里没有任何 `dsh-settings` / `node:fs` 的 require（§6）。
+设置字面量 `'loop-engine'` 放在**零运行时导入**的 `src/namespace.ts`，引擎↔preset-id 映射放在同样零导入的 `src/agent-preset-ids.ts`。原因（`src/settings.ts` 的模块注释）：浏览器 bundle 也要引用这些字面量与这条纯映射，而它们原本的同居文件都是宿主侧的——`schemastery`（`src/settings.ts`）、`node:fs/promises`（`src/preset.ts`）；若同文件，client bundle 会把整个宿主包拖进浏览器产物。`src/settings.ts` 与 `src/preset.ts` 只是把映射转出去（import 路径与名字不变），浏览器半自己引 `src/agent-preset-ids.ts`。产物侧可验证：`lib/client.js` 里没有任何 `dsh-settings` / `node:fs` 的 require（§6）。
 
-### 4.2 段的语义：新会话的默认引擎
+**`0.1.7-rc.1` 起，设置的命名空间就是本插件 profile 条目的 id**（harness 把设置重写为"profile 条目-backed 活配置"，见根 `docs/deepseek-harness-0.1.7-rc.1-变更总结.md` §2）：`cordis.patch.yml` 把本条目插成 `loop-engine`，所以 `src/namespace.ts` 的字面量也是 `'loop-engine'`，两者必须一致。旧的 `loopEngineSettingsNamespace()` 品牌断言随旧的 `SettingsProvider` 注册表一起删除。
 
-schema（`src/settings.ts:41-44`）：`engine` 五选一并默认 `in-process`，`showInComposer` 默认 `true`。**`engine` 的含义已经从"进程全局引擎"降级为"新会话的默认引擎"**（接口注释 `src/settings.ts:30-34`）：它的实现是 §3.5 的 roster 默认值 steering，不是任何进程内开关。因此：
+### 4.2 段的语义：两个活 Config 字段
+
+引擎与 composer 开关是插件**自己条目的 `Config`** 上两个 `.volatile()` 字段（`src/settings.ts` 的 `LOOP_ENGINE_ENGINE_SCHEMA` / `LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA`，装配进 `src/index.ts` 的 `Config`）：`engine` 五选一并默认 `in-process`，`showInComposer` 默认 `true`。宿主把它们投影成该条目的设置表单，客户端用 `ctx.configForms.get('loop-engine')` 读写；运行时它们是 `Volatile<T>`，插件读 `config.engine.get()`。**`engine` 的含义依旧是"新会话的默认引擎"**（不是任何进程内开关）：它的实现是 §3.5 的 roster 默认值 steering。因此：
 
 - 改它**不影响**任何已存在的会话（每条会话的引擎由插件自己的记录决定，没有记录的才由它的 preset 决定，§3.3）。
 - 改它**不需要**重启 `dsh web`，也**不需要**刷新页面（§4.4）。
-- 它只在新会话创建时起作用：宿主在那个时刻解析 default preset 并把 id 写进 `meta.agentPreset`（主仓 `packages/api/session-controller/src/agent.ts:374-390`、`:484`）。
+- 它只在新会话创建时起作用：宿主在那个时刻解析 default preset 并把 id 写进 `meta.agentPreset`（主仓 `packages/api/session-controller/src/agent.ts`）。
 
-`onChange` 是同步钩子：读到新值先与 `steeredEngine` 比对，相同则短路（`src/index.ts:662-666`）；首次 attach 的 `onChange` 读到 seed 值，只是把 steering 收敛到同一结果。
+变更通知是 `ctx.on('settings/document-updated', …)`：插件记下 boot 时的 `config.engine.get()`，只有该值真的变化才重指 roster 默认（`src/index.ts`）。boot 时以 `legacyEngine ?? config.engine.get()` 做首次 steering。插件同时用 `settings.configure({ auto: false }, ctx.fiber)` 关掉 harness 自动生成的设置页——它自带 §4.3 那个页面。
 
 ### 4.3 client bundle 的四个露面点
 
-`src/client/index.ts`（`inject = ['slots', 'locale', 'settingsScope']`，`src/client/index.ts:46`）注册了三处槽位 UI 与一份样式表：设置页 section 读写 settings 段里的**默认引擎**（`settings.section` 槽，`order: 30`，`src/client/index.ts:100-106`），会话头 chip 与 composer 选择器读**这条会话**的引擎（前者 `conversation.session.header.actions` 槽、`order: -20`，`src/client/index.ts:114-127`；后者 `conversation.input.right` 槽，`:153-170`，受 `showInComposer` 控制）。后两处通过 `ctx.inject(['slots', 'conversation'], …)` 注册，确保 ui-conversation 先声明了目标槽位。文案走 `ctx.locale` 的 `settings.loop-engine` 词典，中英双语（`src/client/locales.ts`）。第四处不是槽位：`installTurnStatusStyles(ctx)`（`src/client/index.ts:66-74`，实现 `src/client/turn-status.ts:340`）往 `<head>` 注入一份样式表，给对话页的 turn-status 行（"深度求索中…"）加上引擎专属的配色与字形。那一行由 harness 的 ChatView 渲染、文本归 ui-chat 所有（不是 slot，也没有第二个 `locale.register` 的口子），所以插件只能改它的样式：用 `[class$="_turnStatus"]` 选中它（前缀哈希不稳定、后缀稳定），再按 `<html>` 上的属性为各引擎设一组变量与字符。
+`src/client/index.ts`（`inject = ['slots', 'locale', 'configForms']`）注册了三处槽位 UI 与一份样式表：设置页 section 读写插件条目里的**默认引擎**（`settings.section` 槽，`order: 30`，注册包在 `ctx.configForms.whileServed(['loop-engine'], …)` 里——宿主服务了该命名空间才出现），会话头 chip 与 composer 选择器读**这条会话**的引擎（前者 `conversation.session.header.actions` 槽、`order: -20`；后者 `conversation.input.right` 槽，受 `showInComposer` 控制）。后两处通过 `ctx.inject(['slots', 'conversation'], …)` 注册，确保 ui-conversation 先声明了目标槽位。文案走 `ctx.locale` 的 `settings.loop-engine` 词典，中英双语（`src/client/locales.ts`）。第四处不是槽位：`installTurnStatusStyles(ctx)`（实现 `src/client/turn-status.ts`）往 `<head>` 注入一份样式表，给对话页的 turn-status 行（"深度求索中…"）加上引擎专属的配色与字形。那一行由 harness 的 ChatView 渲染、文本归 ui-chat 所有（不是 slot，也没有第二个 `locale.register` 的口子），所以插件只能改它的样式：它按**每一代的两个稳定挂点**各出一份规则——0.1.5 线是类名后缀 `[class$="_turnStatus"]`（前缀哈希不稳定、后缀稳定），0.1.7 线那行被重做成了 `button[data-turn-process]`、文字在类名后缀 `[class$="_label"]` 的 `<span>` 里（`.label` 这种字面类名不存在，CSS Modules 是 `[hash]_[local]`），命中的一份生效、另一份 inert——再按 `<html>` 上的两个属性为各引擎设一组变量与字符：`data-loop-engine`（在屏会话跑哪个引擎）与 `data-loop-engine-running`（这一轮是否还在跑，见下文）。
 
 会话侧的读与写集中在 `src/client/session-engine.ts`，而**读的那一半不再来自客户端**：
 
-- **引擎的报告来自插件自己的 Remote**：`createSessionEngineCache`（`src/client/session-engine.ts:719-736`）在客户端半 mount 一份手写的 contribution（`LOOP_ENGINE_REMOTE_CONTRIBUTION`，`:462-477`）拿到 `remote.loopEngine`，再由 `SessionEngineCache`（`:517-735`）按 sessionId 缓存报告并通知组件；`useEngineOfSession`（`src/client/use-session-engine.ts:71-101`）是组件侧的订阅钩子，**同时是 turn-status 行唯一的驱动者**（§4.3 的 turn-status 那段）。**第一次答案到达之前缓存里没有值**（`read` 返回 undefined），chip 因此不渲染、composer 显示「读取中…」**并禁用（置灰、打不开菜单）**——不显示默认值，也不显示任何旧值。禁用这一半由 `engineSwitchReady`（`src/client/session-engine.ts:205`）判定，它同时是类型收窄，所以"引擎未知"这一状态既不会走到重载确认、也不会被提交成一次切换（§4.4）。
+- **引擎的报告来自插件自己的 Remote**：`createSessionEngineCache`（`src/client/session-engine.ts:719-736`）在客户端半 mount 一份手写的 contribution（`LOOP_ENGINE_REMOTE_CONTRIBUTION`，`:462-477`）拿到 `remote.loopEngine`，再由 `SessionEngineCache`（`:517-735`）按 sessionId 缓存报告并通知组件；`useEngineOfSession`（`src/client/use-session-engine.ts:79`）是组件侧的订阅钩子，**同时是 turn-status 行唯一的驱动者**（§4.3 的 turn-status 那段）。**第一次答案到达之前缓存里没有值**（`read` 返回 undefined），chip 因此不渲染、composer 显示「读取中…」**并禁用（置灰、打不开菜单）**——不显示默认值，也不显示任何旧值。禁用这一半由 `engineSwitchReady`（`src/client/session-engine.ts:205`）判定，它同时是类型收窄，所以"引擎未知"这一状态既不会走到重载确认、也不会被提交成一次切换（§4.4）。
   - **缓存的是整份报告**（`SessionEngineReport`：`engine` + 可选 `pending`，`src/agent-preset-ids.ts:158-168`），因为三处露面读的不是同一份：chip 与 composer 的名字、composer 的选中项都用 `engine`（实际引擎），`pending` 只在 chip / composer 里作一句「切到 X · 尚未接管」的标注（composer 的菜单里被标注的那一行也带同样的后缀，§4.4），而 turn-status 行**只看 `engine`**（`hostedEngineOf(report.engine)`）。把两者在缓存里合并就等于抹掉这个区别，所以缓存原样保留、由各处自己取用。这个组合在正常路径上不出现（原地换手让两者一起变、释放之后没有活 agent），只剩"释放没成功"那一种来源（§3.7）。
   - **一条会话的报告在它的界面出现时重新取一次**（`watch` 的第一个 watcher → `refresh`，`src/client/session-engine.ts:575-610`）：这与"怎么让切换落地"无关（切换由宿主执行：原地换手，或释放这条会话并让页面重载，§3.7），它解决的是**答案可能过时**：另一个窗口、别处的一次原地换手、或一次插件重载都能让这条会话换了引擎，而这个页面手上的还是早先那份。重挂载时重取一次正是为了不留这种陈旧答案。持续渲染不重取（hook 的 effect 以 sessionId 为依赖，`src/client/use-session-engine.ts:81-84`），同一会话的两个界面同时出现也只发一次请求（只有第一个 watcher 触发重取，第二个并进同一次读取）；而 `invalidate`（换引擎成功回调）仍然是"这份答案肯定错了"的那条路径。
   - 为什么不能用客户端会话列表：`SessionSummary.projectionValues` 是宿主 `projectionsFor()` 算出的 `SessionProjectionHints`，自己写明 "partial: missing cells and cache rows are never materialized here"；而 `agentPreset` 在**空白期换过引擎**的会话上表示的是"创建时的 preset"，不是"实际跑的引擎"。历史上 chip 读的正是它，于是出现过"实际跑 pi、chip 显示 Claude Code"的生产事故。现在客户端**不再读** `projectionValues.agentPreset`。
@@ -385,7 +387,7 @@ schema（`src/settings.ts:41-44`）：`engine` 五选一并默认 `in-process`�
 
 `LoopEngineStore`（`src/client/store.ts:33`）仍是设置页、composer 的可见性开关与**没有会话时** composer 显示的默认值的传输：`decodeLoopEngine` 收窄线上值（非法 id 读为 undefined → 落默认；`showInComposer` 缺失视为 true，`src/client/store.ts:21-30`）。`setEngine`/`setShowInComposer` 的成败判定不是看 promise 是否拒绝，而是**写完后对照 scope 留下的快照**（`src/client/store.ts:60-77`）——被拒绝的写在恢复后会报 `unavailable`。它**不再驱动 turn-status 行**（那曾是"这一行永远跟默认引擎走"的来源）。
 
-turn-status 行**跟的是当前会话的引擎**，与 chip / composer 同源，而且**只由在屏会话驱动**——它挂在 document 级属性 `<html data-loop-engine>` 上，写这个属性的唯一入口是 chip 与 composer 共用的那个 hook：`useEngineOfSession`（`src/client/use-session-engine.ts:71-101`）的 effect 先声明焦点（`focusTurnStatusSession`，`src/client/turn-status.ts:287`），再用同一个会话 id 反射**报告里的实际引擎**（`hostedEngineOf(report.engine)`，`reflectTurnStatusEngine`，`:265`，守卫在函数第一行），卸载时撤下焦点（`blurTurnStatusSession`，`:303`）。`legacy` / `unset` / 宿主还没答出来 / 换引擎时缓存被作废，这四种都反射 `undefined`，也就是删掉属性、恢复 harness 原样（"不知道是哪个引擎"不能拿任何一个冒充）；**带 `pending` 的报告画的是实际引擎**——一次还没落地的切换不该改这行动画。样式表按这个属性给四种引擎各上一套变量与字符，属性不在时一张规则都不生效。
+turn-status 行**跟的是当前会话的引擎**，与 chip / composer 同源，而且**只由在屏会话驱动**——它挂在 document 级属性 `<html data-loop-engine>` 上，写这个属性的唯一入口是 chip 与 composer 共用的那个 hook：`useEngineOfSession`（`src/client/use-session-engine.ts:79`）的 effect 先声明焦点（`focusTurnStatusSession`，`src/client/turn-status.ts:357`），再用同一个会话 id 反射**报告里的实际引擎**（`hostedEngineOf(report.engine)`，`reflectTurnStatusEngine`，`:333`，守卫在函数第一行），卸载时撤下焦点（`blurTurnStatusSession`，`:373`）。`legacy` / `unset` / 宿主还没答出来 / 换引擎时缓存被作废，这四种都反射 `undefined`，也就是删掉属性、恢复 harness 原样（"不知道是哪个引擎"不能拿任何一个冒充）；**带 `pending` 的报告画的是实际引擎**——一次还没落地的切换不该改这行动画。样式表按这个属性给四种引擎各上一套变量与字符，属性不在时一张规则都不生效。**整张表还同时挂在 `data-loop-engine-running` 上**（`src/client/turn-status.ts:94`），因为 0.1.7 那行**在对话结束后仍然在屏**——它变成"用时 4 秒"那种折叠摘要，只按引擎门控的话，字形与扫光会留在一条已经收尾的行上（实测问题："对话结束之后动画还在"）。这个门是**界面自己答的**（`session.running`，每个会话级槽都拿得到的 `SessionStandardProps.useSession`，`src/client/session-engine.ts` 的 `SessionSeat` 只声明 `sessionId` 与 `useSession?` 两项、只读 `running` 这一个字段），由 chip 与 composer 在调 hook 时一并传入（`src/client/LoopEngineBadge.tsx`、`src/client/LoopEngineComposerSelect.tsx` 顶层无条件调用 `useSession`，在各自的 early return 之前），也进了 hook effect 的依赖（`[sessionId, engine, running]`），所以轮次开始时写入、结束时撤下；**答不出来的界面不传**（`undefined`），门保持上一个能答的界面留下的样子，而不是替它猜。样式表在卸载时会连两个属性一起清掉。
 
 **document 级属性只能有一个写者，而"最后写的人"不是它**：`SessionEngineCache.publish`（`src/client/session-engine.ts:704-706`）**不再碰 document**，它每发布一个会话的权威报告只通知该会话的 watcher。旧实现正是在 `publish` 里无条件反射，而 publish 的**发布者不止一个**——chip 与 composer 会给每个渲染过的会话登记 watcher，切换会话时旧会话那次**迟到的取值**落地时照样 publish——于是不在屏上的会话（或刚被离开的那条会话）能把属性改成自己的引擎：屏上跑 Pi、那一行却画出 Kimi 的月亮，走的就是这条路径。现在反射必须报出自己的会话 id，且只有**焦点会话**的反射生效，非焦点会话的反射是**无操作**。两条补充语义：焦点只在"仍属于自己"时才撤下（React 不保证离开组件的清理与到达组件的 effect 谁先跑，无条件的撤下会把刚接过屏的那条会话的焦点抹掉）；属性本身**不在卸载时清除**（同一会话的另一个界面还在用它，残留属性在没有这一行的页面上无害），清除只发生在"焦点会话自己反射 `undefined`"这一种情况。
 
@@ -455,7 +457,7 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 
 **浏览器半没有新增模块依赖**：会话级切换与引擎读取都走插件自己 mount 的那一个 contribution（`ctx.get('remote')` 的 `$mount`，`src/client/session-engine.ts:719-736`、`:760-803`），承载者（`@deepseek-ai/dsh-api-remotes` 客户端行）本来就在 `dsh.client.inject` 里（`package.json:47-50`）。Remote 的客户端类型是本仓库自己结构化声明的（§4.5），所以 `dsh.client.inject` / `dsh.client.external` / `BROWSER_EXTERNALS` 这次都没有变，`lib/client.js` 里也**不出现** `@deepseek-ai/dsh-typert-protocol`。
 
-**node 半新增了一个 external**：`src/engine-remote.ts` 从 `@deepseek-ai/dsh-typert-protocol` 取 `TypertRemoteService` / `@Remote` / `RemoteError`，所以该包进了 `NODE_EXTERNALS`（`build.mjs:55-58`）与 `package.json` 的 `peerDependencies` / `devDependencies`（版本对齐其它 peer 的 `0.1.5-rc.2`）。必须 external 的理由与 `dsh-agent-loop` 同类：协议包用 `Object.defineProperty` 在**原型**上写 `@Remote` 的标记、并由网关用同一个包里的 `remoteMethods()` 读回来，内联一份副本就等于让写标记的那份与读标记的那份不是同一个实现。自检：`grep -n 'typert-protocol' lib/index.js` 必须看到一条 `import … from "@deepseek-ai/dsh-typert-protocol"`，且 `lib/client.js` 里一处都没有。
+**node 半新增了一个 external**：`src/engine-remote.ts` 从 `@deepseek-ai/dsh-typert-protocol` 取 `TypertRemoteService` / `@Remote` / `RemoteError`，所以该包进了 `NODE_EXTERNALS`（`build.mjs:55-58`）与 `package.json` 的 `peerDependencies` / `devDependencies`（版本对齐其它 peer 的 `0.1.7-rc.1`）。必须 external 的理由与 `dsh-agent-loop` 同类：协议包用 `Object.defineProperty` 在**原型**上写 `@Remote` 的标记、并由网关用同一个包里的 `remoteMethods()` 读回来，内联一份副本就等于让写标记的那份与读标记的那份不是同一个实现。自检：`grep -n 'typert-protocol' lib/index.js` 必须看到一条 `import … from "@deepseek-ai/dsh-typert-protocol"`，且 `lib/client.js` 里一处都没有。
 
 `package.json` 的 `dsh` 字段是插件与 harness 的装配契约：
 
@@ -467,7 +469,7 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 ## 7. 已知约束与坑
 
 - **手改 patch 文件不改变任何引擎选择**：文件只在 `apply()` 启动时被插件读一次，且读的只是"要不要迁移 legacy 块"；块本身是常量、里面没有引擎 id。harness 自己会 live reload 这层 patch——正是它把基础 `agent-loop` 行摘掉，让全新安装的第一次启动不必再重启第二次（§3.1 第 7 步、§3.8）。
-- **主仓 `agent-loop` 行的 config 随该行一起失效**：路由器按 `super(ctx, { agents: [] })` 构造（`src/router-loop.ts:200`），所以 `agents:` 声明式启动列表与 `maxParallelToolCalls` 的 **yml config** 都到不了 loop。`agent-loop` settings 段仍然生效（`installSection` 的 `base: entry` 之上叠用户文档，主仓 `packages/settings/settings/src/index.ts:472-495`），即用户在设置里改的并行度还在。
+- **主仓 `agent-loop` 行的 config 随该行一起失效**：路由器按 `super(ctx, { agents: [], maxParallelToolCalls: { get: () => DEFAULT_MAX_PARALLEL_TOOL_CALLS } })` 构造（`src/router-loop.ts`），所以 `agents:` 声明式启动列表与 `maxParallelToolCalls` 的 **yml config** 都到不了 loop——路由器自己钉在 harness 默认值上。`agent-loop` settings 段仍然在 harness 的设置体系里生效（新模型下它是 `agent-loop` 条目自己的活 Config，用户改的并行度落在 profile patch，主仓 `packages/settings/settings/src/index.ts`）。
 - **引擎不再在会话创建时锁定**：任何**已打开且空闲**的会话都能换引擎（§3.7），这是本次改动的核心。harness 自己那条"preset 在会话开始后固定"的边界仍然在，插件为此保有自己的记录。测试里 `describe('the blank-session engine switch')`（`tests/router-loop.spec.ts:568` 起）仍钉住 harness 那条路径的每条分支，包括"投影完全缺失也算空白"（`:630`）。
 - **换引擎需要一个打开且空闲的会话**：会话没打开（没有活 agent）、有回合在飞、或它是 subagent 会话时，`selectEngine` 一律拒绝并把原因作为**数据**返回（§3.7 的清单：一个原因码加宿主原话）；一个回合的输出属于产生它的引擎，绝不被打断、绝不被抢走（`src/router-loop.ts:431-445`）。
 - **托管引擎之间：原地换手，会话不重建**。记录与**模型座位**先落盘（`<旧>/default` → `<新>/default`），然后旧 agent 退场、新引擎的 agent 用**同一个 `Session` 对象**就地发布（§3.7）——会话的 store 条目与写句柄都保留，所以浏览器那半看不到任何生命周期边，"会话不可用"与"退回主页"这两条线上现象从根上不再产生。这条会话的下一条输入自然落到新 agent 上（宿主每轮按 sessionId 现取 agent）。
@@ -485,7 +487,7 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 - **hosted preset 是托管产物**：`$DSH_HOME/.agent-presets/loop-engine-<engine>/` 每次启动从当时的 `standard` 重新生成，手改会被覆盖。`stripPresetRows` 只认列 0 的 `- id:` 行结构，主仓 preset 文件若改了行结构会保守地保留该行而不是出错（`src/preset.ts:123-169`）。
 - **默认 preset 被本插件占用**：插件在托管引擎为默认期间持有 `agent-presets.default`（§3.5）。用户在设置页另选的默认 preset 会在切回 `in-process` 时被还原值覆盖——这正是"还原部署默认值"的语义，不是丢失。
 - **浏览器半不再读 `projectionValues.agentPreset`**：会话头 chip 与 composer 都走插件自己的 Remote（§4.3、§4.6），因为那个投影 hint 是缓存形状的偏值，在换过引擎的会话上会停在创建时的 preset——真实事故是"实际跑 pi、chip 显示 Claude Code"。harness 自己的 preset 标签（主仓 `packages/client/ui-agent-preset`）仍读它、仍会滞后，本插件改不了主仓，所以文档（`docs/per-session-engine.md` §2.2）明确说明这个差别。
-- **turn-status 行是 document 级属性，只能由在屏会话带焦点守卫地驱动**（§4.3）：那行的配色/字形由 `<html data-loop-engine>` 驱动（`src/client/turn-status.ts:340` 的样式表；写属性的是 `:265` 的 `reflectTurnStatusEngine`，配合 `:287` 的 `focusTurnStatusSession` 与 `:303` 的 `blurTurnStatusSession`）。**属性不再由缓存写**：`SessionEngineCache.publish`（`src/client/session-engine.ts:704-706`）只通知 watcher，因为属性是 document 级的、写者却不止一个（chip 与 composer 给每个渲染过的会话登记 watcher，切换会话时旧会话迟到的取值照样 publish），"谁最后写谁就是当前会话"因此会把不在屏会话的引擎画到当前会话那一行上（实测：屏上跑 pi、那一行画出 Kimi 的月亮）。驱动者是 chip 与 composer 共用的 hook（`src/client/use-session-engine.ts:71-101`）：声明焦点 → 按同一个会话 id 反射 → 卸载时撤下焦点，**非焦点会话的反射一律无操作**，`legacy` / `unset` / 宿主还没答出来 / 换引擎时缓存被作废这四种反射 `undefined`（删属性、回 harness 原样），绝不猜。它**不是**会话级挂点（样式表要属性选择器，而那一行本身不是 slot）；属性不在卸载时清除——同一会话的另一个界面还在用，残留属性在没有这一行的页面上无害。还有一条 DOM 层的坑：只能写 camelCase 的 `dataset.loopEngine`，写 `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError`（`-[a-z]` 不是合法属性名），那会把整条反射路径带塌——`src/client/turn-status.ts:318-323` 的注释与 `tests/session-engine-cache.spec.ts` 的假 `document` 都记着这条。
+- **turn-status 行是 document 级属性，只能由在屏会话带焦点守卫地驱动**（§4.3）：那行的配色/字形由 `<html data-loop-engine>` 驱动（`src/client/turn-status.ts:275` 的样式表；写属性的是 `:333` 的 `reflectTurnStatusEngine`，配合 `:357` 的 `focusTurnStatusSession` 与 `:373` 的 `blurTurnStatusSession`），并且**还要这一轮还在跑**（`<html data-loop-engine-running>`，`:94`、`:408` 写它）——0.1.7 那行收尾后仍留在屏上，只按引擎门控会把字形与扫光留在一条结束的轮次上。**属性不再由缓存写**：`SessionEngineCache.publish`（`src/client/session-engine.ts:704-706`）只通知 watcher，因为属性是 document 级的、写者却不止一个（chip 与 composer 给每个渲染过的会话登记 watcher，切换会话时旧会话迟到的取值照样 publish），"谁最后写谁就是当前会话"因此会把不在屏会话的引擎画到当前会话那一行上（实测：屏上跑 pi、那一行画出 Kimi 的月亮）。驱动者是 chip 与 composer 共用的 hook（`src/client/use-session-engine.ts:79`）：声明焦点 → 按同一个会话 id 连同**这一轮是否在跑**（`session.running`，由两个槽顶层的 `useSession` 读出）一起反射 → 卸载时撤下焦点，**非焦点会话的反射一律无操作**，`legacy` / `unset` / 宿主还没答出来 / 换引擎时缓存被作废这四种反射 `undefined`（删属性、回 harness 原样），绝不猜。它**不是**会话级挂点（样式表要属性选择器，而那一行本身不是 slot）；属性不在卸载时清除——同一会话的另一个界面还在用，残留属性在没有这一行的页面上无害。还有一条 DOM 层的坑：只能写 camelCase 的 `dataset.loopEngine`，写 `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError`（`-[a-z]` 不是合法属性名），那会把整条反射路径带塌——`src/client/turn-status.ts:388-392` 的注释与 `tests/session-engine-cache.spec.ts` 的假 `document` 都记着这条。
 - **`/goal` 与 `command-goal` 的措辞已统一**：`src/preset.ts:67-73`、`src/engine-kimi/commands.ts:24-28`、`src/patch-manager.ts:19-29`、`tests/patch-manager.spec.ts:51-54` 现在说的是同一套事实——`tool-goal` / `command-goal` 都剥，因为模型面工具只在 in-process loop 驱动下有效，人类命令留在菜单里则背后什么都没有；而 `command-goal` 行住在 preset 层，所以只能在 preset 层剥（`STRIPPED_ROWS` 见 `src/preset.ts:79`）。没有任何托管引擎实现 `/goal`（`src/engine-kimi/commands.ts:24-28`，`KIMI_COMMANDS` 六条见 `:60-67`），所以托管会话里既没有 dsh 的 `/goal`，也没有接替它的引擎命令。
 - **harness 自己的 preset 选择器仍会拒绝已启动的会话，这不是缺陷**（§4.4、§3.7）：跑过一轮的会话 composition 已定，`AgentPresets.select` 抛 `agent-preset/locked`（原文 `session "…" has already started; its agent preset is fixed`；判定与抛点在主仓 `packages/preset/agent-presets/src/index.ts:713-721`）——这是 harness 的立场，本插件不去动它，而是**自己另开一条路**：composer 的切换走 §4.6 的 `loopEngine/select`，根本不经过 preset 通道。空白会话的 preset 切换仍会让路由器释放旧 agent 并按新 preset 重建（§3.7 的 `rebuildOnEngineChange`，含"最后一次用户动作胜出"）。
 - **两个"循环引擎"选择器语义不同，别当成同一个开关**（§4.3）：设置页写的是**新会话默认值**（settings 段），composer 写的是**这条会话的引擎记录**（§3.9），并会为这条会话重建 agent。默认值改动不影响任何已存在的会话；composer 的改动只影响它那一条会话、且不改默认值。
@@ -493,3 +495,62 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 - **Windows**：构建/测试里的 junction、`rm` 需要重试（`tests/index.spec.ts:206-214`）；preset authoring 的记忆化正是为了避免两条路径并发走同一批文件（§3.8）。
 - **测试约定**：`tests/index.spec.ts` 用真实服务栈（SessionStore/SystemPrompt/AgentRegistry/Subprocess/LlmRuntime + 内存 settings provider）起真实 Cordis context；`tests/router-loop.spec.ts` 只用假的 `HostedEngineRuntime`（只记录 create/resume 并回一个句柄，`tests/router-loop.spec.ts:66-115`）钉路由决策，因为那是路由器与引擎之间的全部契约；`tests/engine-remote.spec.ts` 把两者接到一起——真实 `SessionStore` + 真实 JSONL 持久化 + 会真正折叠的投影、一条 header 记 `loop-engine-claude-code` 而日志记 `agent-preset/selected = loop-engine-pi` 的会话，断言 Remote 报 `pi` 且路由器 resume 时构建的是 Pi（这是"显示与路由不可能不一致"的回归钉）；`tests/engine-of-session.spec.ts` 单独钉三态判定与那次读取。按主题分组：路由分发 / resume 路由 / 记账 / 空白期换引擎（`:320`、`:421`、`:510`、`:583`），插件级的分组是 `apply managed block`（`tests/index.spec.ts:418`）、`apply engine presets`（`:574`）、`apply provider routes`（`:707`）、`apply engine remote`（`:830`）、`apply preset steering`（`:881`）、`apply router mount`（`:1125`）；路由器挂载的**重试窗口**单独一组在 `tests/router-mount.spec.ts:196` 起（窗口内释放后成功挂载 / 永不释放则 loud 放弃 / 卸载中途停止重试 / 非冲突错误不重试）。
 - **inject 门与「属性读取」守卫**（§3.1 的 `ROUTER_SERVICES`）：cordis 只对**未 inject 服务的属性读取**报错，`ctx.get(...)` 不受约束；而属性读取在**祖先 fiber 的 store 里能兜住**，`agent` 的 scope ctx 是 isolate 边界、兜不住 —— 所以漏一个服务会在「创建 agent 时全绿、第一轮真回合才按 `turn/end` 的 `error` reason 失败」。`tests/router-inject.spec.ts` 因此不只断言路由器自身的 ctx，而是断言**路由器创建的 agent 的 scope ctx** 能解析 `AgentLoop.inject` 的每一项，并显式比对 `ROUTER_SERVICES` 与 `AgentLoop.inject`（不硬编码服务名，harness 上游加服务会直接红）。`tests/router-turn.spec.ts` 是端到端那条：经 `apply()` 起路由器、用 `agentPreset: 'standard'` 跑完一轮 canned 模型回合，断言 `turn/end` 的 `reason.kind === 'completed'`。共享替身在 `tests/helpers/session-projections.ts`（必须真正折叠：`ReactLoopInbox.current()` 每轮回读自己的 cell）与 `tests/helpers/tool-runtime.ts`。
+
+## 8. 跨代兼容：一份产物同时服务 0.1.5 线与 0.1.7 线
+
+本插件从 `0.1.7-rc1` 起，**一个发布产物**同时跑在 harness 的 **0.1.5 线**（`>=0.1.5-rc.1 <0.1.6-0`，三段 `rc` 共用同一套旧 settings API）与 **0.1.7 线**（`>=0.1.7-rc.1 <0.1.8-0`）上。两条线的差异不是版本号而是**API 形状**，所以在**运行期**探测、分叉，而不是发两份包。
+
+### 8.1 唯一的代际开关：`src/compat.ts`
+
+`LEGACY_HARNESS` 在模块加载期做一次结构探测：
+
+```ts
+import * as dshSettings from '@deepseek-ai/dsh-settings'
+export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as object)
+```
+
+0.1.5 线的 `dsh-settings` 导出具名 `SettingsProvider` 类；0.1.7 线删掉了它，换成 `SettingsForms` + 每条目 `.volatile()` Config 字段。探测解析到**运行 profile 实际提供的那份** `@deepseek-ai/dsh-settings`。**它只在 node 半使用**：浏览器 bundle 不得引入宿主包（§4.1），所以 `src/client/*` 从不 import 它，客户端另用"两个 inject 回调各自注册"来分流（§8.4）。
+
+用到它的模块：`src/index.ts`（Config 形态与 settings 接线）、`src/router-loop.ts`（`super` 的 Config）、`src/driver-core/hosted-engine-runtime.ts`（创建公告）、`src/settings.ts`（`.volatile()` 防御）。
+
+### 8.2 逐接缝的分叉
+
+| 接缝 | 0.1.5 线 | 0.1.7 线 |
+|---|---|---|
+| settings 宿主 | `ctx.settings.installSection(ctx, ns, schema, entry, { setSource, onChange })`（`SettingsProvider`） | `settings.configure({ auto: false })` + `ctx.on('settings/document-updated')` + `config.engine.get()` |
+| settings 命名空间 | `'agent-loop-engine'`（`LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL`） | `'loop-engine'`（插件自己的 profile 条目 id） |
+| 条目的活字段 | 无：`Config` 只有引擎旋钮，选中值是 settings 段 | `engine` / `showInComposer` 两个 `.volatile()` 字段 |
+| 客户端 settings 服务 | `ctx.settingsScope.bind({ namespace, decode })` | `ctx.configForms.get('loop-engine')` |
+| agent 创建公告 | `agents.announce(agent)` 同步 + 单独 `emitAgentEvent(…, 'agent/session-start', …)` | `await agents.announce(agent, source, signal)`（即 `agent/created`） |
+| `AgentLoop` 并行上限 | `maxParallelToolCalls?: number`（基础 loop 自带默认） | 必填 `Volatile<number>`，`super` 自己钉引用 |
+| tool-result 消息 | `role:'user'`，单块 `tool-result` 内嵌 `content` 与 `isError` | 一等 `role:'tool'` 消息，块与 `isError` 在消息本体 |
+
+`src/namespace.ts` 两个字面量并存，浏览器半与 node 半都从这里取，保证两半一致。
+
+`src/settings.ts` 同时导出两族 schema：0.1.5 的 `LOOP_ENGINE_SETTINGS_SCHEMA` + `loopEngineSettingsNamespace()`，与 0.1.7 的 `LOOP_ENGINE_ENGINE_SCHEMA` / `LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA`。后者的 `.volatile()` 只在 0.1.7 的 schemastery（3.18.4）存在；0.1.5 的 3.18.1 没有它，但 0.1.5 从不装配这两个字段，所以 `withVolatile` 在 API 缺席时降级返回普通 schema，模块在两代都能安全加载。
+
+`src/driver-core/prompt.ts` 的 tool-result **按结构识别**而非按代际常量：`role==='tool'` 走 0.1.7 读法（`message.content` / `message.isError`），`role==='user' && source.kind==='tool'` 走 0.1.5 读法（`content[0]` 的内嵌块与 `isError`）。两代产出的 transcript 文本逐字节一致，所以 `serializeHistory` 的断言在两代都成立。
+
+### 8.3 依赖声明
+
+`package.json` 的每个 `@deepseek-ai/dsh-*` peer 范围写成 `">=0.1.5-rc.1 <0.1.6-0 || >=0.1.7-rc.1 <0.1.8-0"`；`@deepseek-ai/cordis` peer 放宽到 `^4.0.1`（`Volatile` 类型只在**构建期**用到，0.1.5 线的 cordis 4.0.x 运行期足够）。`devDependencies` 仍钉 `0.1.7-rc.1` 用于本仓库的类型检查与构建；`@deepseek-ai/schemastery` 保持 `3.18.4`（`.volatile()` 只在现代分支需要）。
+
+### 8.4 客户端分流
+
+`src/client/index.ts` 的静态 `inject` 只列两代都有的 `['slots', 'locale']`（`configForms` 与 `settingsScope` 互斥，不能同时列）。`apply` 里注册**两个** inject 回调：`ctx.inject(['configForms'], …)` 装现代页（`configForms.get('loop-engine')` + `whileServed`），`ctx.inject(['settingsScope'], …)` 装 0.1.5 页（`settingsScope.bind` + 直接 register）。哪个服务在，哪个回调就触发；两者都把各自的服务落进同一个 `LoopEngineSettingsTransport`（`src/client/store.ts` 的内部适配接口），所以设置页与 composer 共享同一份 store。图标同理：`import * as primitives` 后运行期取 `IconChevronDownOutlineRegular ?? IconChevronDownOutline14`。
+
+### 8.5 验证两代
+
+- **0.1.7**：`pnpm run typecheck && pnpm run build && pnpm run test && pnpm run test:coverage`（覆盖率仍是 `src/**` 每文件 100%，`src/client/**` 排除）。
+- **0.1.5**：`.compat-015/` 是隔离的 0.1.5 依赖集（`pnpm install` 只写它自己的 `node_modules`），`vitest.config.compat015.ts` 把每个 `@deepseek-ai/*` 指向该目录，`npx vitest run --config vitest.config.compat015.ts` 用**同一批 spec**跑 0.1.5。
+- spec 侧靠 `tests/helpers/harness-generation.ts`（复刻探测 + `toolResultView` 把两代的 tool-result 读成同一份事实）与 `tests/helpers/fake-settings.ts`（假 settings 服务同时实现 `installSection` 与 `configure`/`mutate`/`describe`；`createLiveLoopConfig` 按代际把"提交默认引擎"写到正确的通道）实现"同一文件两代都过"。
+
+> **覆盖率注释的边界**：只在一条代际上执行的分支（`src/index.ts` 的 legacy settings 接线、`src/router-loop.ts` 的 legacy `super` 形态、`src/driver-core/hosted-engine-runtime.ts` 的 legacy 公告、`src/settings.ts` 的 `.volatile()` 降级）在 0.1.7 覆盖率跑里标了 `/* v8 ignore */`，其真实执行由 `vitest.config.compat015.ts` 那次运行保证——那一次不跑覆盖率，是**功能性**验证。
+
+### 8.6 会话 system 头（`src/driver-core/system-head.ts`）
+
+托管驱动不写 `system/message`（外部 CLI 自带系统提示），所以**从托管引擎起步**的会话没有 surface 头。它一旦后来跑过 in-process，harness loop 会把 `system/message` 追加到**中段**，而 V3→V4 迁移要求 `system/message` 必须是**第一个** surface 事件（`session-format-v3-to-v4/src/relationships.ts` `foldSurface`），整条会话因此被拒（`system/message requires a protected first surface head`，历史加载失败）。
+
+四个驱动在**会话首个 step** 调一次 `appendSystemHeadIfMissing(session, turn, step)`：仅当会话尚无任何 surface 事件时，补一条**空 content** 的 `system/message` 头。头受保护 → 后来的 in-process system 消息是 `replace` 而非错位追加；空 content 被 `deriveEventMessage` 丢弃 → **不进模型历史**，引擎收到的 prompt 不变（`tests/engine-claude/agent.spec.ts` 断言首个 surface 事件就是它）。
+
+该头是 0.1.7/V4 的需求，0.1.5 的 v3 不需要（且本构建在 0.1.5 上驱动不了这个事件、会让回合报错），所以 `appendSystemHeadIfMissing` 以 `LEGACY_HARNESS` 门控，在 0.1.5 上直接返回、不碰任何东西。

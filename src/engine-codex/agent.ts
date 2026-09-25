@@ -37,6 +37,7 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
 import { codexModelConfig } from './model-handover.ts'
@@ -173,6 +174,7 @@ export class CodexAgent implements Agent {
     this.session.append('step/end', { turn: phase.turn, step: phase.step })
     phase.step += 1
     this.session.append('step/start', { turn: phase.turn, step: phase.step })
+    appendSystemHeadIfMissing(this.session, phase.turn, phase.step)
     this.stepSettledTools = 0
   }
 

@@ -20,6 +20,7 @@ import {
   toolResult,
 } from '../../../src/engine-kimi/acp/mapping.ts'
 import type { AcpToolCallStreamExt, AcpUpdate } from '../../../src/engine-kimi/acp/types.ts'
+import { toolResultRole, toolResultView } from '../../helpers/harness-generation.ts'
 
 const msg = (text: string): AcpUpdate => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
 const thought = (text: string): AcpUpdate => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })
@@ -122,8 +123,8 @@ describe('toolRawInput', () => {
 describe('toolResult', () => {
   it('projects a successful tool result with the joined text', () => {
     const result = toolResult('0:call_1', 'Command executed successfully.', false)
-    expect(result.content[0]).toMatchObject({
-      type: 'tool-result',
+    expect(toolResultView(result)).toMatchObject({
+      role: toolResultRole(),
       toolCallId: '0:call_1',
       content: [{ type: 'text', text: 'Command executed successfully.' }],
       isError: false,
@@ -131,6 +132,7 @@ describe('toolResult', () => {
   })
 
   it('marks an error result and defaults empty text to a placeholder', () => {
-    expect(toolResult('0:call_1', '', true).content[0]).toMatchObject({ isError: true, content: [{ type: 'text', text: '(no content)' }] })
+    expect(toolResultView(toolResult('0:call_1', '', true)))
+      .toMatchObject({ role: toolResultRole(), isError: true, content: [{ type: 'text', text: '(no content)' }] })
   })
 })
