@@ -13,10 +13,20 @@
 
 | 插件版本 | 目标 harness | 说明 |
 |---|---|---|
-| `0.1.7-rc1`（当前） | `>=0.1.5-rc.1 <0.1.6-0` **或** `>=0.1.7-rc.1 <0.1.8-0` | 两代由运行期探测分流 |
+| `0.1.7-rc1`（当前） | `>=0.1.5-rc.1 <0.1.6-0` **或** `>=0.1.7-rc.1 <0.1.8-0` | 两代由运行期探测分流；`0.1.7` 线内的小版本（`rc.1`…`rc.2`）由同一条并集范围覆盖，**插件无需改版** |
 | `0.1.5-rc3` … `0.1.5-rc5` | `0.1.5-rc.2` | 单代 |
 | `0.1.5-rc1` / `0.1.5-rc2` | `0.1.5-rc.1` | 单代 |
 | `1.0.0-rc8` … `1.0.0-rc15` | `0.1.2-rc.1` | 单代（旧命名法） |
+
+**已逐个核对过的 harness 小版本**（每条都跑过 `typecheck` + 两代测试，见 §6 步骤 5）：
+
+| harness | 结论 | 依据 |
+|---|---|---|
+| `0.1.5-rc.1` … `0.1.5-rc.3` | 支持 | `.compat-015/` 兼容作业 |
+| `0.1.7-rc.1` | 支持 | 本仓 devDependencies |
+| `0.1.7-rc.2` | 支持 | 插件依赖的 API 面在 rc.1→rc.2 之间**逐个 diff 过、未变**：`TurnProcessNodeView.tsx`（turn-status 行）、`ui-session` 的 `SessionStandardProps`、`preset/agent-presets`、`settings`、`typert/registry` 的 codec 校验、`core/session` 的事件表、`session-format-v3-to-v4` 的关系校验、`api-session-controller` 的快照、`ui-settings`、`typert/protocol`、两个槽位声明（`conversation.input.right` / `conversation.session.header.actions`）与 `cssModules: '[hash]_[local]'` 命名、`IconChevronDownOutlineRegular`。rc.1→rc.2 共 346 个提交，但落在这张清单上的**只有 `llm/llm` 一处（+32/−9）**，插件只用它的类型，typecheck 与测试均通过。 |
+
+> 新增一个小版本的**判定成本很低**：按 §5 的清单逐个 `git diff <旧tag> <新tag> -- <路径>`，落在清单外的改动不用看。这条命令就是"要不要动代码"的答案。
 
 两条线的差异**不是版本号，而是 API 形状**，所以分流是**运行期结构探测**，不是 semver 解析。
 
@@ -96,7 +106,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | `.compat-015/` | **隔离的 0.1.5 依赖集**（`package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml`；`node_modules` 不进仓库）。只装 0.1.5 那一套，与本仓库的 0.1.7 `node_modules` 互不干扰 |
 | `vitest.config.compat015.ts` | 把每个 `@deepseek-ai/*` 别名到 `.compat-015/node_modules/@deepseek-ai/`，跑**同一批 spec**：`npx vitest run --config vitest.config.compat015.ts`（**不跑覆盖率**，是功能性验证） |
 | `package.json` `peerDependencies` | 联合范围 `">=0.1.5-rc.1 <0.1.6-0 \|\| >=0.1.7-rc.1 <0.1.8-0"`；`@deepseek-ai/cordis` 放宽到 `^4.0.1`（`Volatile` 只在**构建期**用）；`schemastery` 钉 `3.18.4` |
-| `pnpm-workspace.yaml` `minimumReleaseAgeExclude` | pnpm "最小发布年龄"供应链护栏的豁免名单（护栏**当前未开启**，所以这项是前瞻性声明：将来一旦开启，刚发布的 harness 预发布版才不会被拦） |
+| `pnpm-workspace.yaml` `minimumReleaseAgeExclude` | pnpm "最小发布年龄"供应链护栏的豁免名单。本仓库**没有开启** `minimumReleaseAge`（`pnpm config get minimumReleaseAge` = `undefined`），所以这项目前是前瞻性的；但 `pnpm install` 会**自动**把刚装上的版本追加进去，因此每次提版后这个文件都会自己变长——跟着提交即可，不要手删。 |
 
 > **覆盖率注释的边界**：只在一条代际上执行的分支，在 0.1.7 覆盖率作业里标了 `/* v8 ignore */`（注释里写明"由 `vitest.config.compat015.ts` 接管"）。**这些分支的真实执行只由兼容作业保证**；改动它们之后，两套命令都要跑（§6 步骤 5）。
 
@@ -127,7 +137,26 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 以"支持 `0.1.8-rc.1`（同时保留 0.1.5 与 0.1.7）"为例：
 
-1. **拿到新 harness 的 API 差异**。不要凭 CHANGELOG 猜，直接对源码做结构化 diff：新 checkout 的 `packages/**/lib/types/**/*.d.ts`（或 `src/`）对比当前 devDependencies 那版。重点看 §5 表里那几类：服务类/方法、事件名、codec/typert 形状、`SessionEventMap`、插槽 props（`SessionStandardProps`）、preset roster、CSS Modules 命名。
+1. **先判断"要不要动代码"**。**同一条线内的小版本**（如 `0.1.7-rc.1` → `0.1.7-rc.2`，几百个提交）绝大多数时候**不用改任何代码**：只 diff §5 那张表里的面就够了，命令是
+
+   ```sh
+   cd deepseek-harness
+   for p in packages/client/ui-chat/src/client/chat/TurnProcessNodeView.tsx \
+            packages/client/tsdown.client.ts \
+            packages/client/ui-session/src/client/index.ts \
+            packages/preset/agent-presets/src/index.ts \
+            packages/settings/settings/src/index.ts \
+            packages/typert/registry/src/service.ts \
+            packages/core/session/src/known-event-types.ts \
+            packages/session/session-format-v3-to-v4/src/relationships.ts \
+            packages/api/session-controller/src/client/contract/snapshot.ts; do
+     printf '%-78s ' "$p"; git diff --shortstat dsh-v0.1.7-rc.1 dsh-v0.1.7-rc.2 -- "$p" | tr -d '\n'; echo
+   done
+   ```
+
+   落在清单外的改动（`client/ui-schedule` 之类）不用看。**这一步是"要不要动代码"的答案**；§1 的表里记着已核对过的版本与结论。
+
+   **跨 minor（如 `0.1.7` → `0.1.8`）**才需要走完整流程：不要凭 CHANGELOG 猜，直接对新 checkout 的 `packages/**/lib/types/**/*.d.ts`（或 `src/`）做结构化 diff。重点仍是 §5 表里那几类：服务类/方法、事件名、codec/typert 形状、`SessionEventMap`、插槽 props（`SessionStandardProps`）、preset roster、CSS Modules 命名。
 2. **先跑一次兼容作业**，让差异自己冒出来：把新 harness 装进一个新的隔离依赖集（照 `.compat-015/` 复制一份 `.compat-018/`），`vitest.config` 别名过去，跑同一批 spec。**这一步是探针，比读代码快**。
 3. **逐个改**，按 §3 的优先级选手法：能用 B 就不用 A；纯数据用 C；匹配物用 D。**不要**把 `LEGACY_HARNESS` 从 bool 改成枚举——那会让每次升级都动到所有分支。要么再加一个独立的能力探测（如 `HAS_XXX`），要么优先改写成 B。
 4. **补 `v8 ignore` 与兼容用例**：新代的专属分支在覆盖率作业（跑最新代）里会被标 `v8 ignore`，注释里必须写明"由哪套 compat 作业接管"。

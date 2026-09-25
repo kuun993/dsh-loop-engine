@@ -24,15 +24,18 @@ the scope key is what joins an agent to its preset
 
 ## 怎么做
 
-把 `HARNESS` 设为 harness checkout 的 **`file://` URL**，然后在 profile 目录里执行：
+把 `HARNESS` 设为 harness checkout 的 **`file://` URL**，然后把 `VERSION` 设为**当前 harness 版本**（`deepseek-harness/package.json` 的 `version`，例如 `0.1.7-rc.2`），在 profile 目录里执行：
+
+> shim 的 `version` **不能随便写**：它要满足本插件 `peerDependencies` 里那条并集范围（`>=0.1.7-rc.1 <0.1.8-0`）。写成 `0.0.0` 之类的占位值，pnpm 会判定 peer 不满足，**再装一份 harness 包**——于是 profile 里出现两份模块实例，`agent-presets: refusing to compose an unscoped context` 那类失败就回来了。这些 shim 的存在意义正是"只留一份"。因此每次升级 harness 后跟着改这里的版本号。
 
 ```sh
 HARNESS=file:///path/to/deepseek-harness   # 例如 file:///D:/repos/deepseek-harness
+VERSION=0.1.7-rc.2                          # deepseek-harness/package.json 的 version
 cd "$DSH_HOME/profiles/web" && mkdir -p shims
 while IFS='|' read -r name rel; do
   mkdir -p "shims/$name"
-  printf '{"name":"@deepseek-ai/%s","version":"0.0.0","private":true,"type":"module","main":"index.mjs"}\n' \
-    "$name" > "shims/$name/package.json"
+  printf '{"name":"@deepseek-ai/%s","version":"%s","private":true,"type":"module","main":"index.mjs"}\n' \
+    "$name" "$VERSION" > "shims/$name/package.json"
   printf "export * from '%s/%s'\nimport * as mod from '%s/%s'\nexport default mod.default\n" \
     "$HARNESS" "$rel" "$HARNESS" "$rel" > "shims/$name/index.mjs"
 done <<EOF
@@ -49,14 +52,17 @@ dsh-timeout|packages/util/timeout/src/index.ts
 dsh-llm|packages/llm/llm/src/index.ts
 dsh-invariants|packages/runtime-diagnostics/invariants/src/index.ts
 dsh-home-paths|packages/util/home-paths/src/index.ts
+dsh-typert-protocol|packages/typert/protocol/src/index.ts
 EOF
 ```
+
+（`cordis` 与 `schemastery` 的版本号**不跟** `$VERSION`：它们有各自的版本，且必须满足插件的 peer 范围——`@deepseek-ai/cordis` 声明 `^4.0.1`、`@deepseek-ai/schemastery` 声明 `3.18.4`。）
 
 再把 profile 的 `package.json` 指向它们并重装：
 
 ```sh
 node -e 'const f="package.json",j=require("./"+f),d=j.dependencies??={}
-for(const n of ["cordis","schemastery","dsh-agent","dsh-agent-loop","dsh-scope","dsh-session","dsh-session-persistence","dsh-settings","dsh-subprocess","dsh-timeout","dsh-llm","dsh-invariants","dsh-home-paths"])
+for(const n of ["cordis","schemastery","dsh-agent","dsh-agent-loop","dsh-scope","dsh-session","dsh-session-persistence","dsh-settings","dsh-subprocess","dsh-timeout","dsh-llm","dsh-invariants","dsh-home-paths","dsh-typert-protocol"])
   d["@deepseek-ai/"+n]="file:./shims/"+n
 require("fs").writeFileSync(f,JSON.stringify(j,null,2)+"\n")'
 pnpm install
