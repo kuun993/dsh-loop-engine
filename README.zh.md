@@ -65,6 +65,7 @@ dsh plugin --profile web add dsh-loop-engine
 - [docs/per-session-engine.md](docs/per-session-engine.md)——按会话选引擎的用户可见行为全解。
 - [docs/source-checkout.md](docs/source-checkout.md)——源码启动 harness 时需要的那套 `file:` shim。
 - [docs/architecture.md](docs/architecture.md)——插件核心:唯一 factory 槽位、受管理块、路由、逐会话引擎事实、provider 路由。
+- [docs/compatibility.md](docs/compatibility.md)——**harness 升级时先看这篇**:全部随代际分叉的代码位置、跨代的四种手法,以及新增一代的清单。
 - [docs/driver-core.md](docs/driver-core.md)——共享驱动基础设施。
 - [docs/engine-claude.md](docs/engine-claude.md)、[docs/engine-codex.md](docs/engine-codex.md)、[docs/engine-kimi.md](docs/engine-kimi.md)、[docs/engine-pi.md](docs/engine-pi.md)——逐引擎内部实现。
 - [docs/optimization-backlog.md](docs/optimization-backlog.md)——已知问题与优化清单。

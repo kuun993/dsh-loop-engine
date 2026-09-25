@@ -498,7 +498,7 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 
 ## 8. 跨代兼容：一份产物同时服务 0.1.5 线与 0.1.7 线
 
-本插件从 `0.1.7-rc1` 起，**一个发布产物**同时跑在 harness 的 **0.1.5 线**（`>=0.1.5-rc.1 <0.1.6-0`，三段 `rc` 共用同一套旧 settings API）与 **0.1.7 线**（`>=0.1.7-rc.1 <0.1.8-0`）上。两条线的差异不是版本号而是**API 形状**，所以在**运行期**探测、分叉，而不是发两份包。
+本插件从 `0.1.7-rc1` 起，**一个发布产物**同时跑在 harness 的 **0.1.5 线**（`>=0.1.5-rc.1 <0.1.6-0`，三段 `rc` 共用同一套旧 settings API）与 **0.1.7 线**（`>=0.1.7-rc.1 <0.1.8-0`）上。两条线的差异不是版本号而是**API 形状**，所以在**运行期**探测、分叉，而不是发两份包。**本篇讲架构；逐文件的兼容点清单、四种跨代手法、以及"跟着 harness 升级到下一代"的操作清单在 [compatibility.md](compatibility.md)**——升级时先看那一篇。
 
 ### 8.1 唯一的代际开关：`src/compat.ts`
 
@@ -511,7 +511,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 0.1.5 线的 `dsh-settings` 导出具名 `SettingsProvider` 类；0.1.7 线删掉了它，换成 `SettingsForms` + 每条目 `.volatile()` Config 字段。探测解析到**运行 profile 实际提供的那份** `@deepseek-ai/dsh-settings`。**它只在 node 半使用**：浏览器 bundle 不得引入宿主包（§4.1），所以 `src/client/*` 从不 import 它，客户端另用"两个 inject 回调各自注册"来分流（§8.4）。
 
-用到它的模块：`src/index.ts`（Config 形态与 settings 接线）、`src/router-loop.ts`（`super` 的 Config）、`src/driver-core/hosted-engine-runtime.ts`（创建公告）、`src/settings.ts`（`.volatile()` 防御）。
+用到它的模块（共 5 处，`grep -rn "LEGACY_HARNESS" src/` 应只剩这 5 个加 `compat.ts` 自己）：`src/index.ts`（Config 形态与 settings 接线）、`src/router-loop.ts`（`super` 的 Config）、`src/driver-core/hosted-engine-runtime.ts`（创建公告）、`src/driver-core/system-head.ts`（0.1.5 不补 system 头）、`src/settings.ts`（`.volatile()` 防御）。完整清单见 [compatibility.md](compatibility.md) §4。
 
 ### 8.2 逐接缝的分叉
 

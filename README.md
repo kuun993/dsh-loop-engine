@@ -65,6 +65,7 @@ dsh-loop-engine is versioned **in lockstep with the harness it targets**: `<harn
 - [docs/per-session-engine.md](docs/per-session-engine.md) — the full user-visible behavior of per-session engines.
 - [docs/source-checkout.md](docs/source-checkout.md) — the `file:` shims a source-launched harness needs.
 - [docs/architecture.md](docs/architecture.md) — plugin core: the single factory slot, the managed block, routing, per-session engine facts, the provider route.
+- [docs/compatibility.md](docs/compatibility.md) — **start here when the harness upgrades**: every generation-dependent code site, the four techniques for spanning them, and the checklist for adding the next generation.
 - [docs/driver-core.md](docs/driver-core.md) — the shared driver infrastructure.
 - [docs/engine-claude.md](docs/engine-claude.md), [docs/engine-codex.md](docs/engine-codex.md), [docs/engine-kimi.md](docs/engine-kimi.md), [docs/engine-pi.md](docs/engine-pi.md) — per-engine internals.
 - [docs/optimization-backlog.md](docs/optimization-backlog.md) — known issues and the optimization list.
