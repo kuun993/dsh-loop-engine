@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 /**
- * @file One-off data repair for V3 session logs written by an older
+ * @file One-off data repair for V3 and V4 session logs written by an older
  * `dsh-loop-engine` hosted-driver build.
  *
  * A hosted engine (claude-code / codex / pi / kimi) drives a session by writing
- * the durable session log itself. Driver builds from before the `71ccdea`,
- * `c293e25`, `5de4b91`, and `1c94078` fixes (all before 2026-09-19) wrote a
- * transcript the harness's *format v3* reader tolerated but the *format v4*
- * lifecycle rules reject, so the v3→v4 migration refuses the session and leaves
- * the v3 artifact unchanged. The observed defects, each repaired here:
+ * the durable session log itself. Old driver builds wrote transcripts the
+ * harness's readers tolerated in their own generation but which the *format v4*
+ * rules reject, so the v3→v4 migration refuses a v3 session and the V4 load
+ * path refuses a v4 session. Both generations carry the same two defect
+ * families, each repaired here.
+ *
+ * Structural defects — driver builds from before the `71ccdea`, `c293e25`,
+ * `5de4b91`, and `1c94078` fixes (all before 2026-09-19) — are what the v3
+ * migration refuses:
  *
  *   1. no advertisement. The driver logged `tool/call` + `tool/result` without
  *      the `assistant/message` whose content carries the matching
@@ -37,27 +41,48 @@
  * After the structural repairs, event `seq` coordinates are renumbered densely
  * from zero and every payload reference to them is remapped.
  *
+ *   6. projection mismatch. An `assistant/message` `tool-call` block must agree
+ *      with its `tool/call` event on `id` AND byte-identical `name` and
+ *      `arguments` (`session-format-v3-to-v4/src/relationships.ts`:
+ *      `tool/call <id> does not match one advertised tool call`). Driver builds
+ *      from before the `005ab3a` fix advertised the engine's raw call (`Bash`,
+ *      `Read`, or a raw `path` argument) while the event carried the projected
+ *      dsh call (`bash`, `read`, `file_path`). The direction is settled: the
+ *      block is rewritten to the event's values and the event is never touched,
+ *      because the projected dsh spelling is what the Web tool rows, the dsh
+ *      tool vocabulary, and any later in-process replay rely on. This family
+ *      changes no event, only block payload bytes, so it never requires `seq`
+ *      renumbering — verified for both generations rather than assumed.
+ *
  * This is a one-off repair tool, not part of the plugin runtime: nothing under
  * `lib/` imports it and it is not published. The pure repair path uses only the
  * Node standard library. Only `--verify` reaches into the sibling
- * `deepseek-harness` checkout, to run that checkout's real v3→v4 migration and
- * v4 relationship validation over the result and the backup; run it as
- * `node --import tsx/esm scripts/repair-v3-tool-calls.mjs --verify <file...>`
+ * `deepseek-harness` checkout, running the generation's own oracle over the
+ * result and the backup: for a v3 artifact the real v3→v4 migration plus v4
+ * relationship validation, for a v4 artifact the V4 relationship validation the
+ * load path runs (`assertReleasedV4Relationships`). Run it as
+ * `node --import tsx/esm scripts/repair-session-logs.mjs --verify <file...>`
  * (the harness path defaults to `../deepseek-harness` next to this repo and can
  * be overridden with `--harness <dir>`).
  *
- *   node scripts/repair-v3-tool-calls.mjs <file...>            repair in place (writes <file>.v3.bak)
- *   node scripts/repair-v3-tool-calls.mjs --check [<file...>]  report only
- *   node scripts/repair-v3-tool-calls.mjs --verify <file...>   repair, then verify with the harness
+ *   node scripts/repair-session-logs.mjs <file...>            repair in place (writes <file>.bak)
+ *   node scripts/repair-session-logs.mjs --check [<file...>]  report only
+ *   node scripts/repair-session-logs.mjs --verify <file...>   repair, then verify with the harness
  *
- * `--check` lists the logs carrying defect 1 — the missing-advertisement scan
- * that the read-only `scan.cjs` performs — with the sibling defect counts on the
- * same line, then a summary including the number of logs carrying only sibling
- * defects. With `--check` and no file arguments it scans the session root
+ * Both generations are accepted: `session.v3.jsonl.zstd` and
+ * `session.v4.jsonl.zstd` (`.jsonl` without the zstd suffix works too). A
+ * backup is written next to the artifact as `<file>.bak`, whatever the
+ * generation.
+ *
+ * `--check` reports, per file, the structural defect counts (family 1) and the
+ * projection-mismatch count (family 6), then a summary broken down by
+ * generation. With `--check` and no file arguments it scans the session root
  * (`$DSH_SESSIONS_ROOT`, else `~/.dsh/sessions`). A repair that changes nothing
  * leaves the file byte-for-byte untouched; every write goes to a temp file in
  * the same directory and is renamed into place, so a failure never leaves a
- * partially written log.
+ * partially written log. A log is only rewritten after the repair itself
+ * succeeds; with `--verify` the harness oracle is run over every repaired file
+ * and a failure is reported (and surfaced as a non-zero exit).
  */
 
 import { randomUUID } from 'node:crypto'
@@ -71,7 +96,7 @@ import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 
 const ZSTD_MAGIC = 0xfd2fb528
 const CHECKSUM_OPTIONS = { params: { [constants.ZSTD_c_checksumFlag]: 1 } }
-const SESSION_LOG_NAME = /^session\.v3\.jsonl(\.zstd)?$/
+const SESSION_LOG_NAME = /^session\.v[34]\.jsonl(\.zstd)?$/
 const SURFACE_TYPES = new Set(['system/message', 'user/message', 'developer/message', 'assistant/message', 'tool/result'])
 const SYSTEM_PROMPT_SOURCE = { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }
 const FALLBACK_ATTRIBUTION = { provider: 'kimi', model: 'kimi-native' }
@@ -591,6 +616,58 @@ function insertSystemHead(events) {
 }
 
 /**
+ * Index every advertised `tool-call` block by its call id. When an id repeats,
+ * the last advertisement wins, matching the V4 lifecycle's single live state.
+ * @param {object[]} events - events to index.
+ * @returns {Map<string, object>} the advertised block objects by call id.
+ */
+function collectAdvertisedBlocks(events) {
+  const blocks = new Map()
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const content = event.data?.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'tool-call' && typeof block.id === 'string') blocks.set(block.id, block)
+    }
+  }
+  return blocks
+}
+
+/**
+ * Rewrite each advertised `tool-call` block whose `name` or `arguments` disagree
+ * with its `tool/call` event, so the block carries the event's projected dsh
+ * spelling. The event is never touched. No event is added, removed, or moved, so
+ * `seq` coordinates stay valid without renumbering.
+ * @param {object[]} events - source events.
+ * @returns {object[]} events with corrected blocks, or the input when none disagree.
+ */
+function repairProjections(events) {
+  const calls = new Map()
+  for (const event of events) if (event.type === 'tool/call') calls.set(event.data.callId, event)
+  if (calls.size === 0) return events
+  let changed = false
+  const output = events.map(event => {
+    if (event.type !== 'assistant/message') return event
+    const content = event.data?.message?.content
+    if (!Array.isArray(content)) return event
+    let touched = false
+    const nextContent = content.map(block => {
+      if (block?.type !== 'tool-call') return block
+      const call = calls.get(block.id)
+      if (call === undefined) return block
+      if (block.name === call.data.name && block.arguments === call.data.arguments) return block
+      touched = true
+      return { ...block, name: call.data.name, arguments: call.data.arguments }
+    })
+    if (!touched) return event
+    changed = true
+    return { ...event, data: { ...event.data, message: { ...event.data.message, content: nextContent } } }
+  })
+  return changed ? output : events
+}
+
+/**
  * Renumber events densely from zero and remap every payload reference to a
  * source event coordinate.
  * @param {object[]} events - events with placeholder `seq` values, in order.
@@ -654,7 +731,10 @@ function stampCloserIds(events) {
 }
 
 /**
- * Repair one decoded log.
+ * Repair one decoded log. Structural repairs may add, drop, or move events and
+ * trigger renumbering; the projection repair only rewrites block payload bytes
+ * and is applied afterwards so it also covers synthetic advertisements (which
+ * already agree, cheaply detected as unchanged).
  * @param {{ headerLine: string, eventLines: string[], trailingNewline: boolean }} log - decoded log.
  * @returns {{ log: object, delta: number, before: number, after: number, changed: boolean }} repaired log and counts.
  */
@@ -666,7 +746,18 @@ function repairLog(log) {
   repaired = settleUnresolved(repaired)
   repaired = insertAdvertisements(repaired)
   repaired = insertSystemHead(repaired)
+  const structural = repaired !== events
+  repaired = repairProjections(repaired)
   if (repaired === events) return { log, delta: 0, before: events.length, after: events.length, changed: false }
+  if (!structural) {
+    return {
+      log: { ...log, eventLines: repaired.map(event => JSON.stringify(event)) },
+      delta: 0,
+      before: events.length,
+      after: events.length,
+      changed: true,
+    }
+  }
   const final = stampCloserIds(renumberAndRemap(repaired))
   return {
     log: { ...log, eventLines: final.map(event => JSON.stringify(event)) },
@@ -678,12 +769,31 @@ function repairLog(log) {
 }
 
 /**
+ * Count the projection-mismatch family in one log: advertised blocks whose
+ * `name` or `arguments` disagree with their `tool/call` event.
+ * @param {object[]} events - decoded events.
+ * @returns {number} mismatching call count.
+ */
+function countProjectionMismatches(events) {
+  const blocks = collectAdvertisedBlocks(events)
+  let mismatches = 0
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue
+    const block = blocks.get(event.data.callId)
+    if (block === undefined) continue
+    if (block.name !== event.data.name || block.arguments !== event.data.arguments) mismatches += 1
+  }
+  return mismatches
+}
+
+/**
  * Count the repairs one artifact needs without writing anything.
  * @param {string} path - artifact path.
- * @returns {{ unadvertised: number, lateAdvertisement: number, duplicateResults: number, unresolved: number, systemHead: boolean }} finding counts.
+ * @returns {{ generation: number, unadvertised: number, lateAdvertisement: number, duplicateResults: number, unresolved: number, systemHead: boolean, projectionMismatch: number }} finding counts.
  */
 function inspectArtifact(path) {
-  const { eventLines } = readArtifact(path)
+  const { headerLine, eventLines } = readArtifact(path)
+  const generation = generationOf(headerLine)
   const events = eventLines.map(line => JSON.parse(line))
   const advertised = new Map()
   const unadvertised = new Map()
@@ -721,7 +831,15 @@ function inspectArtifact(path) {
   const unresolved = started.filter(callId => !settled.has(callId)).length
   let count = 0
   for (const group of unadvertised.values()) count += group.length
-  return { unadvertised: count, lateAdvertisement, duplicateResults, unresolved, systemHead: needsSystemHead(events) }
+  return {
+    generation,
+    unadvertised: count,
+    lateAdvertisement,
+    duplicateResults,
+    unresolved,
+    systemHead: needsSystemHead(events),
+    projectionMismatch: countProjectionMismatches(events),
+  }
 }
 
 /** The set of call ids advertised anywhere in one event's own step. */
@@ -742,6 +860,19 @@ function readArtifact(path) {
   return decodeLog(readFileSync(path))
 }
 
+/**
+ * The format generation named by an artifact's header line.
+ * @param {string} headerLine - the decoded header line.
+ * @returns {number} the header's `version`.
+ */
+function generationOf(headerLine) {
+  const header = JSON.parse(headerLine)
+  if (header?.version !== 3 && header?.version !== 4) {
+    throw new ArtifactError(`unsupported session format version ${JSON.stringify(header?.version)}`)
+  }
+  return header.version
+}
+
 /** Write one artifact atomically: temp file in the same directory, then rename. */
 function writeArtifact(path, log) {
   const temp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`)
@@ -756,13 +887,13 @@ function writeArtifact(path, log) {
 
 /** Back up one artifact next to itself before it is rewritten. */
 function backupArtifact(path) {
-  const backup = `${path}.v3.bak`
+  const backup = `${path}.bak`
   if (existsSync(backup)) throw new Error(`refusing to overwrite existing backup ${backup}`)
   writeFileSync(backup, readFileSync(path))
   return backup
 }
 
-/** Enumerate v3 session artifacts under a root. */
+/** Enumerate v3 and v4 session artifacts under a root. */
 function scanRoot(root) {
   const found = []
   const walk = directory => {
@@ -790,7 +921,7 @@ function repairFile(path) {
 /**
  * Resolve the harness's migration and validation modules for `--verify`.
  * @param {string} harnessDir - the sibling harness checkout root.
- * @returns {Promise<object>} the loaded migration declarations.
+ * @returns {Promise<object>} the loaded migration and relationship-validation declarations.
  */
 async function loadHarness(harnessDir) {
   const base = pathToFileURL(join(harnessDir, 'packages/session/session-format-v3-to-v4/src') + '/')
@@ -800,33 +931,81 @@ async function loadHarness(harnessDir) {
 }
 
 /**
- * Run the harness's real v3→v4 migration plus v4 relationship validation over one file.
+ * Run the generation's own oracle over one file. A v3 artifact goes through the
+ * real v3→v4 migration plus v4 relationship validation; a v4 artifact goes
+ * straight to the V4 relationship validation the load path runs.
  * @param {string} path - artifact path.
- * @param {object} harness - loaded harness migrations.
+ * @param {object} harness - loaded harness declarations.
  * @returns {string} `OK: ...` or `FAIL: ...`.
  */
-function migrateOne(path, harness) {
+function verifyOne(path, harness) {
   try {
     const { headerLine, eventLines } = readArtifact(path)
-    const header = { ...JSON.parse(headerLine) }
-    delete header.type
+    const generation = generationOf(headerLine)
     const events = eventLines.map(line => JSON.parse(line))
-    const migration = harness.createSessionFormatV3ToV4([])
-    const targetHeader = migration.migrateHeader(header)
-    migration.validateTargetHeader(targetHeader)
-    const stage = migration.createStage({
-      sourceHeader: header, targetHeader, sourceInheritedEventCount: 0, sourceKind: 'decoded',
-    })
-    const out = []
-    const context = { emitEvent: event => out.push(event), emitRun: run => { for (const event of run.expand()) out.push(event) } }
-    for (const event of events) stage.transformEvent(event, context)
-    const inherited = stage.finish(context)
-    const artifact = { header: targetHeader, events: out, inheritedEventCount: inherited }
-    harness.assertReleasedV4Relationships(artifact, new Set(out.map(event => event.type)))
-    return `OK: migrated + validated ${out.length} events, inherited ${inherited}`
+    return generation === 4
+      ? verifyV4(headerLine, events, harness)
+      : verifyV3(headerLine, events, harness)
   } catch (error) {
     return `FAIL: ${error?.constructor?.name ?? 'Error'} - ${error?.message ?? String(error)}`
   }
+}
+
+/**
+ * Run the harness's real v3→v4 migration plus v4 relationship validation.
+ * @param {string} headerLine - the v3 header line.
+ * @param {object[]} events - the v3 events.
+ * @param {object} harness - loaded harness declarations.
+ * @returns {string} verdict.
+ */
+function verifyV3(headerLine, events, harness) {
+  const header = { ...JSON.parse(headerLine) }
+  delete header.type
+  const migration = harness.createSessionFormatV3ToV4([])
+  const targetHeader = migration.migrateHeader(header)
+  migration.validateTargetHeader(targetHeader)
+  const stage = migration.createStage({
+    sourceHeader: header, targetHeader, sourceInheritedEventCount: 0, sourceKind: 'decoded',
+  })
+  const out = []
+  const context = { emitEvent: event => out.push(event), emitRun: run => { for (const event of run.expand()) out.push(event) } }
+  for (const event of events) stage.transformEvent(event, context)
+  const inherited = stage.finish(context)
+  const artifact = { header: targetHeader, events: out, inheritedEventCount: inherited }
+  harness.assertReleasedV4Relationships(artifact, new Set(out.map(event => event.type)))
+  return `OK: v3 migrated + validated ${out.length} events, inherited ${inherited}`
+}
+
+/**
+ * Validate a v4 artifact with the same relationship pass the V4 load path runs.
+ * @param {string} headerLine - the v4 header line.
+ * @param {object[]} events - the v4 events.
+ * @param {object} harness - loaded harness declarations.
+ * @returns {string} verdict.
+ */
+function verifyV4(headerLine, events, harness) {
+  const header = JSON.parse(headerLine)
+  const artifact = { header, events, inheritedEventCount: inheritedCountOf(header, events) }
+  harness.assertReleasedV4Relationships(artifact, new Set(events.map(event => event.type)))
+  return `OK: v4 relationship-validated ${events.length} events, inherited ${artifact.inheritedEventCount}`
+}
+
+/**
+ * The inherited-event cut a v4 header implies: the last inherited
+ * `session/end-seed` marker for a seeded session, else zero. Mirrors the v4
+ * physical decoder, so a v4 artifact can be handed to the relationship oracle.
+ * @param {object} header - the v4 logical header.
+ * @param {object[]} events - the v4 events.
+ * @returns {number} inherited event count.
+ */
+function inheritedCountOf(header, events) {
+  if (header.isSeeded !== true) return 0
+  let cut
+  for (const event of events) {
+    if (event.type === 'session/end-seed' && event.data?.inherited === true) cut = event.seq
+  }
+  if (cut === undefined) throw new ArtifactError('seeded v4 artifact lacks an inherited end-seed marker')
+  return cut
 }
 
 // --- command line -----------------------------------------------------------
@@ -857,19 +1036,30 @@ async function main() {
   if (scanned.length === 0) throw new Error('no input files: pass <file...> or use --check to scan the session root')
 
   if (options.mode === 'check') {
+    const stats = new Map()
     let affected = 0
-    let siblings = 0
     for (const path of scanned) {
       const finding = inspectArtifact(path)
-      const sibling = finding.lateAdvertisement + finding.duplicateResults + finding.unresolved + (finding.systemHead ? 1 : 0)
-      if (sibling > 0) siblings += 1
-      if (finding.unadvertised === 0) continue
+      const structural = finding.unadvertised + finding.lateAdvertisement + finding.duplicateResults
+        + finding.unresolved + (finding.systemHead ? 1 : 0)
+      const totals = stats.get(finding.generation) ?? { files: 0, structural: 0, projection: 0 }
+      totals.files += 1
+      stats.set(finding.generation, totals)
+      if (structural === 0 && finding.projectionMismatch === 0) continue
       affected += 1
-      console.log(`${path}  unadvertised: ${finding.unadvertised}  late: ${finding.lateAdvertisement}`
-        + `  duplicate-results: ${finding.duplicateResults}  unresolved: ${finding.unresolved}`
-        + `  system-head: ${finding.systemHead ? 'yes' : 'no'}`)
+      if (structural > 0) totals.structural += 1
+      if (finding.projectionMismatch > 0) totals.projection += 1
+      console.log(`v${finding.generation} ${path}`)
+      console.log(`  family-1 structural: unadvertised ${finding.unadvertised}, late ${finding.lateAdvertisement},`
+        + ` duplicate-results ${finding.duplicateResults}, unresolved ${finding.unresolved},`
+        + ` system-head ${finding.systemHead ? 'yes' : 'no'}`)
+      console.log(`  family-6 projection-mismatch: ${finding.projectionMismatch} tool/call(s)`)
     }
-    console.log(`scanned: ${scanned.length} affected: ${affected} recurring-sibling-defects: ${siblings}`)
+    console.log(`scanned: ${scanned.length} affected: ${affected}`)
+    for (const [generation, totals] of [...stats.entries()].sort((a, b) => a[0] - b[0])) {
+      console.log(`v${generation}: files ${totals.files}, family-1 structural ${totals.structural},`
+        + ` family-6 projection ${totals.projection}`)
+    }
     return
   }
 
@@ -879,33 +1069,36 @@ async function main() {
       harness = await loadHarness(options.harness)
     } catch (error) {
       throw new Error('--verify needs the sibling harness and the tsx loader: run with '
-        + `"node --import tsx/esm scripts/repair-v3-tool-calls.mjs --verify <file...>" (cause: ${error?.message})`)
+        + `"node --import tsx/esm scripts/repair-session-logs.mjs --verify <file...>" (cause: ${error?.message})`)
     }
   }
 
   let changed = 0
   let failed = false
+  let touchedFailed = 0
   for (const path of scanned) {
     const result = repairFile(path)
     if (result.changed) changed += 1
     console.log(`${result.changed ? 'repaired' : 'unchanged'} ${path}  event delta: ${result.delta >= 0 ? '+' : ''}${result.delta} (${result.before} -> ${result.after})`)
-    if (result.changed) console.log(`  backup: ${path}.v3.bak`)
+    if (result.changed) console.log(`  backup: ${path}.bak`)
     if (options.verify) {
-      const repairedVerdict = migrateOne(path, harness)
-      const backupVerdict = migrateOne(`${path}.v3.bak`, harness)
+      const repairedVerdict = verifyOne(path, harness)
       console.log(`  verify repaired: ${repairedVerdict}`)
-      console.log(`  verify backup:   ${backupVerdict}`)
-      if (!repairedVerdict.startsWith('OK')) failed = true
+      if (result.changed) console.log(`  verify backup:   ${verifyOne(`${path}.bak`, harness)}`)
+      if (result.changed && !repairedVerdict.startsWith('OK')) {
+        failed = true
+        touchedFailed += 1
+      }
     }
   }
   console.log(`repaired files: ${changed} of ${scanned.length}`)
   if (failed) {
     process.exitCode = 1
-    throw new Error('a repaired artifact did not pass the harness migration')
+    throw new Error(`${touchedFailed} repaired artifact(s) did not pass their generation oracle`)
   }
 }
 
 main().catch(error => {
-  console.error(`repair-v3-tool-calls: ${error?.message ?? String(error)}`)
+  console.error(`repair-session-logs: ${error?.message ?? String(error)}`)
   process.exitCode = 1
 })

@@ -218,32 +218,40 @@ ls .compat-0*/ && cat vitest.config.compat0*.ts
 
 ---
 
-## 8. 老 V3 会话日志的数据修复（一次性工具）
+## 8. 老 V3 / V4 会话日志的数据修复（一次性工具）
 
-**症状**：在 0.1.7 上打开一条 0.1.5 时期写的会话，报
+**症状**：在 0.1.7 上打开一条老会话，报下面之一：
 
 ```
 Session migration from v3 to v4 refuses the transformed artifact:
 tool/call <id> has no advertised tool lifecycle; source v3 artifact remains unchanged
 ```
 
-（或同族的 `tool/result <id> has no advertised tool lifecycle`、`system/message requires a protected first surface head`、`step/end leaves unresolved tool call`。）
-
-**成因**：托管引擎的会话是由**插件的驱动**写durable日志的。2026-09-19 之前的驱动构建（`71ccdea` / `c293e25` / `5de4b91` / `1c94078` 这几个修复之前）写出的 transcript，**v3 读得下去、v4 的生命周期规则不接受**。v4 的规则在 `packages/session/session-format-v3-to-v4/src/relationships.ts`：一个 `tool/call` 必须**先**被某条 `assistant/message` 的 `tool-call` 内容块广告过（`id` 相同，且 `name`/`arguments` 与 `tool/call` 的数据一致），`tool/result` 同理。当前构建已经按这个顺序写（`src/engine-kimi/agent.ts` 的 `flushSegment` → `flushAssistant`），所以**只有老日志受影响**。
-
-**工具**：`scripts/repair-v3-tool-calls.mjs`（仓库根下）。它不参与运行时、不发布，纯修复路径只用 Node 标准库：
-
-```sh
-node scripts/repair-v3-tool-calls.mjs --check          # 只报告（扫 $DSH_SESSIONS_ROOT 或 ~/.dsh/sessions）
-node scripts/repair-v3-tool-calls.mjs <file...>        # 原地修复（先写 <file>.v3.bak）
-node --import tsx/esm scripts/repair-v3-tool-calls.mjs --verify <file...>   # 修完再用 harness 真迁移验证
+```
+stored session "<id>" is corrupt: stored log is corrupt:
+SessionFormatError: tool/call <id> does not match one advertised tool call
 ```
 
-`--verify` 会调兄弟仓 `deepseek-harness` 里**真实的** v3→v4 迁移 + v4 关系校验跑一遍结果与备份（这是唯一需要 harness checkout 的路径；默认 `../deepseek-harness`，可用 `--harness <dir>` 覆盖）。修不动就落空：不改动时文件字节不变，写入走同目录临时文件 + rename。
+（同族还有 `tool/result <id> has no advertised tool lifecycle`、`system/message requires a protected first surface head`、`step/end leaves unresolved tool call`。）第一条来自 **V3→V4 迁移**（只影响 `session.v3.jsonl.zstd`），第二条来自 **V4 加载路径**（影响 `session.v4.jsonl.zstd`）——两代产物、两条报错路径，工具都覆盖。
 
-它修的是**一整族**当时的驱动缺陷，不止广告缺失：广告迟到（消息排在它自己的 `tool/call` 之后）、`tool/result` 重复写入、结果落在错误的 step（v4 在 `step/end` 清空该 step 的开放调用）、无结果的未完成调用（用 harness 自己的 `@deepseek-ai/dsh-session/repair` 收尾：`TOOL_OUTCOME_UNKNOWN` / `TOOL_NOT_STARTED`）、system 头错位（补一条空 `system/message` 头，与运行时 `src/driver-core/system-head.ts` 同一手法）。结构修完后 `seq` 重排密集、payload 里对 seq 的引用一并重映射。
+**成因**：托管引擎的会话是由**插件的驱动**写 durable 日志的，历史上有两族缺陷：
 
-**仍有一族没修**：广告**存在但 `name`/`arguments` 与调用不一致**（v4 报 `tool/call <id> does not match one advertised tool call`）——修它等于改写"这次调用声称做了什么"，属于另一个判断（很可能只是驱动把引擎原名规范化到 `tool/call`、消息块里留了原名），因此**故意不放进这个工具**。另有极少数 `format v3 inherited cut disagrees with its source marker`。要处理这两类，另开一轮，先确认"改写的那个名字才是对的"。
+- **结构族**（2026-09-19 之前的驱动构建，`71ccdea` / `c293e25` / `5de4b91` / `1c94078` 这几个修复之前）：写出的 transcript **v3 读得下去、v4 的生命周期规则不接受**。v4 的规则在 `packages/session/session-format-v3-to-v4/src/relationships.ts`：一个 `tool/call` 必须**先**被某条 `assistant/message` 的 `tool-call` 内容块广告过（`id` 相同，且 `name`/`arguments` 与 `tool/call` 的数据一致），`tool/result` 同理。当前构建已按这个顺序写（`src/engine-kimi/agent.ts` 的 `flushSegment` → `flushAssistant`）。
+- **投影族**（`005ab3a` 之前的驱动构建）：广告块与 `tool/call` **都在**，但内容不一致——驱动把引擎的**原始**调用名写进广告块（`Bash`、`Read`），而 `tool/call` 事件写的是**投影后的 dsh 拼写**（`bash`、`read`）；`arguments` 也可能不一致（原始 `path` vs 投影 `file_path`）。v4 报 `tool/call <id> does not match one advertised tool call`。**方向是已裁决的**：以 `tool/call` 事件为准，改写广告块——事件里的 dsh 投影拼写才是 Web 工具行、dsh 工具词表和后续 in-process 重放所依赖的，广告块才是**欠投影**的一侧。所以工具**只改块的 `name`/`arguments`，绝不反向、绝不动事件**。
+
+**工具**：`scripts/repair-session-logs.mjs`（仓库根下，旧名 `repair-v3-tool-calls.mjs`）。它不参与运行时、不发布，纯修复路径只用 Node 标准库，接受 `session.v3.jsonl.zstd` **和** `session.v4.jsonl.zstd`：
+
+```sh
+node scripts/repair-session-logs.mjs --check          # 只报告（扫 $DSH_SESSIONS_ROOT 或 ~/.dsh/sessions，按代际分类统计两族）
+node scripts/repair-session-logs.mjs <file...>        # 原地修复（先写 <file>.bak，与代际无关）
+node --import tsx/esm scripts/repair-session-logs.mjs --verify <file...>   # 修完再用 harness 真oracle验证
+```
+
+`--verify` 会调兄弟仓 `deepseek-harness` 里**真实的** oracle 跑一遍结果与备份（这是唯一需要 harness checkout 的路径；默认 `../deepseek-harness`，可用 `--harness <dir>` 覆盖），**按代际选 oracle**：V3 走真实的 v3→v4 迁移 + V4 关系校验，V4 直接走加载路径最后那道 `assertReleasedV4Relationships`。修不动就落空：不改动时文件字节不变，写入走同目录临时文件 + rename；只有**被改动的**文件在 oracle 下失败才会以非零退出（本来就坏、工具没动的文件如实打印 verdict，但不判失败）。
+
+它修的是**两族**缺陷。结构族（1–5）不止广告缺失：广告迟到（消息排在它自己的 `tool/call` 之后）、`tool/result` 重复写入、结果落在错误的 step（v4 在 `step/end` 清空该 step 的开放调用）、无结果的未完成调用（用 harness 自己的 `@deepseek-ai/dsh-session/repair` 收尾：`TOOL_OUTCOME_UNKNOWN` / `TOOL_NOT_STARTED`）、system 头错位（补一条空 `system/message` 头，与运行时 `src/driver-core/system-head.ts` 同一手法）。结构修完后 `seq` 重排密集、payload 里对 seq 的引用一并重映射。投影族（6）只改块 payload 字节，不增删挪事件，因此**不需要** seq 重排——这一点对两代产物都做过实测（投影修复后事件的 `seq` 数组逐位不变、仍密集），而非假设。
+
+**仍有一族没修**：极少数 `format v3 inherited cut disagrees with its source marker`（继承切点与源标记不一致）。它需要判断"哪条 `session/end-seed` 才是真的继承边界"，信息不足以裁决，工具遇到这类文件不会改动，`--verify` 如实报 FAIL。除此之外，工具只处理上面两族；其它形态的日志损坏不在范围内。
 
 ---
 
