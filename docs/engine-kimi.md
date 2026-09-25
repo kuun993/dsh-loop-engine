@@ -209,6 +209,12 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 - **~~审批被拒的 `tool/result` 文本会被 Kimi 的输入回显撑爆~~**：已修（2026-09-18）。`tool_call_update.content` 是**累计快照**而非增量，旧实现逐条追加（`toolText` accumulator），一次被拒的 Bash 调用会留下 6.6KB 的 `{{"command{"command"...` 嵌套垃圾并被喂回模型上下文。现在改为一律**替换**最新快照（见 §5 表与 `mapping.ts:95-113`）。教训：Kimi 的 chunk 类字段（`agent_message_chunk`/`agent_thought_chunk`）是增量，工具卡字段是快照——两类字段不能按同一套假设折叠。
 - **Kimi 的 question / plan_review 桥未被利用**：Kimi 把 `AskUserQuestion` 和 plan_review 也塞进 `session/request_permission`（选项 id 形如 `q0_opt_*`、`plan_*`）。当前实现只按 `kind` 找唯一的 `allow_once`/`reject_once`，多候选一律 `cancelled`（fail-closed、诚实但不作答）。dsh 有 `ctx.userQuestions`（codex 驱动已接，见 `docs/engine-codex.md` §6.4），理论上可把这类请求转过去真答；需要先把 ACP 选项 id 空间映射回问题/选项，属于**新功能**而非修 bug。
 
+- **Kimi 的 ACP 不上报 token 用量（会话统计里少几项的根因）**：`session/prompt` 的响应只有 `{"stopReason":"end_turn"}`，**没有** ACP 规范里那个可选的 `usage`；`session/update` 实测只出现四种——`available_commands_update`、`session_info_update`、`agent_thought_chunk`、`agent_message_chunk`，**没有任何用量更新**，全帧里唯一带 "usage" 字样的只是它把自己 TUI 的 `/usage` 命令列进 `availableCommands`（给人敲的，不是数据）。复测手法与本节上面那条完全相同（`initialize` → `session/new` → `session/prompt` 直连抓帧，2026-09-25，`bin/kimi.exe`）。
+  所以 `flushAssistant()` 不写 `assistant/message.usage` **不是漏读，是线上没有这个数据**。后果：dsh 的会话统计弹窗里「Token 用量」（含缓存命中）与「输出速度（TPS）」都由用量投影算出，Kimi 会话**无源可取**，只剩按墙钟算的三行——模型用时 / 工具调用用时 / TTFT（这三项来自驱动发布的 `assistant-stream` 帧，不依赖用量），composer 底部那排内联读数（tok/s、token 数、缓存命中%）同样不出现。对比：claude-code / codex / pi **都**把引擎的用量映射进 `assistant/message`（`...usage === undefined ? {} : { usage }`），所以那三个引擎有这些读数。
+  **将来 Kimi 若开始发 `PromptResponse.usage`，修法是一处**：在 `acp/types.ts` 补字段声明，再在 `flushAssistant()` 的 `data` 里加 `usage`（照 codex/pi 的 `mapUsage` 写法）。**兜底**：Kimi 自己的 `/usage` 命令已由插件透出（§7.1 的六条之一），敲它可看引擎侧的文本用量。
+
+
+
 ### 代码与注释不一致之处（改动前先核对）
 
 1. **`process.ts` 模块头过时**（process.ts:2-8）：描述的是"`kimi -p --output-format stream-json`、每步一个一次性子进程"，实际实现是常驻 `kimi acp` + JSON-RPC。`KimiSpawnSpec` 的 JSDoc（process.ts:19"one `kimi -p` child"）同样过时。
