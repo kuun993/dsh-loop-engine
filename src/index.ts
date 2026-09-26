@@ -349,6 +349,19 @@ export function apply(ctx: Context, config: Config): void {
   /** Bounded retry window for the roster's settings namespace attach race. */
   const PRESET_DEFAULT_ATTEMPTS = 30
   const PRESET_DEFAULT_RETRY_MS = 100
+  /**
+   * Bounded retry window for the SOURCE preset's registration race.
+   *
+   * The roster service is only half the wait: a preset row is itself a plugin
+   * injected with `agentPresets`, so `standard` exists in the registry only
+   * after that row's own callback has run. This plugin's authoring waits on the
+   * same service, so whoever's callback lands first decides whether the read
+   * finds the definition — a race this plugin used to lose silently (it
+   * retried only while the service itself was absent, then gave up for the
+   * whole boot). The window is the same shape as the others above.
+   */
+  const PRESET_SOURCE_ATTEMPTS = 20
+  const PRESET_SOURCE_RETRY_MS = 100
   /** Bounded retry window for the llm service attach race on route registration. */
   const ROUTE_ATTEMPTS = 30
   const ROUTE_RETRY_MS = 100
@@ -495,13 +508,29 @@ export function apply(ctx: Context, config: Config): void {
       }
       return undefined
     }
-    const settled = authoring ??= ensureEnginePresets(resolveDshHome(), presets).catch((error: unknown) => {
+    const settled = authoring ??= (async (): Promise<boolean> => {
+      let lastError: unknown
+      // Retry the READ, not just the service wait: a preset row registers its
+      // definition from its own `agentPresets` callback, which may land after
+      // this one, and a read that lands in that gap throws "Unknown agent
+      // preset: <source>". Waiting here (instead of giving up) is what makes
+      // the authoring independent of the loader's callback order.
+      for (let attempt = 0; attempt <= PRESET_SOURCE_ATTEMPTS; attempt += 1) {
+        try {
+          return await ensureEnginePresets(resolveDshHome(), presets)
+        } catch (error: unknown) {
+          lastError = error
+          if (attempt < PRESET_SOURCE_ATTEMPTS) {
+            await new Promise<void>((resolve) => { setTimeout(resolve, PRESET_SOURCE_RETRY_MS) })
+          }
+        }
+      }
       // Failures are advisory: the presets stay absent and the roster default
       // keeps pointing at the deployment's own preset, so sessions still run.
-      ctx.logger.error(`loop-engine: engine preset authoring failed: ${String(error)}`)
+      ctx.logger.error(`loop-engine: engine preset authoring failed: ${String(lastError)}`)
       authoring = undefined
       return false
-    })
+    })()
     return { presets, settled }
   }
 

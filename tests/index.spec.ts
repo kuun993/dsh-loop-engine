@@ -691,6 +691,29 @@ describe('apply engine presets', () => {
     await waitForEnginePresets(home)
   })
 
+  it('waits for the source preset to register instead of giving up on the first read', async () => {
+    // The rc.2 regression: the roster service attaches, but the row that
+    // declares `standard` is itself injected with `agentPresets`, so the
+    // definition can appear a moment after this plugin's own callback runs.
+    // One read landing in that gap used to abort the whole boot's authoring.
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, settings } = await boot({ [NS]: { engine: 'kimi' } })
+    registerRosterNamespace(settings!)
+    const roster = fakeRoster(settings)
+    roster.read.mockRejectedValueOnce(new Error(`Unknown agent preset: "${SOURCE_PRESET_ID}"`))
+    ctx.provide('agentPresets', roster)
+    const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    await mountPlugin(ctx, { patchPath: path })
+
+    await waitForEnginePresets(home)
+    expect(roster.read.mock.calls.length).toBeGreaterThan(1)
+    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('engine preset authoring failed')))
+      .toBe(false)
+  })
+
   it('reports an engine preset that cannot be authored and leaves the roster default alone', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
@@ -704,17 +727,22 @@ describe('apply engine presets', () => {
     const mutateSpy = vi.spyOn(settings!, 'mutate')
     await mountPlugin(ctx, { patchPath: path })
 
+    // The window is bounded, so a roster that never answers still surfaces the
+    // failure — once, after the last attempt rather than on every retry.
     await vi.waitFor(() => {
       expect(errorSpy.mock.calls.some(call => String(call[0]).includes('engine preset authoring failed'))).toBe(true)
-    })
+    }, { timeout: 8000 })
+    expect(errorSpy.mock.calls.filter(call => String(call[0]).includes('engine preset authoring failed')))
+      .toHaveLength(1)
     // A later switch re-attempts the authoring — a failed pass is not memoized —
     // and must not point the roster at a preset that is not on disk: pointing
     // there fails every new session loud, so the steered default waits for an
     // authoring that succeeded.
+    const readsAfterFailure = roster.read.mock.calls.length
     live.setEngine('codex')
     await vi.waitFor(() => {
-      expect(roster.read.mock.calls.length).toBeGreaterThan(1)
-    })
+      expect(roster.read.mock.calls.length).toBeGreaterThan(readsAfterFailure)
+    }, { timeout: 8000 })
     expect(mutateSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS)).toEqual([])
     expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
   })
