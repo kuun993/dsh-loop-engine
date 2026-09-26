@@ -328,6 +328,11 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
   - pi：名字本就是 dsh 拼写，只重塑参数——`path→file_path`（保留 `offset`/`limit` 等未知字段），单条 `edits[0]` 的 `{oldText,newText}` 摊平成 `old_string/new_string`；多条 edit 无单条等价物，保留原参数。
 - 归一化后的 `{ name, arguments }` 会**同时**喂给两个写入方：driver 新 append 的 `tool/call` 事件，以及该调用所属 `assistant/message` 里同 `id` 的 `tool-call` block。Session V4 按 `id` 配对这两者并要求 `name` 与 `arguments` **逐字节相同**（`../../deepseek-harness/packages/session/session-format-v3-to-v4/src/relationships.ts` 的 `ToolState`），否则每次加载该日志都抛 `tool/call <id> does not match one advertised tool call`——会话不可加载。因此两侧都取 dsh 拼写：`tool/call` 是 Web 工具行与 dsh 工具词汇的读取面，而 assistant 消息若被回放进 in-process turn，也必须命名一个 dsh 注册表里真实存在的工具（`bash`，不是 `Bash`）。
 - 参数 JSON 解析失败、或不是对象时，名字照常投影、参数原样保留——宁可退化成通用行，也不误渲染。
+- **每个 call 恰好一条 `tool/result`**：Session V4 的待配对表只按 `callId` 建键，第一条 `tool/result` 就把该 call 从表中删除（`relationships.ts` 的 `tool()`，`packages/session/session-format-v3-to-v4/src/relationships.ts:165-179`），第二条对同一 call 的结果会抛 `tool/result <id> has no advertised tool lifecycle`——**一条重复就让整份日志不可加载**。因此每个驱动都必须保证一个 call 只落一次结果——这与「投影一致」（上面的 block/事件逐字节相同）并列，是写入侧的另一条硬不变量。目前四个引擎的实际情况：
+  - **claude**：Claude Agent SDK 把同一 `tool_result` 发两条 `user` 消息（实测相隔 ~57 ms）。驱动在每个 step 内维护 `settledCalls: Set<ToolCallId>`，已落盘的 call 再次到达直接丢弃（`src/engine-claude/agent.ts` 的 `user` 分支；集合在每个 `step()` 开始时清空）。键取 `result.source.callId`——0.1.5 的 tool-result 消息是 `user` 角色、call id 嵌在 block 里而非顶层 `toolCallId`，`source.callId` 是两代都有的那个字段。
+  - **pi**：Pi 会把同一次执行报两遍——先 `tool_execution_end`，再在 `turn_end.toolResults` 里批量重发同一批结果（`turn_end.toolResults` 是前者缺失时的兜底）。驱动在每个 step 内维护 `settledToolCalls: Set<string>`，两条路径共享它，先到者落盘、后到者丢弃（`src/engine-pi/agent.ts`）。
+  - **kimi**：`toolContent.delete(callId)`（结果落盘后立即删除）天然让每个 call 只落一次——重复的 settled update 走 `!this.toolContent.has(callId)` 直接 return，无需额外集合。
+  - **codex**：app-server 协议对每个 item id 只发一次 `item/completed`，驱动尚无重复结果路径，未加守卫。
 - `planTodosOfHostedTool(engine, name, argumentsJson)` 读出计划工具的整表快照，形状对齐 `todo/write` 的 `TodoItem`。目前只有 Claude 的 `TodoWrite` 有明确映射（其 `status` 枚举与 dsh 完全相同）；未知状态与畸形条目被丢弃而不是抛错。
 - 因为插件只是 append 这个事件、从不 import `@deepseek-ai/dsh-tool-todo` 包，`todo/write` 的 `SessionEventMap` 成员在本模块用 `declare module '@deepseek-ai/dsh-session/types'` 镜像了一份；profile 总会装载真实包，两份同形声明合并为同一接口。
 

@@ -583,6 +583,39 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
+  it('writes one tool/result when the SDK redelivers the same result', async () => {
+    // The Claude Agent SDK delivers the same tool result in two `user`
+    // messages ~57 ms apart. Session V4 deletes a call's pending entry on the
+    // first result, so a second one for the same call is refused
+    // (`tool/result <id> has no advertised tool lifecycle`) and the whole log
+    // fails to load — the driver keeps exactly one result per call.
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        assistantToolUse('toolu_dup', 'Read', { file_path: 'a.txt' }),
+        toolResultMessage('toolu_dup', 'contents of a'),
+        toolResultMessage('toolu_dup', 'contents of a'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('dup-result-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read a.txt' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+      expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(toolResultView(events.find(event => event.type === 'tool/result')?.data.message)).toMatchObject({
+        toolCallId: 'toolu_dup',
+        content: [{ type: 'text', text: 'contents of a' }],
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('writes the same projected name and arguments to the message block and the tool/call event', async () => {
     // Session V4 pairs the two by id and refuses a log whose block and event
     // disagree, so the assistant block and the event must both carry dsh's

@@ -567,6 +567,48 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
+  it('writes one tool/result when the same execution is reported twice', async () => {
+    // Pi reports each executed tool twice: once as `tool_execution_end` and
+    // again in the `turn_end.toolResults` batch, which mirrors the same
+    // executions. Session V4 deletes a call's pending entry on the first
+    // result, so a second result for the same call is refused
+    // (`tool/result <id> has no advertised tool lifecycle`) and the whole log
+    // fails to load — the driver keeps exactly one result per call.
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'message_start', message: assistantMessage('listing') },
+        messageDelta({ type: 'toolcall_end', contentIndex: 1, toolCall: { id: 'call-1', name: 'bash', arguments: { command: 'ls' } } }),
+        { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'bash', args: { command: 'ls' } },
+        { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'file.txt' }] }, isError: false },
+        // The same execution restated as another end event, then again in the
+        // turn_end batch: neither repeat may add a second durable result.
+        { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'file.txt' }] }, isError: false },
+        turnEnd(
+          assistantMessage('done'),
+          [{ role: 'toolResult', toolCallId: 'call-1', toolName: 'bash', content: [{ type: 'text', text: 'file.txt' }], isError: false }] as PiToolResult[],
+        ),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('dup-result-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('list it'))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      expect(events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+      expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
+      expect(toolResultView(events.find(event => event.type === 'tool/result')?.data.message)).toMatchObject({
+        toolCallId: 'call-1',
+        content: [{ type: 'text', text: 'file.txt' }],
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('ends the step with no-result when the stream closes without settling', async () => {
     const ctx = await harness()
     try {

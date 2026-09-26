@@ -671,6 +671,18 @@ export class PiAgent implements Agent {
       const thinkingByIndex = new Map<number, string>()
       /** Tool call ids already written to the log (prevents duplicate tool/call). */
       const emittedToolCalls = new Set<string>()
+      /**
+       * Tool call ids already written a `tool/result` this step. Pi reports each
+       * executed tool twice — once as `tool_execution_end` and again in the
+       * `turn_end.toolResults` batch that mirrors the same executions — and
+       * `turn_end.toolResults` is the fallback for the case where no
+       * `tool_execution_end` arrived. Session V4 keys its pending-tool map by
+       * call id alone, so a second result for one call is refused
+       * (`tool/result <id> has no advertised tool lifecycle`) and bricks the
+       * whole log; the contract is exactly one result per call, so whichever
+       * path reports first wins and the repeat is dropped.
+       */
+      const settledToolCalls = new Set<string>()
       /** Tool-call blocks not yet folded into a flushed assistant message. */
       let pendingToolCalls: ContentBlock[] = []
       /**
@@ -877,12 +889,15 @@ export class PiAgent implements Agent {
           case 'tool_execution_end':
             emitToolCall(event.toolCallId, event.toolName, undefined)
             ensureToolCallOwner()
-            this.session.append('tool/result', {
-              turn: phase.turn,
-              step: phase.step,
-              message: mapToolResult({ toolCallId: event.toolCallId, result: event.result, isError: event.isError }),
-            }, { surfaceOp: 'append' })
-            this.stepSettledTools += 1
+            if (!settledToolCalls.has(event.toolCallId)) {
+              settledToolCalls.add(event.toolCallId)
+              this.session.append('tool/result', {
+                turn: phase.turn,
+                step: phase.step,
+                message: mapToolResult({ toolCallId: event.toolCallId, result: event.result, isError: event.isError }),
+              }, { surfaceOp: 'append' })
+              this.stepSettledTools += 1
+            }
             break
           case 'turn_end': {
             if (!assistantFlushed && event.message !== undefined) {
@@ -894,6 +909,10 @@ export class PiAgent implements Agent {
             flushHeld(lastUsage)
             assistantFlushed = true
             for (const toolResult of event.toolResults ?? []) {
+              // A result already written from `tool_execution_end` is the same
+              // execution reported a second time — drop it (see settledToolCalls).
+              if (settledToolCalls.has(toolResult.toolCallId)) continue
+              settledToolCalls.add(toolResult.toolCallId)
               ensureToolCallOwner()
               this.appendToolResult(phase.turn, phase.step, toolResult)
               this.stepSettledTools += 1

@@ -88,7 +88,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 - **忽略**：`agent_start`、`compaction_*`、`auto_retry_*`、`queue_update`、`bash_execution_update`、`extension_ui_request`、`tool_execution_update`、`text_start`/`thinking_start`、`toolcall_start`/`toolcall_delta`、`text_end`/`thinking_end`（`agent.ts:754-762、752-754、764-767、771-773`；`message_start` 是例外——它清空该条 assistant 消息的累积器，`agent.ts:763-769`）。
 - **流式增量 → live 帧 + 消息内嵌 stream**：`text_delta` / `thinking_delta` 首次出现某 contentIndex 时先补一个 `block-start`，再发 `text-delta` / `reasoning-delta`，都交给本次尝试的 `DriverAssistantStream`（`src/driver-core/assistant-stream.ts:32`、`agent.ts:672-694、755-763`）。它把 chunk 压进 compact stream 并发 `agent/assistant-stream` 的 `chunk` 帧，随后由 `flushHeld` 内嵌进 durable `assistant/message` 的 `data.stream`，使重放能精确重建 live partial（`agent.ts:648-667`）。
-- **工具 → `tool/call` / `tool/result`**：`toolcall_end` 与 `tool_execution_start` 都会**登记**调用（不去重就重），用 `emittedToolCalls` 按 callId 去重；登记时先对调用做一次 `normalizeHostedToolCall('pi', …)` 投影（`path→file_path` 等重塑也在这一步），再把**同一投影值**的 tool-call block 推进 `pendingToolCalls`、把调用本身推进 `pendingCallLog`（`agent.ts` 的 `emitToolCall`）——两条链因此逐字节一致，满足 Session V4 按 `id` 配对 block 与事件的不变量。`tool/call` **不在登记时落盘**——要等它所属的 assistant message 落盘之后才发（见下「段内顺序」），落盘用的就是 `pendingCallLog` 里已归一化的值。`tool_execution_end` 先 `ensureToolCallOwner()` 保证 durable surface 里该 result 之前已经有一条携带对应 tool-call block 的 assistant message，再发 `tool/result`（经 `mapToolResult`）；`turn_end.toolResults` 兜底再发一轮。
+- **工具 → `tool/call` / `tool/result`**：`toolcall_end` 与 `tool_execution_start` 都会**登记**调用（不去重就重），用 `emittedToolCalls` 按 callId 去重；登记时先对调用做一次 `normalizeHostedToolCall('pi', …)` 投影（`path→file_path` 等重塑也在这一步），再把**同一投影值**的 tool-call block 推进 `pendingToolCalls`、把调用本身推进 `pendingCallLog`（`agent.ts` 的 `emitToolCall`）——两条链因此逐字节一致，满足 Session V4 按 `id` 配对 block 与事件的不变量。`tool/call` **不在登记时落盘**——要等它所属的 assistant message 落盘之后才发（见下「段内顺序」），落盘用的就是 `pendingCallLog` 里已归一化的值。`tool_execution_end` 先 `ensureToolCallOwner()` 保证 durable surface 里该 result 之前已经有一条携带对应 tool-call block 的 assistant message，再发 `tool/result`（经 `mapToolResult`）；`turn_end.toolResults` 是**兜底**——当某个执行没走 `tool_execution_end` 时补发。但 pi 实际上会把**同一次执行报两遍**（`tool_execution_end` 与 `turn_end.toolResults` 携带同一批结果，`agent-session.js` 的 `turn_end` 事件即 `toolResults` 的来源），而 Session V4 只按 `callId` 建待配对表、第一条结果就删表（`packages/session/session-format-v3-to-v4/src/relationships.ts:165-179`），第二条会让整份日志抛 `tool/result <id> has no advertised tool lifecycle` 而不可加载。所以两条路径共享一个 step 内的 `settledToolCalls: Set<string>`：先落盘者把 call 记进集合，后到者（无论是第二条 `tool_execution_end` 还是 `turn_end.toolResults` 里的同一条）只 `continue`——不 append、不 `stepSettledTools++`。
 - **段内顺序（修过，2026-09-18）**：`tool/call` 曾经在 `toolcall_end` 就落盘，而助手消息要到 `message_end` 才 flush——于是工具行的 seq 小于它自己那条消息，chat 按 `anchorSeq` 排序后文字显示在它描述的动作**之后**。现在把 `tool/call` 推迟到「折叠了它那块 tool-call block 的那次 flush」之后：`contentOf` 折入 `pendingToolCalls` 时同步把 `pendingCallLog` 移进 `callsToLog`，`flushHeld` 写完消息后按序发出这些 `tool/call` 并清空（`ensureToolCallOwner` 走合成消息那条路径时同样搬移）。日志因此恒为 `assistant/message` → `tool/call` → `tool/result`。
 - **一段一步（step 轮转）**：一次 pi prompt 跑完模型的整个 agentic loop，一个 step 里会有多条 assistant 消息（实测一条 turn 里 6 条）。这必须拆开——chat 的助手节点按 `${turn}:${step}` 建键（`packages/client/ui-chat/src/client/conversation-nodes/assistant.ts`），同一 step 的多条消息落到**同一个**节点，而 `settleMessage` 是**整体替换** blocks，N 条只渲染最后一条。所以 `message_start`（assistant）时调 `beginSegment`：本 step 已有 settled 的 `tool/result` 就补 `step/end` + `step/start` 并就地 `phase.step += 1`。判据是「已有 settled 结果」而非「有调用被公告」，这样同一模型轮次里连续公告的多个调用仍留在同一个 step。
 - **收尾 → `assistant/message` + usage**：`message_end`（assistant）用权威消息内容 flush 一条 durable assistant message；`turn_end` 兜底未 flush 的消息；`agent_end` / `agent_settled` 最终 flush（`agent.ts:799-807、801-816、817-828`）。usage 取最新快照（`message_update.usage` / `message.usage`），经 `mapUsage` 折叠到最后一条 message 上（`rpc/mapping.ts:19-26`：缺省补 0，cache 字段为 0 或缺省时不写）。
@@ -186,16 +186,17 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 
 ## 10. 测试覆盖要点
 
-`tests/engine-pi/` 下 8 个 spec、164 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`）：
+`tests/engine-pi/` 下 9 个 spec、178 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`）：
 
 - `rpc/client.spec.ts`（24）：响应 id 关联、严格 LF 分帧（含 `\r` 容忍、多字节跨 chunk）、生命周期/dispose 幂等、send/缓冲、默认 spawn 与 `fromChildProcess`；
 - `rpc/mapping.spec.ts`（13）：`mapUsage` 缺省/零值规则、`mapToolResult` 错误标记与 `(no content)` 兜底、`resultText` 各 payload 形态、`mapToolCall` 序列化；
 - `permission.spec.ts`（5）：`resolveSessionPermission` 四种折叠路径 + `toolsForSandbox`；
 - `skills.spec.ts`（20）：`piAgentDir` 环境覆盖、上下文文件/技能目录列举（含 junction、两种布局）、`get` 的 locator 双分支；
 - `loop.spec.ts`（6）：spawn 投影（`process.execPath` 前缀、stdio、graceMs），以及**构造时 ctx 上没有 `subprocess` 服务就大声失败**（`/needs the dsh subprocess service/`）；
-- `agent.spec.ts`（48）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
+- `agent.spec.ts`（58）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、**同一次执行被重复报告（第二条 `tool_execution_end` 与 `turn_end.toolResults`）时只落一条 `tool/result`**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
 - `controls.spec.ts`（22）：steer/inject、maintenance、turn 中取消、commit veto、空 step 完成、turn 中输入链接、配置校验；
-- `index.spec.ts`（26）：经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 挂载引擎（helper 做路由器在生产里做的事：构造引擎、交出 AgentFactory 槽位、发布三个 systemPrompt 变量）后的 HMR 安全拆除、createAgent 选项、resume。
+- `index.spec.ts`（26）：经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 挂载引擎（helper 做路由器在生产里做的事：构造引擎、交出 AgentFactory 槽位、发布三个 systemPrompt 变量）后的 HMR 安全拆除、createAgent 选项、resume；
+- `model-handover.spec.ts`（4）：`piAgentDir` 按端点哈希生成临时 agent 目录、`models.json` 的内容与权限位、目录清理。
 
 （早先版本还有一份 `probe.spec.ts` 覆盖 `pi --list-models` 探针，随探针一起删除。）
 

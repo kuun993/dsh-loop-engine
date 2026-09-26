@@ -18,7 +18,7 @@ import type {
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   AssistantStreamAccumulator,
   LlmError,
@@ -145,6 +145,20 @@ export class ClaudeCodeAgent implements Agent {
    * opens the next step (see {@link beginSegment}).
    */
   private stepSettledTools = 0
+
+  /**
+   * Calls already given a `tool/result` in the current step. The Claude Agent
+   * SDK delivers the same tool result in two `user` messages ~57 ms apart, and
+   * Session V4 keys its pending-tool map by call id alone — it deletes the call
+   * on the first result, so a second result for the same call is refused
+   * (`tool/result <id> has no advertised tool lifecycle`) and the whole session
+   * log fails to load. The durable contract is exactly one result per call, so
+   * a repeat is dropped rather than appended. Reset per step (see {@link step}),
+   * never on an internal segment rotation: call ids are unique for the life of
+   * the session, so retaining the marks only widens duplicate suppression and
+   * can never hide a legitimate result.
+   */
+  private readonly settledCalls = new Set<ToolCallId>()
 
   /**
    * Whether the current query has rotated into a second step. The query-total
@@ -539,6 +553,7 @@ export class ClaudeCodeAgent implements Agent {
     const { abort: { signal } } = phase
     signal.throwIfAborted()
     this.stepSettledTools = 0
+    this.settledCalls.clear()
     this.rotated = false
 
     const cwd = this.session.header.cwd
@@ -747,6 +762,16 @@ export class ClaudeCodeAgent implements Agent {
           }
           case 'user': {
             for (const result of mapToolResults(message.message)) {
+              // The SDK redelivers each result in a second `user` message; the
+              // contract keeps exactly one `tool/result` per call, so a call
+              // already settled this step is a no-op (see {@link settledCalls}).
+              // `source.callId` is the id both harness generations carry; the
+              // 0.1.5 message nests its call id in a block and has no top-level
+              // `toolCallId`, so reading the source is what makes the guard
+              // generation-neutral.
+              const callId = result.source.callId
+              if (this.settledCalls.has(callId)) continue
+              this.settledCalls.add(callId)
               this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: result }, { surfaceOp: 'append' })
               this.stepSettledTools += 1
             }
