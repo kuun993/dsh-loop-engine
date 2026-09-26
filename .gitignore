@@ -9,4 +9,5 @@ tests/probe/
 .idea/
 .vscode/
 
-.local*.tgz
+.local
+*.tgz
