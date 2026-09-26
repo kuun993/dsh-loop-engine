@@ -24,18 +24,22 @@
 |---|---|---|
 | `0.1.5-rc.1` … `0.1.5-rc.3` | 支持（单代） | `.compat-015/` 兼容作业；0.1.5 上托管引擎的**老会话恢复**仍会撞 `$.prefix`（见 §9） |
 | `0.1.7-rc.1` | 支持 | 本仓 devDependencies；启动日志无插件报错 |
-| `0.1.7-rc.2` | ⚠️ **不完全** | 见下面那段——装得上、跑得通、启动不报错，但**托管引擎的 preset 授权在启动时失败** |
+| `0.1.7-rc.2` | 支持 | 本仓 devDependencies；启动日志无插件报错。曾有「preset 载体写错代际」的缺陷（见下面那段），已修 |
 
-> ⚠️ **`0.1.7-rc.2` 的未决缺陷（2026-09-25 实测）**：启动日志里
-> `~/.dsh/logs/startup-<时间>-<id>.log` 会出现
-> `loop-engine: engine preset authoring failed: RemoteError: Unknown agent preset: standard`，
-> 而把 `~/.dsh/.agent-presets/loop-engine-*` 清掉后重启，**这些 preset 不会被重新写出来**——也就是说
-> 托管引擎（claude-code / codex / pi / kimi）在 rc.2 上**可能创建或恢复不了会话**（症状会是
-> `Unknown agent preset: loop-engine-<engine>`）。抛出点是
-> `packages/preset/agent-preset-registry/src/index.ts` 的 `readDocument()`（注册表当时还没有 `standard`
-> 这条定义），所以**先怀疑授权时机/重试窗口**，而不是解析逻辑。rc.1→rc.2 该包确实改过
-> （去掉 `modeSelectionEnabled`、`remoteExportList` 形状变化），但都不解释"定义还没装载"。
-> **在修掉并复测之前，别把 rc.2 列进"受支持"。**
+> **`0.1.7-rc.2` 上修掉的缺陷：preset 的载体写错了代际（2026-09-25 定位）**。插件把四个托管 preset 写成
+> **目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`——那是 **0.1.5 的
+> 载体**。0.1.7 把 preset 重做成了**组合行**（一行 `@deepseek-ai/dsh-agent-preset`，其 `config.plugins` 就是
+> 组合，见 `packages/preset/agent-preset-registry` 与 `packages/bundle/web-app/presets/*.patch.yml`），
+> **不再读 `.agent-presets`**（0.1.5 的 `dsh-agent-presets` 包整包消失，`grep -rn "\.agent-presets"`
+> 在 0.1.7 的 `packages/ app/` 里只剩一处 skill 文档命中）。后果是 authoring 报告成功、磁盘上文件也在，
+> 而 roster 只答 `["standard","ptc","minimal","cordis"]`——`session/create {agentPreset:'loop-engine-kimi'}`
+> 报 `Unknown agent preset: loop-engine-kimi`，**所有会话退回 harness loop，托管引擎在 0.1.7 上根本选不了**。
+> 这是 §5「编译器看不见的兼容点」的极端典型：类型、构建、单测全绿，因为死掉的是**机制**而不是 API。
+> 修法：preset 载体按代际分流（§4.1 的 `authorHostedPresets`），0.1.7 上把四条 `insert` 行写进插件本来就
+> 在管的 profile patch。另外 `readDocument(agentPreset)` 只暴露"渲染后的文本"，registry 的公开读
+> （`list` / `resolve` / `readDocument` / `compositionInventory`）都拿不到 `config`，所以**不能**用
+> `ctx.agentPresets.register(definition)` 把源 preset 重新注册一遍——只能从文本出发，这也是本插件
+> 一直以来的手法（`stripPresetRows` 是行变换，不解析 YAML）。
 
 > **踩过的坑（导致上一版结论错了一次）**：逐个 diff 的路径必须**真实存在**，否则 `git diff` 不报错、
 > 静默输出空 → 读起来像"没变"。本轮就误写了 `packages/preset/agent-presets/src/index.ts`（该包不存在，
@@ -81,11 +85,12 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 > 位置以**符号名**为准（行号会漂）。要一次性找全，用 §7 的两条 grep。
 
-### 4.1 node 半（受 `LEGACY_HARNESS` 直接控制 —— 共 5 处）
+### 4.1 node 半（受 `LEGACY_HARNESS` 直接控制 —— 共 6 处）
 
 | 位置 | 0.1.5 线 | 0.1.7 线 | 手法 | 回归用例 |
 |---|---|---|---|---|
 | `src/index.ts` 的 `Config` 形状 | `Config` 只有引擎旋钮，选中值在 settings 段 | 多出 `engine` / `showInComposer` 两个 `.volatile()` 字段 | A（`...(LEGACY_HARNESS ? {} : {…})`） | `tests/index.spec.ts` |
+| `src/index.ts` 的 `authorHostedPresets()` | preset 的载体是**目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`（`ensureEnginePresets`） | preset 的载体是 profile patch 里的四条 `insert` 行（`ensureEnginePresetRows`，`name: '@deepseek-ai/dsh-agent-preset'`） | A（`if (LEGACY_HARNESS) return …`） | `tests/index.spec.ts`（两代各断言自己那一半：现代行 + `describe.runIf(!LEGACY_HARNESS)` 块）与 `tests/preset.spec.ts` |
 | `src/index.ts` `apply()` 尾部的 settings 接线 | `ctx.inject(['settings'])` → `settings.installSection(ctx, ns, schema, seed, { setSource, onChange })` | `settings.configure({ auto: false })` + `ctx.on('settings/document-updated')` + `config.engine.get()` | A | `tests/index.spec.ts` |
 | `src/router-loop.ts` 的 `super(ctx, …)` | `maxParallelToolCalls?: number`，基础 loop 自带默认 | 必填 `Volatile<number>`，`super` 自己钉 `{ get: () => DEFAULT_MAX_PARALLEL_TOOL_CALLS }` | A | `tests/router-mount.spec.ts` |
 | `src/driver-core/hosted-engine-runtime.ts` `publish` | `announce(agent)` **同步** + 另发一条 `agent/session-start` | `await announce(agent, source, signal)` —— 它**就是**创建公告 | A | `tests/index.spec.ts`（经 router） |
@@ -137,6 +142,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 |---|---|---|
 | Remote contribution 的 strict codec | `{ schema }` → `{ create: () => schema }` | 会话级 Remote 从没挂上，**对话页引擎选择器永远「读取中」**，而设置页（另一条路径）正常 |
 | agent-presets roster 读法 | `read(id)` → `readDocument(id)` | `Unknown agent preset: loop-engine-claude-code`——预设根本没写出来，恢复会话失败 |
+| **托管 preset 的载体** | 用户 preset 根下的目录（`<home>/.agent-presets/<id>/agent.cordis.yml`）→ **组合行**（`insert` 一行 `@deepseek-ai/dsh-agent-preset`，`config.plugins` 就是组合） | 两代都"写成功"：0.1.7 上 roster 只答内置那四个 preset，`Unknown agent preset: loop-engine-<engine>`，托管引擎**根本选不了**。类型、构建、单测**全绿**——死掉的是机制而不是 API，旧代的位置照旧能跑，所以只有"在 0.1.7 真机上看 roster 答什么"才暴露 |
 | turn-status 行挂点 | `[class$="_turnStatus"]` → `button[data-turn-process]:disabled [class$="_label"]` | 0.1.7 上托管引擎那一行**没有字形/扫光**；`:disabled`（= ui-chat 的"这一轮不可折叠"，只在轮次进行中为真）是**逐行**区分"在跑的这行"与"已经收尾但仍留在屏上的那些行"的唯一手段——只按会话门控时，新一轮开始会把前面所有已结束的行一起重新涂上 |
 | turn-status 行的生命周期 | 0.1.5 行随轮次消失 → 0.1.7 行**结束后仍留在屏上**（折叠摘要「用时 X 秒」） | **对话结束后动画还在** |
 | CSS Modules 命名 | `[hash]_[local]`：真实类名是 `<hash>_label`，**不存在**字面量 `.label` | 选择器匹配不到任何元素（静默失效） |
@@ -162,6 +168,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
    for p in packages/client/ui-chat/src/client/chat/TurnProcessNodeView.tsx \
             packages/client/tsdown.client.ts \
             packages/client/ui-session/src/client/index.ts \
+            packages/bundle/web-app/presets \
             packages/preset/agent-preset-registry/src \
             packages/preset/persona/src \
             packages/settings/settings/src \
@@ -214,7 +221,7 @@ grep -rn "minimumReleaseAgeExclude" -A3 pnpm-workspace.yaml | head
 ls .compat-0*/ && cat vitest.config.compat0*.ts
 ```
 
-> 自检：`1)` 的输出若多出 `src/compat.ts` 与 `tests/helpers/harness-generation.ts` 两处定义，其余应全部落在 §4.1 的 5 个文件里。数量对不上，说明有新的分叉没记进本篇。
+> 自检：`1)` 的输出若多出 `src/compat.ts` 与 `tests/helpers/harness-generation.ts` 两处定义，其余应全部落在 §4.1 的 6 处落点（5 个文件）里。数量对不上，说明有新的分叉没记进本篇。
 
 ---
 

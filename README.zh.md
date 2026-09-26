@@ -46,7 +46,7 @@ dsh plugin --profile web add dsh-loop-engine
 
 ### 托管引擎接管什么
 
-- 它的预设是 `standard` 的副本,去掉了外部引擎会替代掉的 dsh 原生行——dsh 的 `/plan`、`/compact`(与自动压缩)、模型可见的 goal 工具、人类 `/goal` 命令、以及 dsh skill 行(每引擎一份剥离后的 preset,位于 `$DSH_HOME/.agent-presets/loop-engine-<engine>/`)。
+- 它的预设是 `standard` 的副本,去掉了外部引擎会替代掉的 dsh 原生行——dsh 的 `/plan`、`/compact`(与自动压缩)、模型可见的 goal 工具、人类 `/goal` 命令、以及 dsh skill 行(每引擎一份剥离后的 preset)。preset 的**载体随 harness 代际而变**:0.1.5 上是 `$DSH_HOME/.agent-presets/loop-engine-<engine>/` 目录,0.1.7 上是插进 profile patch 的一行 `@deepseek-ai/dsh-agent-preset`(0.1.7 已不再读那个目录)。详见 [docs/architecture.md](docs/architecture.md) §3.5。
 - 引擎自己的斜杠命令与技能目录会注册进**这个 agent 自己的 scope**,因此两个跑不同引擎的会话互相看不到对方的菜单,整份表面随 agent 一起回收。
 - 与引擎无关的 dsh 命令(`/export`、`/feedback`、`/permission`)照常可用、保留在菜单里。
 

@@ -10,9 +10,29 @@
  * advisory prompt text an external engine never assembles, dsh `/compact`
  * cannot shrink a context the engine's child process holds, and dsh skills
  * would sit next to the engine's own catalog. Those rows live inside the
- * agent-preset composition, which a profile patch cannot reach, so the plugin
- * authors a stripped preset per engine into the user preset root
- * (`$DSH_HOME/.agent-presets/<id>`).
+ * agent-preset composition, which a profile patch cannot otherwise reach, so
+ * the plugin authors a stripped copy of that composition per engine.
+ *
+ * WHICH mechanism carries that copy is the running harness generation's
+ * business, and the two share everything but the carrier:
+ *
+ *  - the 0.1.5 line reads presets from a DIRECTORY per preset under the user
+ *    preset root (`$DSH_HOME/.agent-presets/<id>`), so there it is two files
+ *    per engine ({@link ensureEnginePresets});
+ *  - the 0.1.7 line replaced that with composed plugin rows: a preset is one
+ *    `@deepseek-ai/dsh-agent-preset` row whose `config.plugins` list IS the
+ *    composition, declared wherever a composition is declared. Nothing reads
+ *    `.agent-presets` any more, so there it is four `insert` rows in the
+ *    profile patch the plugin already manages
+ *    ({@link ensureEnginePresetRows}). The rows mirror the shipped shape
+ *    (`packages/bundle/web-app/presets/standard.patch.yml` in the harness),
+ *    with this plugin's own id, order, and stripped composition.
+ *
+ * Both mechanisms regenerate from the current `standard` composition on every
+ * boot: text on disk is never authoritative, so a harness upgrade that changes
+ * `standard` flows through. Neither re-parses YAML — the strip is a line
+ * transform that preserves everything it does not drop byte for byte, comments
+ * included, and the row form only re-indents that text.
  *
  * The preset id is ALSO the per-session engine selector: the harness resolves
  * one preset per session and hands its id to the agent factory at create time
@@ -21,18 +41,13 @@
  * makes "session A on Codex, session B on Kimi, concurrently" expressible in a
  * harness that admits exactly one AgentFactory.
  *
- * The presets are REGENERATED from the current `standard` composition on every
- * boot: text on disk is never authoritative, so a harness upgrade that changes
- * `standard` flows through. The file is plain YAML the loader already accepts —
- * the strip is a line transform that preserves everything it does not drop byte
- * for byte, comments included.
- *
  * @module dsh-loop-engine/preset
  */
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import { dropSeedPlaceholder, ensureTrailingNewline } from './patch-manager.ts'
 import type { HostedEngineId } from './agent-preset-ids.ts'
 import { HOSTED_ENGINE_IDS, SOURCE_PRESET_ID, enginePresetId } from './agent-preset-ids.ts'
 
@@ -84,6 +99,142 @@ const MANAGED_HEADER = `# Managed by dsh-loop-engine: the deployment's "${SOURCE
 # from "${SOURCE_PRESET_ID}" on boot — hand edits are overwritten. The preset id
 # names the engine this session runs.
 `
+
+/**
+ * Begin marker of the plugin-managed preset-rows region inside a profile patch
+ * file. The region is what registers the hosted engines' presets on the 0.1.7
+ * line, where a preset is a composed row rather than a directory.
+ *
+ * Deliberately NOT the managed block's marker: the two regions are located and
+ * rewritten independently, so editing one never rewrites the other's bytes.
+ */
+export const PRESET_ROWS_BEGIN = '# -- dsh-loop-engine presets --'
+
+/** End marker of the plugin-managed preset-rows region inside a profile patch file. */
+export const PRESET_ROWS_END = '# -- /dsh-loop-engine presets --'
+
+/**
+ * Roster order of every preset this plugin authors. The shipped presets occupy
+ * 1..4 (`standard` 1, `ptc` 2, `minimal` 3, `cordis` 4), and the roster sorts
+ * by order and then by id, so one constant past that range puts every managed
+ * preset after every shipped one — the deployment's own presets stay at the top
+ * of the picker and the engines' copies trail it, which is also where the
+ * order they are listed in (selection order) is readable.
+ */
+export const ENGINE_PRESET_ORDER = 100
+
+/**
+ * Indentation that puts an entry list directly under `config.plugins:` of an
+ * `insert` row (`- insert:` 0, the row 4, `config:` 6, `plugins:` 8, its
+ * entries 10), matching the harness's own preset patch files.
+ */
+const PLUGIN_LIST_INDENT = ' '.repeat(10)
+
+/**
+ * Render the `plugins:` block of a preset row from a stripped composition:
+ * the `plugins:` key line, then the composition re-indented beneath it. Every
+ * non-empty line shifts by the same amount, so the entry list keeps its
+ * relative shape (nested groups, block scalars) and every comment in the source
+ * survives as a comment at the list's own level. Blank lines stay blank rather
+ * than becoming whitespace-only.
+ * @param composition - the stripped composition text.
+ * @returns the block's lines.
+ */
+function pluginListLines(composition: string): string[] {
+  const text = composition.replace(/\n+$/, '')
+  const lines = text.split('\n')
+  // A composition with no entry opener at column 0 cannot be a YAML list: it
+  // would render `plugins:` with nothing under it, which the preset schema
+  // rejects (and a rejected row fails the whole profile boot, not just this
+  // plugin). `plugins: []` is the honest rendering of "no rows survived".
+  if (!lines.some(line => line.startsWith('- '))) return ['        plugins: []']
+  return ['        plugins:', ...lines.map(line => (line.trim() === '' ? '' : `${PLUGIN_LIST_INDENT}${line}`))]
+}
+
+/**
+ * Render one hosted engine's preset as an `insert` row: a
+ * `@deepseek-ai/dsh-agent-preset` entry declaring the stripped composition,
+ * exactly the shape the harness ships its own presets in. The row's own id is
+ * `preset-<preset id>` (distinct from the preset's `config.id`, which is what a
+ * session records and what the roster lists).
+ * @param engine - the engine the preset selects.
+ * @param composition - the source `standard` composition.
+ * @returns the row's text.
+ */
+function renderEnginePresetRow(engine: HostedEngineId, composition: string): string {
+  const id = enginePresetId(engine)
+  return [
+    '- insert:',
+    `    - id: preset-${id}`,
+    `      name: '@deepseek-ai/dsh-agent-preset'`,
+    '      config:',
+    `        id: ${id}`,
+    `        order: ${ENGINE_PRESET_ORDER}`,
+    ...pluginListLines(stripPresetRows(composition)),
+  ].join('\n')
+}
+
+/**
+ * The managed preset-rows region: one preset row per hosted engine, bracketed
+ * by the markers that make it locatable and rewritable.
+ * @param composition - the source `standard` composition.
+ * @returns the region's text, ending in a newline.
+ */
+export function renderPresetRows(composition: string): string {
+  return [
+    PRESET_ROWS_BEGIN,
+    '# One `@deepseek-ai/dsh-agent-preset` declaration per hosted engine: the',
+    `# deployment's "${SOURCE_PRESET_ID}" preset minus the dsh-native command/skill rows a`,
+    `# hosted loop engine replaces. Regenerated from "${SOURCE_PRESET_ID}" on boot — hand`,
+    '# edits are overwritten. The preset id names the engine a session runs.',
+    ...HOSTED_ENGINE_IDS.map(engine => renderEnginePresetRow(engine, composition)),
+    `${PRESET_ROWS_END}\n`,
+  ].join('\n')
+}
+
+/** Split a patch-file text at the preset-rows span; absent span means it appends. */
+function presetRowsSpan(
+  text: string,
+): { head: string; tail: string; present: boolean; blankBefore: boolean } {
+  const begin = text.indexOf(PRESET_ROWS_BEGIN)
+  if (begin === -1) return { head: text, tail: '', present: false, blankBefore: false }
+  const endAt = text.indexOf(PRESET_ROWS_END, begin)
+  const spanEnd = endAt === -1 ? text.length : endAt + PRESET_ROWS_END.length + 1
+  // One blank line separates the region from what precedes it; preserve that
+  // separation on rewrite so the file never accumulates blank lines.
+  const before = text.slice(0, begin)
+  const blankBefore = before.endsWith('\n\n')
+  return {
+    head: blankBefore ? before.slice(0, -1) : before,
+    tail: text.slice(spanEnd),
+    present: true,
+    blankBefore,
+  }
+}
+
+/**
+ * Produce the next patch-file text carrying the preset-rows region, preserving
+ * every byte outside that span — including the managed block, which is located
+ * by its own markers. Appends the region when absent and replaces it when
+ * present, so an unchanged composition leaves the text byte for byte identical.
+ *
+ * The region is a root-level collection like the managed block, so a leftover
+ * seed `[]` is dropped with it: two root collections in one document is YAML
+ * the harness rejects, and the profile would stop booting.
+ * @param text - current patch-file text.
+ * @param composition - the source `standard` composition.
+ * @returns the rewritten patch-file text.
+ */
+export function applyEnginePresetRows(text: string, composition: string): string {
+  const region = renderPresetRows(composition)
+  const span = presetRowsSpan(text)
+  if (!span.present) {
+    // An empty or absent layer gains the region alone, with no leading filler.
+    if (text === '') return region
+    return dropSeedPlaceholder(`${ensureTrailingNewline(text)}\n${region}`)
+  }
+  return dropSeedPlaceholder(`${span.head}${span.blankBefore ? '\n' : ''}${region}${span.tail}`)
+}
 
 /** Display metadata one managed preset renders, as its `preset.yml` document. */
 function managedMetadata(engine: HostedEngineId): string {
@@ -226,4 +377,44 @@ export async function ensureEnginePresets(dshHome: string, source: PresetComposi
     changed = changed || compositionChanged || metadataChanged
   }
   return changed
+}
+
+/** Read a patch file for a rewrite, or `''` when it is absent or unreadable. */
+async function readTextOrEmpty(path: string): Promise<string> {
+  try {
+    return await readFile(path, 'utf8')
+  } catch {
+    // Absent or unreadable — the region is appended either way, and a target
+    // that cannot be written then fails at the write, where the caller reports
+    // it once. Same posture as `writeIfDifferent`'s read.
+    return ''
+  }
+}
+
+/**
+ * Regenerate every hosted engine's preset as an `insert` row in the profile
+ * patch the plugin already manages, from the roster's `standard` preset.
+ *
+ * This is the 0.1.7 mechanism: a preset there is a composed plugin row, and the
+ * user preset root is not read at all — so a preset written as a directory
+ * would simply never register, leaving the roster without the id every hosted
+ * session records. The rows go in the profile's own `cordis.patch.yml` because
+ * that is the one composition layer the plugin owns: it is already the file the
+ * managed block lives in, it is applied after the bundle's own preset rows, and
+ * a rewrite of it is what the harness's live patch reload picks up.
+ *
+ * Idempotent: an up-to-date region is left byte for byte alone, so a rewrite
+ * that changes nothing does not touch the file's stamp.
+ * @param patchPath - absolute path of the profile's patch file.
+ * @param source - the roster's composition reader.
+ * @returns whether the patch file was written.
+ * @throws when the source preset cannot be read or the write fails.
+ */
+export async function ensureEnginePresetRows(
+  patchPath: string,
+  source: PresetCompositionSource,
+): Promise<boolean> {
+  const composition = await readComposition(source, SOURCE_PRESET_ID)
+  const current = await readTextOrEmpty(patchPath)
+  return writeIfDifferent(patchPath, applyEnginePresetRows(current, composition))
 }

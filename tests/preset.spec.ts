@@ -1,27 +1,35 @@
 /**
  * Unit tests for the hosted-engine preset authoring: the row-stripping line
  * transform, the engine ↔ preset-id mapping that selects an engine per session,
- * and the idempotent per-engine managed-preset writer.
+ * the idempotent per-engine managed-preset writer, and the preset rows the
+ * 0.1.7 harness reads instead.
  * @module tests/preset
  */
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
+  applyEnginePresetRows,
   COMPOSITION_FILE,
+  ENGINE_PRESET_ORDER,
   engineOfPreset,
   enginePresetId,
+  ensureEnginePresetRows,
   ensureEnginePresets,
   HOSTED_PRESET_IDS,
   HOSTED_PRESET_PREFIX,
   METADATA_FILE,
+  PRESET_ROWS_BEGIN,
+  PRESET_ROWS_END,
+  renderPresetRows,
   SOURCE_PRESET_ID,
   STRIPPED_ROWS,
   stripPresetRows,
   USER_PRESET_DIR,
 } from '../src/preset.ts'
+import { applyManagedBlock, MANAGED_BLOCK_BEGIN, MANAGED_BLOCK_END } from '../src/patch-manager.ts'
 import { HOSTED_ENGINE_IDS } from '../src/settings.ts'
 import type { HostedEngineId } from '../src/settings.ts'
 
@@ -344,5 +352,210 @@ describe('ensureEnginePresets', () => {
     await mkdir(join(dir, COMPOSITION_FILE), { recursive: true })
     await writeFile(join(dir, COMPOSITION_FILE, 'occupant'), 'x')
     await expect(ensureEnginePresets(home, sourceOf(STANDARD))).rejects.toThrow()
+  })
+})
+
+/** The preset-row region of a patch text, or `undefined` when it is absent. */
+function rowsRegionOf(text: string): string | undefined {
+  const begin = text.indexOf(PRESET_ROWS_BEGIN)
+  const end = text.indexOf(PRESET_ROWS_END)
+  return begin === -1 || end === -1 ? undefined : text.slice(begin, end)
+}
+
+/** One engine's row inside a patch text, cut at the next row. */
+function rowOf(text: string, engine: HostedEngineId): string {
+  const id = enginePresetId(engine)
+  const start = text.indexOf(`    - id: preset-${id}\n`)
+  const next = text.indexOf('\n- insert:', start)
+  return text.slice(start, next === -1 ? undefined : next)
+}
+
+describe('PRESET_ROWS markers', () => {
+  it('are distinct from the managed block markers, so neither region rewrites the other', () => {
+    expect(PRESET_ROWS_BEGIN).not.toContain('managed block')
+    expect(PRESET_ROWS_END).not.toContain('managed block')
+    expect(PRESET_ROWS_END).toBe(`# -- /dsh-loop-engine presets --`)
+    expect(applyManagedBlock(applyEnginePresetRows('', STANDARD)))
+      .toContain(PRESET_ROWS_BEGIN)
+  })
+})
+
+describe('renderPresetRows', () => {
+  it('renders one insert row per hosted engine, in selection order', () => {
+    const region = renderPresetRows(STANDARD)
+    expect(region.startsWith(`${PRESET_ROWS_BEGIN}\n`)).toBe(true)
+    expect(region.endsWith(`${PRESET_ROWS_END}\n`)).toBe(true)
+    const ids = [...region.matchAll(/^ {8}id: (\S+)$/gm)].map(match => match[1])
+    expect(ids).toEqual([...HOSTED_PRESET_IDS])
+    expect([...region.matchAll(/^    - id: preset-(\S+)$/gm)].map(match => match[1]))
+      .toEqual([...HOSTED_PRESET_IDS])
+  })
+
+  it('declares each preset through the harness’s own row plugin, at one order past the shipped ones', () => {
+    const region = renderPresetRows(STANDARD)
+    expect([...region.matchAll(/^ +name: '@deepseek-ai\/dsh-agent-preset'$/gm)]).toHaveLength(HOSTED_ENGINE_IDS.length)
+    for (const line of region.split('\n')) {
+      if (line.trimStart().startsWith('order:')) expect(line).toBe(`        order: ${ENGINE_PRESET_ORDER}`)
+    }
+    // Past every order the harness ships its own presets at (1 standard, 2 ptc,
+    // 3 minimal, 4 cordis), so the engines' copies sort last.
+    expect(ENGINE_PRESET_ORDER).toBeGreaterThan(4)
+  })
+
+  it('re-indents the stripped composition under `plugins:`, keeping its relative shape', () => {
+    const nested = '- id: delegation\n  name: cordis:group\n  group: true\n  config:\n    - id: tool-subagent-control\n      name: tool\n'
+    const row = rowOf(renderPresetRows(`${STANDARD}${nested}`), 'kimi')
+    // The source's own column 0 becomes the list's first level.
+    expect(row).toMatch(/\n {10}- id: persona\n/)
+    expect(row).toMatch(/\n {12}name: '@deepseek-ai\/dsh-persona'\n/)
+    // A nested group keeps its extra level, and its own children one deeper.
+    expect(row).toMatch(/\n {10}- id: delegation\n/)
+    expect(row).toMatch(/\n {12}group: true\n/)
+    expect(row).toMatch(/\n {14}- id: tool-subagent-control\n/)
+    expect(row).toMatch(/\n {16}name: tool\n/)
+    // Blank lines stay blank rather than becoming whitespace-only.
+    expect(row.slice(row.indexOf('plugins:'))).not.toMatch(/[ \t]+\n/)
+  })
+
+  it('carries the leading comments of the source composition as comments inside the list', () => {
+    const row = rowOf(renderPresetRows(STANDARD), 'codex')
+    expect(row).toMatch(/\n {10}# The standard preset header\.\n/)
+    expect(row).toMatch(/\n {10}# ── shell ──\n/)
+    // The comment above a stripped entry went with it.
+    expect(row).not.toContain('── skills ──')
+  })
+
+  it('renders an empty plugins list when no entry survives the strip', () => {
+    for (const source of ['', '# only a comment\n', '- id: planning\n  name: cordis:group\n']) {
+      const region = renderPresetRows(source)
+      expect([...region.matchAll(/^ {8}plugins: \[\]$/gm)]).toHaveLength(HOSTED_ENGINE_IDS.length)
+      expect(region).not.toMatch(/^ +plugins:\s*$/m)
+    }
+  })
+})
+
+describe('applyEnginePresetRows', () => {
+  it('appends the region to an empty layer without leading filler', () => {
+    expect(applyEnginePresetRows('', STANDARD)).toBe(renderPresetRows(STANDARD))
+  })
+
+  it('appends to a layer that does not end in a newline, separated by one blank line', () => {
+    const text = applyEnginePresetRows('# my patches\n- id: tool-x', STANDARD)
+    expect(text.startsWith(`# my patches\n- id: tool-x\n\n${PRESET_ROWS_BEGIN}\n`)).toBe(true)
+  })
+
+  it('drops a surviving seed `[]` so the file stays one top-level array', () => {
+    // A file whose managed-block write failed is still the fresh-profile seed;
+    // a region appended beside it would be a second root collection, which is
+    // YAML the harness refuses to boot.
+    const text = applyEnginePresetRows('[]\n', STANDARD)
+    expect(text).not.toMatch(/^\[\]$/m)
+    expect(text.trimStart().startsWith(PRESET_ROWS_BEGIN)).toBe(true)
+  })
+
+  it('rewrites the region in place, preserving every byte around it', () => {
+    const before = applyManagedBlock('# my patches\n- id: tool-x\n')
+    const once = applyEnginePresetRows(before, STANDARD)
+    const twice = applyEnginePresetRows(`${once}\n- id: tool-after\n`, STANDARD)
+    expect(twice).toContain('# my patches')
+    expect(twice).toContain('- id: tool-after')
+    // The managed block kept its own markers and bytes untouched.
+    expect(twice).toContain(MANAGED_BLOCK_BEGIN)
+    expect(twice).toContain('- id: agent-loop\n  disabled: true')
+    expect(twice).toContain(MANAGED_BLOCK_END)
+    // One region, not two.
+    expect(twice.split(PRESET_ROWS_BEGIN)).toHaveLength(2)
+  })
+
+  it('is idempotent over its own output', () => {
+    const once = applyEnginePresetRows('', STANDARD)
+    expect(applyEnginePresetRows(once, STANDARD)).toBe(once)
+    // A region whose end marker went missing is rewritten to the end of file.
+    const truncated = once.slice(0, once.indexOf('- insert:'))
+    expect(applyEnginePresetRows(truncated, STANDARD)).toBe(renderPresetRows(STANDARD))
+  })
+
+  it('replaces the region when the source composition changed', () => {
+    const once = applyEnginePresetRows('', STANDARD)
+    const updated = `${STANDARD}- id: tool-web\n  name: '@deepseek-ai/dsh-tool-web'\n`
+    const twice = applyEnginePresetRows(once, updated)
+    expect(twice).not.toBe(once)
+    expect(rowOf(twice, 'pi')).toContain('- id: tool-web')
+  })
+})
+
+describe('ensureEnginePresetRows', () => {
+  /** A profile patch path inside a fresh temp directory. */
+  async function patchPath(): Promise<string> {
+    return join(await tempDir(), 'profiles', 'web', 'cordis.patch.yml')
+  }
+
+  it('writes the region into a patch file that does not exist yet, creating its parent', async () => {
+    const path = await patchPath()
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD))).toBe(true)
+    expect(await readFile(path, 'utf8')).toBe(renderPresetRows(STANDARD))
+  })
+
+  it('appends the region beside the managed block a boot already wrote', async () => {
+    const path = await patchPath()
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, applyManagedBlock('[]\n'))
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD))).toBe(true)
+    const text = await readFile(path, 'utf8')
+    expect(text).toContain(MANAGED_BLOCK_BEGIN)
+    expect(text).toContain(PRESET_ROWS_BEGIN)
+  })
+
+  it('is idempotent: a second run over the same source writes nothing', async () => {
+    const path = await patchPath()
+    await ensureEnginePresetRows(path, sourceOf(STANDARD))
+    const before = (await stat(path)).mtimeMs
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD))).toBe(false)
+    expect((await stat(path)).mtimeMs).toBe(before)
+  })
+
+  it('overwrites hand edits to the region: text on disk is never authoritative', async () => {
+    const path = await patchPath()
+    await ensureEnginePresetRows(path, sourceOf(STANDARD))
+    const handEdited = (await readFile(path, 'utf8')).replace(PRESET_ROWS_END, '# hand edited\n')
+    await writeFile(path, handEdited)
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD))).toBe(true)
+    expect(await readFile(path, 'utf8')).toBe(renderPresetRows(STANDARD))
+    expect(rowsRegionOf(await readFile(path, 'utf8'))).toBeDefined()
+  })
+
+  it('reads the composition through readDocument when the 0.1.7 roster exposes it', async () => {
+    const path = await patchPath()
+    expect(await ensureEnginePresetRows(path, {
+      readDocument: (id) => id === SOURCE_PRESET_ID
+        ? Promise.resolve({ content: '- id: persona\n' })
+        : Promise.reject(new Error(`unknown preset "${id}"`)),
+    })).toBe(true)
+    expect(await readFile(path, 'utf8')).toContain('        plugins:\n          - id: persona\n')
+  })
+
+  it('propagates a source read failure without writing anything', async () => {
+    const path = await patchPath()
+    await expect(ensureEnginePresetRows(path, {
+      read: () => Promise.reject(new Error(`unknown preset "${SOURCE_PRESET_ID}"`)),
+    })).rejects.toThrow('unknown preset')
+    await expect(readFile(path, 'utf8')).rejects.toThrow()
+  })
+
+  it('propagates an unreadable patch file rather than silently rewriting it', async () => {
+    const path = await patchPath()
+    // A directory where the patch file belongs: the read fails (so the region is
+    // built over an empty layer) and the rename over the directory fails.
+    await mkdir(path, { recursive: true })
+    await expect(ensureEnginePresetRows(path, sourceOf(STANDARD))).rejects.toThrow()
+  })
+
+  it('treats a missing patch file as an empty layer rather than failing the read', async () => {
+    const path = await patchPath()
+    // The parent exists but the file does not: the read is ENOENT, which is the
+    // ordinary first-boot case and must not surface as an authoring failure.
+    await mkdir(dirname(path), { recursive: true })
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD))).toBe(true)
+    expect(await readFile(path, 'utf8')).toBe(renderPresetRows(STANDARD))
   })
 })

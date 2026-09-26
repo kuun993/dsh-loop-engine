@@ -90,7 +90,7 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
    插件的 `inject` 本身是空数组（`src/index.ts:89`），可选宿主服务一律 `ctx.get` 惰性读取。
 8. `mountEngineRemote()`（`:638-646`）：构造本插件自己的 Remote（实现 `src/engine-remote.ts`），把**两个**端点一起注册——`loopEngine/engine`（报一条会话**实际**跑哪个引擎，外加它记下但还没采用的引擎）与 `loopEngine/select`（把一条会话换到另一个引擎），并把后备读 `engineOfSession(ctx, sessionId, engineRecords)`（`:641`）与第 6 步的持有者交给它（§4.6）。无条件注册：`TypertRemoteService` 只是注册一个带可见 `typertRemote` 绑定的 Cordis 服务，网关是在**调用时**才反射发现的，所以没有网关的 profile 一点代价都不付，卸载插件即随 fiber 撤下。
 9. `mountProviderRoutes()`：把唯一的共享 provider 标签（`external`）注册为占位路由（见 §3.6）。
-10. `authorEnginePresets()`：把四个寄宿引擎的 preset 写进用户 preset 根（`:649`，实现 `:435-454`，见 §3.5）。启动时就写而不是等第一次选中：插件在整个生命周期里持有槽位，任何会话随时可能要求任何引擎，而 roster 是从**磁盘**读 preset 的（`USER_PRESET_DIR` 的镜像常量在 `src/preset.ts:49-50`）。
+10. `authorEnginePresets()`：把四个寄宿引擎的 preset 授权出去（`:756`，实现 `:532`，见 §3.5）。**载体按代际分流**（`authorHostedPresets`，`:232`）：0.1.5 写用户 preset 根下的目录（`USER_PRESET_DIR` 的镜像常量在 `src/preset.ts`），0.1.7 把四条 `insert` 行写进本次 `apply` 已经在管的那个 profile patch。启动时就写而不是等第一次选中：插件在整个生命周期里持有槽位，任何会话随时可能要求任何引擎，而 roster 是从**当代的载体**里读 preset 的。
 11. 注册清理 effect：置位 `disposed`、清掉各重试 timer、回收 provider 路由（`:650-657`）。
 12. `ctx.inject(['settings'], …)` 关掉自动生成的设置页（`settings.configure({ auto: false }, ctx.fiber)`），并注册 `ctx.on('settings/document-updated', …)` 监听；boot 时以 `legacyEngine ?? config.engine.get()` 做首次 roster steering。引擎与 composer 开关是插件**自己条目**的两个 `.volatile()` Config 字段（见 §4.1、§4.2）。
 
@@ -191,18 +191,44 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 
 preset 现在只承担一件事：**agent-plane 组合**——剥掉 dsh 原生命令/技能行（这些面交给引擎），并且只在**没有插件记录的会话**上决定引擎（§3.3）。运行中的会话换引擎不经过它（§3.7）。
 
-`ensureEnginePresets(dshHome, source)`（`src/preset.ts:200-210`）为四个引擎各写一份 `$DSH_HOME/.agent-presets/loop-engine-<engine>/`（`USER_PRESET_DIR` = `.agent-presets`，`src/preset.ts:50`）：
+**载体按代际分流**，这是本节最要紧的一条事实：`authorHostedPresets(patchPath, presets)`（`src/index.ts:232`）在 `LEGACY_HARNESS` 上走 `ensureEnginePresets`，否则走 `ensureEnginePresetRows`。两代共用同一份"从 `standard` 剥行"的纯行变换，只有落地方式不同：
 
-- `agent.cordis.yml` = roster 的 `standard` 组合（经 `agentPresets.read`，`:201`）剥掉 `STRIPPED_ROWS` 后加 managed header（header 常量 `src/preset.ts:82-86`，组装 `:202`）。剥离的行是 `skill-filesystem`、`tool-skill`、`tool-goal`、`command-goal`、`planning`、`compaction`（`:79`，理由注释 `:63-78`）：这些行在引擎接管下只会重复或误导——dsh `/plan` 是外部引擎从不组装的一段提示文本，dsh `/compact` 缩不了引擎子进程里的上下文，dsh 技能会与引擎自己的目录并排；而 `command-goal` 必须在**这里**剥，因为 dsh 的人类 `/goal` 命令正是由 preset 层那一行注册的（`standard` 自带 `command-goal`，见 §2.1），profile patch 里禁 host 面那一行到不了托管会话。`stripPresetRows` 是纯行变换：按列 0 的 `- id:` 切顶层行，连同该行的节注释一起删，其余字节逐一保留；行首不是 `- id:` 的条目保守保留（`:123-169`）。
-- `preset.yml` 是人读元数据：`Claude Code` / `Codex` / `Pi` / `Kimi Code`（文本 `src/preset.ts:89-92`，名字表 `:95-100`，写盘 `:207`）。这些名字就是 harness 会话头 preset 标签显示的文字（主仓 `packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx:46-62`）。**注意它显示的是 preset，不是引擎**：换过引擎的会话，preset 仍然是创建时那一份（§7）。
-- **每次启动都从当时的 `standard` 重新生成**：磁盘文本永远不是权威，harness 升级改了 `standard` 就自然流过；`writeIfDifferent`（`src/preset.ts:171-183`）让内容一致的目录不动盘，避免 standing mount 的 file-stamp 被骗。
+- **0.1.5 线：目录。** `ensureEnginePresets(dshHome, source)`（`src/preset.ts`）为四个引擎各写一份 `$DSH_HOME/.agent-presets/loop-engine-<engine>/`（`USER_PRESET_DIR` = `.agent-presets`）：
+  - `agent.cordis.yml` = roster 的 `standard` 组合（经 `agentPresets.read`）剥掉 `STRIPPED_ROWS` 后加 managed header。
+  - `preset.yml` 是人读元数据：`Claude Code` / `Codex` / `Pi` / `Kimi Code`。这些名字就是 harness 会话头 preset 标签显示的文字（主仓 `packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx:46-62`）。**注意它显示的是 preset，不是引擎**：换过引擎的会话，preset 仍然是创建时那一份（§7）。
+- **0.1.7 线：组合行。** 0.1.7 把 preset 重做成了**组合行**——一行 `@deepseek-ai/dsh-agent-preset`，它的 `config.plugins` 就是组合（主仓 `packages/preset/agent-preset-registry`、`packages/bundle/web-app/presets/standard.patch.yml`）——**不再读 `.agent-presets`**（0.1.5 的 `dsh-agent-presets` 整包消失）。`ensureEnginePresetRows(patchPath, source)`（`src/preset.ts`）于是把四条 `insert` 行写进插件本来就拥有的那个 profile patch（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`，也就是受管理块所在的那份文件），形状与主仓自带的那四份同构：
 
-**默认引擎 = roster 的默认 preset**。`steerPresetDefault(engine)`（`src/index.ts:496-520`）把 `agent-presets` settings 命名空间的 `default` 字段指向 `enginePresetId(engine)`：
+  ```yaml
+  - insert:
+      - id: preset-loop-engine-<engine>
+        name: '@deepseek-ai/dsh-agent-preset'
+        config:
+          id: loop-engine-<engine>
+          order: 100            # 见下
+          plugins:              # ← stripPresetRows 的产物整体缩进 10 列
+            - id: persona
+              …
+  ```
 
-- 用 settings 层（`settings.mutate(ns, [op])`，`:472`，经 `mutatePresetDefault` `:457-483`）而不是 patch `agent-presets` 行的 config：patch 的 config 覆盖是**整体替换**语义，会顺带抹掉部署方在同行配置的 `roots`；settings 层天然叠在 config 之上、可 unset 还原。
-- roster 的 `defaultId` 是**每次调用现读**（主仓 `packages/preset/agent-presets/src/index.ts:240-242`），所以改默认只影响之后新建的会话，正在跑的会话保持自己 join 的 preset。
-- `in-process` 把被替换的部署默认值 set 回去（`savedPresetDefault`，声明 `src/index.ts:486`，还原 `:498-504`）；只有在当前默认不是本插件的 id 时才记下来（`:517`），所以托管引擎之间互切不会用受管 id 覆盖部署值。
-- **authoring 失败就不导默认值**：preset 不在磁盘上时把默认指过去会让每个新会话 loud 失败，所以 steering 等 `settled` 成功（`:508-511`）。记忆化与重试见 §3.8。
+  - **为什么插进 profile patch，而不是当场 `ctx.agentPresets.register(definition)`**：registry 的公开读（`list` / `resolve` / `readDocument` / `compositionInventory`）只暴露 id/元数据、**渲染后的文本**、或不带 `config` 的清单，而 `definition.plugins` 必须是**条目对象**（`activate()` 先 `entryListProblem(record.config.plugins)` 再 `mountPreset`）——插件拿不到源组合的可再注册形态。行变换是唯一"不解析 YAML、不引依赖"的路。
+  - **为什么是这个文件**：它是插件唯一拥有的 composition 层，本来就由它写（受管理块），并且在主仓自带 preset 行**之后**应用；`insert` 让新条目成为根级行（而不是"改一个不存在的目标"被 warn 跳过）。
+  - **marker 与受管理块分开**：`# -- dsh-loop-engine presets --` … `# -- /dsh-loop-engine presets --`（`PRESET_ROWS_BEGIN` / `PRESET_ROWS_END`，`src/preset.ts`），两段各自定位、各自重写，改一段不动另一段的字节；空白收边与"内容一致就不写盘"沿用受管理块那套。
+  - **`order: 100`**（`ENGINE_PRESET_ORDER`）：主仓自带的四份是 1/2/3/4（`standard`/`ptc`/`minimal`/`cordis`），roster 按 order 再按 id 排序，一个常量压在它们之后最省事——部署自己的 preset 留在选择器顶部，引擎的副本跟在后面。
+  - **空组合兜底**：`plugins:` 底下什么都没有是**非法**的（`plugins` 是 required 数组，而 patch 里一条坏行会拖垮整个 profile 启动，不只是本插件），所以剥完之后一条条目都不剩时渲染成 `plugins: []`。
+  - **生效时机与受管理块一致**：patch 是下一次 composition 才被读到的，所以全新安装的第一次启动之后才可见（harness 的 live patch reload 会接上）。
+
+两代共同的部分：
+
+- 剥离的行是 `skill-filesystem`、`tool-skill`、`tool-goal`、`command-goal`、`planning`、`compaction`（`STRIPPED_ROWS`，`src/preset.ts`）：这些行在引擎接管下只会重复或误导——dsh `/plan` 是外部引擎从不组装的一段提示文本，dsh `/compact` 缩不了引擎子进程里的上下文，dsh 技能会与引擎自己的目录并排；而 `command-goal` 必须在**这里**剥，因为 dsh 的人类 `/goal` 命令正是由 preset 层那一行注册的（`standard` 自带 `command-goal`，见 §2.1），profile patch 里禁 host 面那一行到不了托管会话。`stripPresetRows` 是纯行变换：按列 0 的 `- id:` 切顶层行，连同该行的节注释一起删，其余字节逐一保留；行首不是 `- id:` 的条目保守保留。
+- **每次启动都从当时的 `standard` 重新生成**：磁盘文本永远不是权威，harness 升级改了 `standard` 就自然流过；`writeIfDifferent`（`src/preset.ts`）让内容一致的载体不动盘（目录看 file stamp，行看整份文件字节），避免 standing mount 被 spurious change 骗到。
+- **"写成功"不是正确性证据**：0.1.7 上写目录曾经完全静默地失效——authoring 报告成功、文件也在，而 roster 一个 `loop-engine-*` 都不答，所有会话退回 harness loop。判断依据只能是"运行代际的 roster 答不答得出 `loop-engine-<engine>`"（`docs/compatibility.md` §1/§5）。
+
+**默认引擎 = roster 的默认 preset**。`steerPresetDefault(engine)`（`src/index.ts:616-639`）把 `agent-presets` settings 命名空间的 `default` 字段指向 `enginePresetId(engine)`：
+
+- 用 settings 层（`settings.mutate(ns, [op])`，经 `mutatePresetDefault`）而不是 patch `agent-presets` 行的 config：patch 的 config 覆盖是**整体替换**语义，会顺带抹掉部署方在同行配置的 `roots`；settings 层天然叠在 config 之上、可 unset 还原。
+- roster 的 `defaultId` 是**每次调用现读**（0.1.5 的 roster 在 `packages/preset/agent-presets`，0.1.7 的在 `packages/preset/agent-preset-registry`——后者是 `AgentPresetRegistry.defaultId` 这个 getter），所以改默认只影响之后新建的会话，正在跑的会话保持自己 join 的 preset。
+- `in-process` 把被替换的部署默认值 set 回去（`savedPresetDefault`）；只有在当前默认不是本插件的 id 时才记下来，所以托管引擎之间互切不会用受管 id 覆盖部署值。
+- **authoring 失败就不导默认值**：preset 不在载体上时把默认指过去会让每个新会话 loud 失败，所以 steering 等 `settled` 成功。记忆化与重试见 §3.8。
 
 ### 3.6 provider 路由占位：一条共享的 external 标签
 
@@ -305,13 +331,13 @@ preset 现在只承担一件事：**agent-plane 组合**——剥掉 dsh 原生�
 
 挂载期有几条路径都会碰到"对端还没就绪"的时序问题，处理方式统一为**结构性探测优先 + 有界重试 + 幂等**：
 
-- **preset authoring 是记忆化的**：`authoring ??= ensureEnginePresets(...)`（`src/index.ts:438`，声明 `:457`）。两条路径都要 preset——启动时的 authoring 与 steering 路径（`:513`）——让它们各自走一遍同样的 8 个文件会竞争写入：Windows 上落败的 `rename` 报 EPERM，部署默认值就永远没被 steer（回归测试 `tests/index.spec.ts:610-638`，注释 `:634-636`）。失败**不**被当成已完成的记忆值：catch 里把 `authoring` 置回 `undefined` 并记 error（`src/index.ts:438-444`），所以下一次切换会重试 authoring（`tests/index.spec.ts:656-685`）。
+- **preset authoring 是记忆化的**：`authoring ??= authorHostedPresets(...)`。两条路径都要 preset——启动时的 authoring 与 steering 路径——让它们各自走一遍同样的载体会竞争写入：Windows 上落败的 `rename` 报 EPERM，部署默认值就永远没被 steer（回归测试 `tests/index.spec.ts` 的"does not author the presets again…"，两代各数自己那份载体上的写）。失败**不**被当成已完成的记忆值：catch 里把 `authoring` 置回 `undefined` 并记 error（`src/index.ts` 的 `authorEnginePresets`），所以下一次切换会重试 authoring。
 - **roster settings namespace 的 attach 竞争**：settings provider 能枚举 namespace 时，先 `describe()` 判断 roster 的 `agent-presets` 段是否已注册（主仓 `packages/settings/settings/src/index.ts:505`），不在就只调度重试而**根本不尝试写入**；provider 没有 `describe` 才退回"写入 + 匹配 `not registered` 文案"的老路径；其他错误一律 loud 一次、不重试（`src/index.ts:457-483`）。窗口是 30 × 100ms（常量 `:264-266`，`PRESET_DEFAULT_ATTEMPTS` / `PRESET_DEFAULT_RETRY_MS`）。
 - **roster 服务本身的 attach 竞争**：`ctx.get('agentPresets')` 为 undefined 时同样 30 × 100ms 重试（`src/index.ts:431-437`）。
 - **llm 服务的 attach 竞争**：`ROUTE_ATTEMPTS` / `ROUTE_RETRY_MS` = 30 × 100ms（`:293-294`、`:366-370`）。web profile 里 llm 更靠前，但 fiber 启动顺序不是契约。
 - **基础 loop 占着 `agentLoop` 名字**——唯一一条等的不是服务、而是**服务名释放**的路径：受管理块要到下一次 composition 才生效（§3.1 第 3、7 步），所以全新安装的第一次启动必须先等 harness 的 live patch reload 摘掉基础行。窗口是 40 × 50ms（常量 `:299-300`，`ROUTER_ATTEMPTS` / `ROUTER_RETRY_MS`），判定用结构性的 `ctx.get('agentLoop') !== undefined` 而不是匹配报错文案，并且**每次重试都先 dispose 上一次的 fiber 再 `mountRouter()`**（`:604-608`）——失败那次的构造已经占住了名字、挂上了自己的 effects，同一个 fiber 重试只会一直撞自己。回归测试在 `tests/router-mount.spec.ts:196` 起：窗口内释放后成功挂载、永不释放则 loud 放弃、卸载中途停止重试、非冲突错误不重试。
 - **重试 timer 必须能被 dispose 挡掉**：全部经 `retryLater` 挂载，它在触发前检查 `disposed`（`:326-327`），清理 effect 置位并清掉各待决 handle（`:650-657`）。两者都需要：清理只能清**已挂上**的 timer，而从异步续体（如一条 mutation 的 rejection）里**新挂**的 timer 只能靠 `disposed` 挡掉（回归测试 `tests/index.spec.ts:1082` 起）。
-- **幂等的具体表现**：patch 文件已含当前块且无 legacy 块时 `syncManagedBlock` 报告"未写"（`src/index.ts:199-201`）；preset 目录内容一致时不动盘（`src/preset.ts:171-183`）；重复进入 `mountProviderRoutes` 由 registry 的重复注册错误兜住。
+- **幂等的具体表现**：patch 文件已含当前块且无 legacy 块时 `syncManagedBlock` 报告"未写"（`src/index.ts`）；preset 载体内容一致时不动盘（0.1.5 的目录看 file stamp，0.1.7 的 preset-rows 段看整份文件字节，`src/preset.ts` 的 `writeIfDifferent`）；重复进入 `mountProviderRoutes` 由 registry 的重复注册错误兜住。
 
 ### 3.9 插件自己的记录：`$DSH_HOME/.loop-engine/engines.json`
 
@@ -484,7 +510,7 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 - **同步写盘不可改为异步**（§2.5）：`onChange` 无 await，提交即落盘是重启正确性的前提。同一个 `writeFileAtomicSync` 也服务侧车记录（§3.9），所以改它的 durability 语义会同时影响两处。
 - **`hasManagedBlock` 的子串匹配是刻意的、也脆弱**：`includes('# -- dsh-loop-engine managed block')`（`src/patch-manager.ts:87`）意味着用户手写一行同前缀注释也会被当成 managed span 吃掉；无 end 标记时该 span 一直延伸到文件末尾。迁移路径也依赖这个前缀：`managedSpan` 用 `LEGACY_MANAGED_BLOCK_BEGIN.length` 跳过首个标记行（`:112`），所以"带引擎名的新式 begin 标记"即使存在也只会被当成长一行的 begin。
 - **空行记账是功能不是洁癖**：`managedSpan` 的 `blankBefore` 与替换时的折叠逻辑保证往返 byte-for-byte（`tests/patch-manager.spec.ts`），改这里先跑那个 spec。
-- **hosted preset 是托管产物**：`$DSH_HOME/.agent-presets/loop-engine-<engine>/` 每次启动从当时的 `standard` 重新生成，手改会被覆盖。`stripPresetRows` 只认列 0 的 `- id:` 行结构，主仓 preset 文件若改了行结构会保守地保留该行而不是出错（`src/preset.ts:123-169`）。
+- **hosted preset 是托管产物**：载体每次启动从当时的 `standard` 重新生成，手改会被覆盖——0.1.5 上是 `$DSH_HOME/.agent-presets/loop-engine-<engine>/`，0.1.7 上是 profile patch 里由 `# -- dsh-loop-engine presets --` 标记的那段（§3.5）。`stripPresetRows` 只认列 0 的 `- id:` 行结构，主仓 preset 文件若改了行结构会保守地保留该行而不是出错（`src/preset.ts`）。
 - **默认 preset 被本插件占用**：插件在托管引擎为默认期间持有 `agent-presets.default`（§3.5）。用户在设置页另选的默认 preset 会在切回 `in-process` 时被还原值覆盖——这正是"还原部署默认值"的语义，不是丢失。
 - **浏览器半不再读 `projectionValues.agentPreset`**：会话头 chip 与 composer 都走插件自己的 Remote（§4.3、§4.6），因为那个投影 hint 是缓存形状的偏值，在换过引擎的会话上会停在创建时的 preset——真实事故是"实际跑 pi、chip 显示 Claude Code"。harness 自己的 preset 标签（主仓 `packages/client/ui-agent-preset`）仍读它、仍会滞后，本插件改不了主仓，所以文档（`docs/per-session-engine.md` §2.2）明确说明这个差别。
 - **turn-status 行是 document 级属性，只能由在屏会话带焦点守卫地驱动**（§4.3）：那行的配色/字形由 `<html data-loop-engine>` 驱动（`src/client/turn-status.ts:275` 的样式表；写属性的是 `:333` 的 `reflectTurnStatusEngine`，配合 `:357` 的 `focusTurnStatusSession` 与 `:373` 的 `blurTurnStatusSession`），并且**还要这一轮还在跑**（`<html data-loop-engine-running>`，`:94`、`:408` 写它）——0.1.7 那行收尾后仍留在屏上，只按引擎门控会把字形与扫光留在一条结束的轮次上。**属性不再由缓存写**：`SessionEngineCache.publish`（`src/client/session-engine.ts:704-706`）只通知 watcher，因为属性是 document 级的、写者却不止一个（chip 与 composer 给每个渲染过的会话登记 watcher，切换会话时旧会话迟到的取值照样 publish），"谁最后写谁就是当前会话"因此会把不在屏会话的引擎画到当前会话那一行上（实测：屏上跑 pi、那一行画出 Kimi 的月亮）。驱动者是 chip 与 composer 共用的 hook（`src/client/use-session-engine.ts:79`）：声明焦点 → 按同一个会话 id 连同**这一轮是否在跑**（`session.running`，由两个槽顶层的 `useSession` 读出）一起反射 → 卸载时撤下焦点，**非焦点会话的反射一律无操作**，`legacy` / `unset` / 宿主还没答出来 / 换引擎时缓存被作废这四种反射 `undefined`（删属性、回 harness 原样），绝不猜。它**不是**会话级挂点（样式表要属性选择器，而那一行本身不是 slot）；属性不在卸载时清除——同一会话的另一个界面还在用，残留属性在没有这一行的页面上无害。还有一条 DOM 层的坑：只能写 camelCase 的 `dataset.loopEngine`，写 `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError`（`-[a-z]` 不是合法属性名），那会把整条反射路径带塌——`src/client/turn-status.ts:388-392` 的注释与 `tests/session-engine-cache.spec.ts` 的假 `document` 都记着这条。
@@ -511,13 +537,14 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 0.1.5 线的 `dsh-settings` 导出具名 `SettingsProvider` 类；0.1.7 线删掉了它，换成 `SettingsForms` + 每条目 `.volatile()` Config 字段。探测解析到**运行 profile 实际提供的那份** `@deepseek-ai/dsh-settings`。**它只在 node 半使用**：浏览器 bundle 不得引入宿主包（§4.1），所以 `src/client/*` 从不 import 它，客户端另用"两个 inject 回调各自注册"来分流（§8.4）。
 
-用到它的模块（共 5 处，`grep -rn "LEGACY_HARNESS" src/` 应只剩这 5 个加 `compat.ts` 自己）：`src/index.ts`（Config 形态与 settings 接线）、`src/router-loop.ts`（`super` 的 Config）、`src/driver-core/hosted-engine-runtime.ts`（创建公告）、`src/driver-core/system-head.ts`（0.1.5 不补 system 头）、`src/settings.ts`（`.volatile()` 防御）。完整清单见 [compatibility.md](compatibility.md) §4。
+用到它的模块（共 6 处，`grep -rn "LEGACY_HARNESS" src/` 应只剩这 6 个加 `compat.ts` 自己）：`src/index.ts`（Config 形态、settings 接线、preset 载体）、`src/router-loop.ts`（`super` 的 Config）、`src/driver-core/hosted-engine-runtime.ts`（创建公告）、`src/driver-core/system-head.ts`（0.1.5 不补 system 头）、`src/settings.ts`（`.volatile()` 防御）。完整清单见 [compatibility.md](compatibility.md) §4。
 
 ### 8.2 逐接缝的分叉
 
 | 接缝 | 0.1.5 线 | 0.1.7 线 |
 |---|---|---|
 | settings 宿主 | `ctx.settings.installSection(ctx, ns, schema, entry, { setSource, onChange })`（`SettingsProvider`） | `settings.configure({ auto: false })` + `ctx.on('settings/document-updated')` + `config.engine.get()` |
+| **托管 preset 的载体**（`authorHostedPresets`） | 用户 preset 根下的**目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`（`ensureEnginePresets`） | profile patch 里的**四条 `insert` 行**：一行 `@deepseek-ai/dsh-agent-preset`，`config.plugins` 就是剥过的组合（`ensureEnginePresetRows`）；0.1.7 不再读 `.agent-presets` |
 | settings 命名空间 | `'agent-loop-engine'`（`LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL`） | `'loop-engine'`（插件自己的 profile 条目 id） |
 | 条目的活字段 | 无：`Config` 只有引擎旋钮，选中值是 settings 段 | `engine` / `showInComposer` 两个 `.volatile()` 字段 |
 | 客户端 settings 服务 | `ctx.settingsScope.bind({ namespace, decode })` | `ctx.configForms.get('loop-engine')` |

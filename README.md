@@ -46,7 +46,7 @@ dsh-loop-engine is versioned **in lockstep with the harness it targets**: `<harn
 
 ### What a hosted engine takes over
 
-- Its preset is a copy of `standard` minus the dsh-native rows an external engine replaces — dsh's `/plan`, `/compact` (and auto-compaction), the model-facing goal tool, the human `/goal` command, and the dsh skill rows (one stripped preset per engine, under `$DSH_HOME/.agent-presets/loop-engine-<engine>/`).
+- Its preset is a copy of `standard` minus the dsh-native rows an external engine replaces — dsh's `/plan`, `/compact` (and auto-compaction), the model-facing goal tool, the human `/goal` command, and the dsh skill rows (one stripped preset per engine). The preset is a harness-generation-dependent artifact: a directory under `$DSH_HOME/.agent-presets/loop-engine-<engine>/` on the 0.1.5 line, and an `@deepseek-ai/dsh-agent-preset` row inserted into the profile patch on the 0.1.7 line, which no longer reads that directory. See [docs/architecture.md](docs/architecture.md) §3.5.
 - The engine's own slash commands and skill catalog are registered into **that agent's own scope**, so two sessions on different engines never see each other's menus, and the whole surface is released with the agent.
 - Engine-agnostic dsh commands (`/export`, `/feedback`, `/permission`) keep working and stay.
 

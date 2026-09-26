@@ -52,9 +52,13 @@ import { LEGACY_HARNESS } from './helpers/harness-generation.ts'
 import {
   COMPOSITION_FILE,
   enginePresetId,
+  ensureEnginePresetRows,
   HOSTED_PRESET_IDS,
   METADATA_FILE,
+  PRESET_ROWS_BEGIN,
+  PRESET_ROWS_END,
   SOURCE_PRESET_ID,
+  STRIPPED_ROWS,
   USER_PRESET_DIR,
 } from '../src/preset.ts'
 
@@ -499,7 +503,7 @@ describe('apply managed block', () => {
     // The engine the deployment was pinned to survives the upgrade as the
     // default for new sessions: the roster's default is steered to its preset.
     // The steering waits on the boot-time authoring, so read the files first.
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
     await vi.waitFor(() => {
       expect(rosterDefault(settings!)).toBe(enginePresetId('pi'))
     }, { timeout: 8000 })
@@ -547,7 +551,7 @@ describe('apply managed block', () => {
   })
 })
 
-/** Minimal standard-preset composition fixture carrying one stripped row. */
+/** Minimal standard-preset composition fixture carrying stripped rows and a nested group. */
 const PRESET_FIXTURE = [
   '# header',
   '',
@@ -561,6 +565,22 @@ const PRESET_FIXTURE = [
   '',
   '- id: tool-bash',
   `  name: '@deepseek-ai/dsh-tool-bash'`,
+  '',
+  '- id: delegation',
+  '  name: cordis:group',
+  '  group: true',
+  '  config:',
+  '    - id: tool-subagent-control',
+  `      name: '@deepseek-ai/dsh-tool-subagent-control'`,
+  '',
+  '# plan mode',
+  '',
+  '- id: planning',
+  '  name: cordis:group',
+  '  group: true',
+  '  config:',
+  '    - id: plan-mode',
+  `      name: '@deepseek-ai/dsh-plan-mode'`,
   '',
 ].join('\n')
 
@@ -587,26 +607,58 @@ function registerRosterNamespace(settings: FakeSettings): FakeSection {
   return settings.register(AGENT_PRESETS_NS, { value: { default: SOURCE_PRESET_ID } })
 }
 
-/** One managed preset's directory under a stubbed DSH_HOME. */
+/** One managed preset's directory under a stubbed DSH_HOME (the 0.1.5 mechanism). */
 function presetDir(home: string, preset: string): string {
   return join(home, USER_PRESET_DIR, preset)
 }
 
 /**
- * Wait for the boot-time authoring to land on disk.
+ * Wait for the boot-time authoring to land wherever the running generation puts
+ * it: the four preset directories under the user preset root on the 0.1.5 line,
+ * the four `insert` rows in the profile patch on the 0.1.7 line (which stopped
+ * reading that root).
  *
- * `apply` authors the presets when it mounts, and a LATER default-engine switch
- * shares that same memoized pass instead of authoring again, so this only has to
- * wait the boot-time run out before a test reads the files off disk.
+ * `apply` authors when it mounts, and a LATER default-engine switch shares that
+ * same memoized pass instead of authoring again, so this only has to wait the
+ * boot-time run out before a test reads the artifact back.
+ * @param home - the stubbed `DSH_HOME`.
+ * @param patchPath - the profile patch file the 0.1.7 mechanism writes into.
  */
-async function waitForEnginePresets(home: string): Promise<void> {
+async function waitForEnginePresets(home: string, patchPath: string): Promise<void> {
   await vi.waitFor(async () => {
+    if (!LEGACY_HARNESS) {
+      const text = await readFile(patchPath, 'utf8')
+      expect(text).toContain(PRESET_ROWS_BEGIN)
+      for (const preset of HOSTED_PRESET_IDS) expect(text).toContain(`        id: ${preset}\n`)
+      return
+    }
     for (const preset of HOSTED_PRESET_IDS) {
       expect(await readFile(join(presetDir(home, preset), COMPOSITION_FILE), 'utf8'))
         .toContain('Managed by dsh-loop-engine')
       expect(await readFile(join(presetDir(home, preset), METADATA_FILE), 'utf8')).toContain('name: ')
     }
   })
+}
+
+/**
+ * The four preset rows of one profile patch, keyed by the preset id each
+ * declares, read straight out of the text (the writer is a line transform and
+ * this suite asserts its text, not a parsed document).
+ * @param text - the patch-file text.
+ * @returns each managed preset's row text, or an empty map when the region is absent.
+ */
+function presetRowsOf(text: string): Map<string, string> {
+  const rows = new Map<string, string>()
+  const begin = text.indexOf(PRESET_ROWS_BEGIN)
+  const end = text.indexOf(PRESET_ROWS_END)
+  if (begin === -1 || end === -1) return rows
+  const region = text.slice(begin, end).split('\n- insert:')
+  for (const [index, chunk] of region.entries()) {
+    if (index === 0) continue
+    const id = /^ {8}id: (\S+)$/m.exec(chunk)?.[1]
+    if (id !== undefined) rows.set(id, chunk)
+  }
+  return rows
 }
 
 describe('apply engine presets', () => {
@@ -620,15 +672,30 @@ describe('apply engine presets', () => {
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
 
-    await waitForEnginePresets(home)
-    for (const preset of HOSTED_PRESET_IDS) {
-      const composition = await readFile(join(presetDir(home, preset), COMPOSITION_FILE), 'utf8')
-      expect(composition).toContain('Managed by dsh-loop-engine')
-      expect(composition).not.toContain('skill-filesystem')
-      expect(composition).toContain('- id: tool-bash')
+    await waitForEnginePresets(home, path)
+    // Each engine's copy carries the stripped source composition, on whichever
+    // mechanism the running generation reads.
+    if (LEGACY_HARNESS) {
+      for (const preset of HOSTED_PRESET_IDS) {
+        const composition = await readFile(join(presetDir(home, preset), COMPOSITION_FILE), 'utf8')
+        expect(composition).toContain('Managed by dsh-loop-engine')
+        expect(composition).not.toContain('skill-filesystem')
+        expect(composition).toContain('- id: tool-bash')
+      }
+      expect(await readFile(join(presetDir(home, enginePresetId('kimi')), METADATA_FILE), 'utf8'))
+        .toContain('name: Kimi Code')
+      // The 0.1.5 line has no `dsh-agent-preset` row plugin, so a preset row
+      // there would be a row the loader cannot load — the mechanism is chosen,
+      // never both.
+      expect(await readFile(path, 'utf8')).not.toContain(PRESET_ROWS_BEGIN)
+    } else {
+      const rows = presetRowsOf(await readFile(path, 'utf8'))
+      expect([...rows.keys()].sort()).toEqual([...HOSTED_PRESET_IDS].sort())
+      for (const preset of [...rows.values()]) {
+        expect(preset).not.toContain('skill-filesystem')
+        expect(preset).toContain('- id: tool-bash')
+      }
     }
-    expect(await readFile(join(presetDir(home, enginePresetId('kimi')), METADATA_FILE), 'utf8'))
-      .toContain('name: Kimi Code')
 
     // The engine the plugin's own live field names is the default NEW sessions
     // open on, so committing a new engine steers the roster's default.
@@ -655,24 +722,29 @@ describe('apply engine presets', () => {
     ctx.provide('agentPresets', fakeRoster(settings))
     // The module-level write mock keeps every test's calls, so count from here.
     const start = mockedWriteFile.mock.calls.length
-    /** Preset-file writes this test has issued so far. */
+    // The authoring target is the whole difference between the generations:
+    // eight files under the user preset root on 0.1.5, one region of the profile
+    // patch on 0.1.7. Either way the boot-time pass writes it exactly once.
+    const authored = LEGACY_HARNESS ? USER_PRESET_DIR : path
+    /** Authoring writes this test has issued so far. */
     const presetWrites = (): number =>
-      mockedWriteFile.mock.calls.slice(start).filter(([file]) => String(file).includes(USER_PRESET_DIR)).length
+      mockedWriteFile.mock.calls.slice(start).filter(([file]) => String(file).includes(authored)).length
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
-    // The boot-time pass wrote one composition and one metadata file per engine.
-    const authored = presetWrites()
-    expect(authored).toBe(HOSTED_PRESET_IDS.length * 2)
+    // The boot-time pass wrote one composition and one metadata file per engine,
+    // or the one patch region.
+    const writes = presetWrites()
+    expect(writes).toBe(LEGACY_HARNESS ? HOSTED_PRESET_IDS.length * 2 : 1)
 
     live.setEngine('kimi')
     await vi.waitFor(() => {
       expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
-    // The switch shares the boot-time pass instead of walking the same eight
-    // paths again: two concurrent walks of one path lose a `rename` to EPERM on
+    // The switch shares the boot-time pass instead of walking the same paths
+    // again: two concurrent walks of one path lose a `rename` to EPERM on
     // Windows, which would abort the default switch this test asserts.
-    expect(presetWrites()).toBe(authored)
+    expect(presetWrites()).toBe(writes)
   })
 
   it('authors the presets once the roster service appears', async () => {
@@ -688,7 +760,7 @@ describe('apply engine presets', () => {
 
     registerRosterNamespace(settings!)
     ctx.provide('agentPresets', fakeRoster(settings))
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
   })
 
   it('waits for the source preset to register instead of giving up on the first read', async () => {
@@ -708,7 +780,7 @@ describe('apply engine presets', () => {
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
 
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
     expect(roster.read.mock.calls.length).toBeGreaterThan(1)
     expect(errorSpy.mock.calls.some(call => String(call[0]).includes('engine preset authoring failed')))
       .toBe(false)
@@ -734,6 +806,11 @@ describe('apply engine presets', () => {
     }, { timeout: 8000 })
     expect(errorSpy.mock.calls.filter(call => String(call[0]).includes('engine preset authoring failed')))
       .toHaveLength(1)
+    // Nothing was authored: a failed read never leaves a half-written region
+    // behind for the next boot to load as a preset with no rows.
+    if (!LEGACY_HARNESS) {
+      expect(await readFile(path, 'utf8')).not.toContain(PRESET_ROWS_BEGIN)
+    }
     // A later switch re-attempts the authoring — a failed pass is not memoized —
     // and must not point the roster at a preset that is not on disk: pointing
     // there fails every new session loud, so the steered default waits for an
@@ -753,12 +830,83 @@ describe('apply engine presets', () => {
     const home = await tempDir()
     vi.stubEnv('DSH_HOME', home)
     // A settings-less boot: the roster's default write skips quietly, but the
-    // presets a session may select still land on disk.
+    // presets a session may select are still authored.
     const { ctx, live } = await boot(undefined, { settings: false, llm: false })
     ctx.provide('agentPresets', fakeRoster(undefined))
     apply(ctx, { patchPath: path, ...live.config })
 
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
+  })
+
+  describe.runIf(!LEGACY_HARNESS)('modern preset rows', () => {
+    it('writes four composed preset rows into the profile patch, beside the managed block', async () => {
+      const dir = await tempDir()
+      const path = join(dir, 'cordis.patch.yml')
+      const home = await tempDir()
+      vi.stubEnv('DSH_HOME', home)
+      const { ctx, settings } = await boot()
+      registerRosterNamespace(settings!)
+      ctx.provide('agentPresets', fakeRoster(settings))
+      await mountPlugin(ctx, { patchPath: path })
+      await waitForEnginePresets(home, path)
+
+      const text = await readFile(path, 'utf8')
+      const begin = text.indexOf(PRESET_ROWS_BEGIN)
+      const end = text.indexOf(PRESET_ROWS_END)
+      expect(begin).toBeGreaterThan(-1)
+      expect(end).toBeGreaterThan(begin)
+      // The preset region never disturbs the block that frees the factory slot.
+      expect(text).toContain(MANAGED_BLOCK_BEGIN)
+      expect(text).toContain('- id: agent-loop\n  disabled: true')
+      expect(text).toContain('- id: command-goal\n  disabled: true')
+      expect(text).toContain(MANAGED_BLOCK_END)
+
+      const rows = presetRowsOf(text)
+      expect([...rows.keys()]).toEqual([...HOSTED_PRESET_IDS])
+      for (const row of rows.values()) {
+        // The shipped shape: an `insert` of one `@deepseek-ai/dsh-agent-preset`
+        // row whose config carries the id, the order, and the composition.
+        expect(row).toContain('    - id: preset-loop-engine-')
+        expect(row).toContain(`      name: '@deepseek-ai/dsh-agent-preset'\n`)
+        expect(row).toContain('        order: 100\n')
+        expect(row).toContain('        plugins:\n')
+        // The composition's entries sit one level (10 columns) under
+        // `plugins:`, and every kept entry keeps its own relative shape — a
+        // nested group's rows sit two columns deeper, as they did in the source.
+        expect(row).toMatch(/\n {10}- id: persona\n/)
+        expect(row).toMatch(/\n {12}name: '@deepseek-ai\/dsh-persona'\n/)
+        expect(row).toMatch(/\n {10}- id: delegation\n/)
+        expect(row).toMatch(/\n {14}- id: tool-subagent-control\n/)
+        // No stripped row survived, at any nesting depth.
+        for (const stripped of STRIPPED_ROWS) {
+          expect(row).not.toContain(`- id: ${stripped}`)
+          expect(row).not.toContain(`dsh-${stripped}`)
+        }
+      }
+      // Every line the region owns is blank, a comment, an `insert` opener at
+      // column 0, or indented — a stray column-0 line would end the YAML early.
+      for (const line of text.slice(begin, end).split('\n')) {
+        expect(line === '' || /^#/.test(line) || line === '- insert:' || /^ {4}/.test(line)).toBe(true)
+      }
+      // A second pass over the same source rewrites nothing: same bytes on disk.
+      expect(await ensureEnginePresetRows(path, { read: async () => PRESET_FIXTURE })).toBe(false)
+      expect(await readFile(path, 'utf8')).toBe(text)
+    })
+
+    it('leaves the source composition’s blank lines blank rather than whitespace-only', async () => {
+      const dir = await tempDir()
+      const path = join(dir, 'cordis.patch.yml')
+      const home = await tempDir()
+      vi.stubEnv('DSH_HOME', home)
+      const { ctx, settings } = await boot()
+      registerRosterNamespace(settings!)
+      ctx.provide('agentPresets', fakeRoster(settings))
+      await mountPlugin(ctx, { patchPath: path })
+      await waitForEnginePresets(home, path)
+
+      const text = await readFile(path, 'utf8')
+      expect(text).not.toMatch(/[ \t]+\n/)
+    })
   })
 })
 
@@ -951,7 +1099,7 @@ describe('apply preset steering', () => {
     registerRosterNamespace(settings!)
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await vi.waitFor(() => {
@@ -976,7 +1124,7 @@ describe('apply preset steering', () => {
     expect(rosterDefault(settings!)).toBe('deployment-preset')
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await vi.waitFor(() => {
@@ -1005,7 +1153,7 @@ describe('apply preset steering', () => {
     registerRosterNamespace(settings!)
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await vi.waitFor(() => {
@@ -1026,7 +1174,7 @@ describe('apply preset steering', () => {
     // race the retry window exists for.
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await new Promise(resolve => setTimeout(resolve, 150))
@@ -1048,7 +1196,7 @@ describe('apply preset steering', () => {
     ;(settings as unknown as { describe?: unknown }).describe = undefined
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await new Promise(resolve => setTimeout(resolve, 150))
@@ -1068,7 +1216,7 @@ describe('apply preset steering', () => {
     ctx.provide('agentPresets', fakeRoster(settings))
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     // 30 attempts at 100ms: the retry window exhausts and fails loud once.
@@ -1086,7 +1234,7 @@ describe('apply preset steering', () => {
     registerRosterNamespace(settings!)
     ctx.provide('agentPresets', fakeRoster(settings))
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
     live.setEngine('kimi')
     await vi.waitFor(() => {
       expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
@@ -1119,7 +1267,7 @@ describe('apply preset steering', () => {
     }
     const errorSpy = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
 
     live.setEngine('kimi')
     await vi.waitFor(() => {
@@ -1153,7 +1301,7 @@ describe('apply preset steering', () => {
       mutateSpy.mock.calls.filter(call => call[0] === AGENT_PRESETS_NS).length
 
     const fiber = await mountPlugin(ctx, { patchPath: path })
-    await waitForEnginePresets(home)
+    await waitForEnginePresets(home, path)
     live.setEngine('kimi')
     await vi.waitFor(() => { expect(rosterWrites()).toBe(1) })
     await fiber.dispose()

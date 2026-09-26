@@ -111,10 +111,11 @@ preset 现在的定位是**agent-plane 组合**：它决定这个会话的 promp
 
 ## 3. 与内置 preset 选择器的关系
 
-本插件没有自己的 preset 机制，它只是**往用户 preset 根里写四个 preset**（`$DSH_HOME/.agent-presets/loop-engine-<engine>/`，`src/preset.ts:200-210`），并把 roster 的默认值指过去。因此：
+本插件没有自己的 preset 机制，它只是**把四个托管 preset 授权到运行代际读的那个载体里**，并把 roster 的默认值指过去。载体按代际分流（`authorHostedPresets`，`src/index.ts:232`）：0.1.5 是用户 preset 根下的目录（`$DSH_HOME/.agent-presets/loop-engine-<engine>/`，`ensureEnginePresets`），0.1.7 是 profile patch 里四条 `insert` 行（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`，`ensureEnginePresetRows`，形状见 `docs/architecture.md` §3.5）。因此：
 
 - 这四个 preset 在 **设置 → Agent preset** 里和别的 preset 一起出现，能像它们一样被查看、被"设为默认"（主仓 `packages/client/ui-agent-preset/src/client/section-store.ts:330-337`，其文档也明确"运行中的会话保持它们开始时的 composition"）。
-- 每个 preset 的 composition 是**部署自己的 `standard` 剥掉六行**（`skill-filesystem`、`tool-skill`、`tool-goal`、`command-goal`、`planning`、`compaction`，`src/preset.ts:79`）再加上引擎自己桥进来的命令与技能。理由：dsh 的 `/plan`、`/compact`、`/goal`、dsh 技能目录在外部引擎接管会话时只会重复或误导。其中 `command-goal` **必须在 preset 层剥**：dsh 的人类 `/goal` 命令是 `standard` 组合自己那一行注册的（主仓 `packages/preset/agent-presets/presets/standard/agent.cordis.yml:95`），profile patch 里禁用 host 面那一行够不到由这份组合出来的会话（`standard` 自己带了同名行），所以托管会话里 dsh 的 `/goal` 去留由托管 preset 决定；剥掉之后这个名字不再挡着引擎自己的命令面（Kimi 的 ACP 面没有 `/goal`，它的桥接因此也不注册，`src/engine-kimi/commands.ts:11-28`）。文件头有 managed 标记，**每次启动都从当时的 `standard` 重新生成**（`src/preset.ts:81-86`，`ensureEnginePresets` 在 `:200-210`），手改会被覆盖。
+- 每个 preset 的 composition 是**部署自己的 `standard` 剥掉六行**（`skill-filesystem`、`tool-skill`、`tool-goal`、`command-goal`、`planning`、`compaction`，`STRIPPED_ROWS`，`src/preset.ts:94`）再加上引擎自己桥进来的命令与技能。理由：dsh 的 `/plan`、`/compact`、`/goal`、dsh 技能目录在外部引擎接管会话时只会重复或误导。其中 `command-goal` **必须在 preset 层剥**：dsh 的人类 `/goal` 命令是 `standard` 组合自己那一行注册的（0.1.5 的 `packages/preset/agent-presets/presets/standard/agent.cordis.yml:95`，0.1.7 的 `packages/bundle/web-app/presets/standard.patch.yml`），profile patch 里禁用 host 面那一行够不到由这份组合出来的会话（`standard` 自己带了同名行），所以托管会话里 dsh 的 `/goal` 去留由托管 preset 决定；剥掉之后这个名字不再挡着引擎自己的命令面（Kimi 的 ACP 面没有 `/goal`，它的桥接因此也不注册，`src/engine-kimi/commands.ts:11-28`）。载体带 managed 标记，**每次启动都从当时的 `standard` 重新生成**，手改会被覆盖。
+- ⚠️ **"授权成功"不等于"授权对了"**：0.1.7 上写 `.agent-presets` 目录是**静默失效**的（0.1.7 不再读那里，roster 于是只答内置 preset，托管引擎根本选不了）。判断依据只能是"运行代际的 roster 答不答得出 `loop-engine-<engine>`"；详见 `docs/compatibility.md` §1/§5。
 - **真正决定"新会话跑哪个引擎"的是 roster 的 `default` 字段**：设置里"设默认 preset"和设置里"循环引擎"写的是同一个字段。区别只在语义层：循环引擎那一栏是"引擎视角"（in-process / claude-code / codex / pi / kimi），并且**切回 in-process 时会把默认值还原成插件替换前的部署默认**（`src/index.ts:504-528`）。如果你在 Agent preset 里把默认改成了别的东西，再切回 in-process，会看到默认被还原——这是设计语义，不是覆盖你的修改。
 - **preset 选择器同时是对引擎的一次选择——只在"这个会话已有插件记录"的空白会话上**：用 harness 自己的选择器换 preset 时，如果新 preset 映射到**别的**引擎、而这个会话已经有插件记录，插件会把记录一并更新到那个引擎（"最后一次用户动作胜出"，`src/router-loop.ts:637-662`）。没有记录的会话不进记录，引擎继续由 preset 映射回答。
 
@@ -322,8 +323,8 @@ harness 自带的 loop 在这件事上两头都做不了（证据逐条在 §5.4
 - 只要你在某条老会话上换一次引擎，它就写进侧车（§5）；在那之前它的引擎答案依旧是 preset 映射。
 - 引擎切换不再需要重启进程：涉及 in-process 的那次会释放会话并让页面自动重载（§5.2），托管引擎之间连重载都没有。升级后**不会**出现"所有旧会话都变成新引擎"。
 - 安装/升级后的**第一次启动也不需要额外重启一次**：受管理块要到下一次 composition 才被读到，路由器在有界窗口内重试等基础 `agent-loop` 行让出槽位（`src/index.ts:588-615`，`docs/architecture.md` §3.8；这段窗口里 `loopEngine/select` 会返回 §5.3 那条"loop router is not mounted"）。
-- ⚠️ **旧会话的引擎只能如实说"不知道"**：旧版本只有一个 preset id `loop-engine`（没有引擎后缀），而新规则只认 `loop-engine-<engine>`（`src/agent-preset-ids.ts:119`），所以日志里记着 `loop-engine` 的旧会话匹配不到任何引擎。路由侧因此继续按 in-process 跑它（§1.2 的兜底），显示侧也**不冒充**当年那个托管引擎：这条会话**没有活 agent** 时（冷会话）会话头 chip 与 composer 显示 **「旧版托管引擎」**（判定 `src/agent-preset-ids.ts:297`，文案 `src/client/locales.ts:103` / `:148`）。它**已经打开**时 chip 报的就是 `in-process`——那是它此刻真正在跑的东西（§1.3 末条）。同理，**没有记录 preset 的会话**也不声称任何引擎：chip 不渲染，composer 显示「未记录」（`:104` / `:149`）。想在旧会话上直接换成某个引擎，用 composer 选择器（§4.2/§5）即可——不需要新建会话。磁盘上遗留的 `$DSH_HOME/.agent-presets/loop-engine/` 不会被删除（插件只写自己那四份，不清扫别人的目录），它仍会出现在 preset 菜单里，但选中它等价于 in-process。
-- 四个 preset 目录每次启动从部署当时的 `standard` 重新生成，手改会被覆盖（`src/preset.ts:200-210`）。
+- ⚠️ **旧会话的引擎只能如实说"不知道"**：旧版本只有一个 preset id `loop-engine`（没有引擎后缀），而新规则只认 `loop-engine-<engine>`（`src/agent-preset-ids.ts:119`），所以日志里记着 `loop-engine` 的旧会话匹配不到任何引擎。路由侧因此继续按 in-process 跑它（§1.2 的兜底），显示侧也**不冒充**当年那个托管引擎：这条会话**没有活 agent** 时（冷会话）会话头 chip 与 composer 显示 **「旧版托管引擎」**（判定 `src/agent-preset-ids.ts:297`，文案 `src/client/locales.ts:103` / `:148`）。它**已经打开**时 chip 报的就是 `in-process`——那是它此刻真正在跑的东西（§1.3 末条）。同理，**没有记录 preset 的会话**也不声称任何引擎：chip 不渲染，composer 显示「未记录」（`:104` / `:149`）。想在旧会话上直接换成某个引擎，用 composer 选择器（§4.2/§5）即可——不需要新建会话。磁盘上遗留的 `$DSH_HOME/.agent-presets/loop-engine/` 不会被删除（插件只写自己那四份，不清扫别人的目录）。**注意 0.1.7 已经不再读 `.agent-presets`**，所以升级到 0.1.7 之后这个遗留目录**连菜单都不会出现**——它只在 0.1.5 上仍会出现在 preset 菜单里、且选中它等价于 in-process。
+- 四个托管 preset 每次启动都从部署当时的 `standard` 重新生成，手改会被覆盖（载体见本节开头，实现 `src/preset.ts` 的 `ensureEnginePresets` / `ensureEnginePresetRows`）。
 - **侧车文件在升级方向上是新增的**：插件只认自己写的格式（`version: 1`），不认的版本按"没有记录"降级处理（§5.5），所以降级回旧版本时那个文件只是被忽略，不会影响旧版本行为。
 
 ## 8. 常见现象与处理

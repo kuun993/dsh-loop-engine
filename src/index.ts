@@ -15,16 +15,20 @@
  * Because the router owns the slot, the plugin keeps the base bundle's
  * `agent-loop` row disabled for as long as it is composed. That managed block
  * lives in the profile's `cordis.patch.yml` (see `patch-manager.ts`) and is the
- * plugin's only footprint in the harness's configuration; the block names no
- * engine, because the engine is a per-session decision.
+ * plugin's only footprint in the harness's configuration alongside the preset
+ * rows below; the block names no engine, because the engine is a per-session
+ * decision.
  *
- * The plugin authors one preset per hosted engine into the user preset root
- * (`$DSH_HOME/.agent-presets/loop-engine-<engine>`, see `preset.ts`), each a
- * copy of `standard` minus the dsh-native command and skill rows an external
- * engine replaces, and it serves every hosted engine's provider route label in
- * the llm registry (`provider-route.ts`): an engine logs its own label into
- * each session's request/header, and the web host refuses a turn whose session
- * selection names a provider no adapter serves. The preset is now only the
+ * The plugin authors one preset per hosted engine — each a copy of `standard`
+ * minus the dsh-native command and skill rows an external engine replaces — and
+ * it serves every hosted engine's provider route label in the llm registry
+ * (`provider-route.ts`): an engine logs its own label into each session's
+ * request/header, and the web host refuses a turn whose session selection names
+ * a provider no adapter serves. WHERE that copy lives depends on the harness
+ * generation — a directory under `$DSH_HOME/.agent-presets/loop-engine-<engine>`
+ * on the 0.1.5 line, a `@deepseek-ai/dsh-agent-preset` insert row in the profile
+ * patch on the 0.1.7 line, which stopped reading the directory (see
+ * `preset.ts`, {@link authorHostedPresets}). The preset is now only the
  * session's agent-plane composition (and the engine's own default for a session
  * with no record) — it is no longer the thing that decides a running session's
  * engine.
@@ -61,7 +65,7 @@ import {
   hasManagedBlock,
   legacyBlockEngineOf,
 } from './patch-manager.ts'
-import { enginePresetId, ensureEnginePresets } from './preset.ts'
+import { enginePresetId, ensureEnginePresetRows, ensureEnginePresets } from './preset.ts'
 import { HOSTED_ROUTE_LABEL } from './agent-preset-ids.ts'
 import { HostedEngineRouteAdapter } from './provider-route.ts'
 import { ROUTER_SERVICES, RouterLoop, type RouterEngine } from './router-loop.ts'
@@ -204,6 +208,32 @@ export function resolvePatchPath(config: Config): string {
     config.profile ?? 'web',
     config.patchFilename ?? 'cordis.patch.yml',
   )
+}
+
+/**
+ * Author the hosted engines' presets through the mechanism the RUNNING harness
+ * actually reads, which is the one place the two generations diverge.
+ *
+ * The 0.1.5 line resolves a preset from a directory under the user preset root;
+ * the 0.1.7 line turned presets into composed plugin rows and stopped reading
+ * that directory at all, so there the copies go into the profile patch as
+ * `@deepseek-ai/dsh-agent-preset` insert rows. Writing the 0.1.5 files on the
+ * 0.1.7 line is not merely useless — it was this plugin's real defect: authoring
+ * reported success while the roster answered without a single `loop-engine-*`
+ * id, so every hosted session fell back to the harness loop.
+ *
+ * The 0.1.7 path cannot be taken on the 0.1.5 line: that line has no
+ * `dsh-agent-preset` row plugin, so the rows would fail to load.
+ * @param patchPath - the profile's patch file, already resolved.
+ * @param presets - the roster whose `standard` composition is the source.
+ * @returns whether anything was written.
+ * @throws when the source preset cannot be read or the write fails.
+ */
+function authorHostedPresets(patchPath: string, presets: AgentPresetsService): Promise<boolean> {
+  /* v8 ignore start -- legacy 0.1.5 mechanism (directory authoring); the coverage job runs on 0.1.7 and vitest.config.compat015.ts takes this branch */
+  if (LEGACY_HARNESS) return ensureEnginePresets(resolveDshHome(), presets)
+  /* v8 ignore stop */
+  return ensureEnginePresetRows(patchPath, presets)
 }
 
 /** Whether a promise rejection was an ENOENT (file not found). */
@@ -481,18 +511,20 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Author every hosted engine's preset into the user preset root, once.
+   * Author every hosted engine's preset through the running generation's
+   * mechanism, once.
    *
    * Done up front rather than on the first engine selection: the plugin owns
    * the factory slot for its whole lifetime, so a session may ask for any
-   * engine at any moment, and the roster reads presets from disk. The roster
-   * service attaches from its own settings inject callback, which may land
-   * after this plugin's apply, hence the bounded retry.
+   * engine at any moment, and the roster resolves presets from whatever the
+   * running generation reads them out of. The roster service attaches from its
+   * own settings inject callback, which may land after this plugin's apply,
+   * hence the bounded retry.
    *
    * The in-flight promise is memoized because two paths want the presets — the
    * boot-time authoring and the default-engine steering — and letting both walk
-   * the same eight files races their writes: the loser's `rename` fails on
-   * Windows, and the deployment's default then never gets steered.
+   * the same target races their writes: the loser's `rename` fails on Windows,
+   * and the deployment's default then never gets steered.
    * @param attempt - retry counter for the roster attach race.
    * @returns the roster and its settled authoring, or undefined when no roster
    *   is composed (the retry keeps looking for a bounded window either way).
@@ -517,7 +549,7 @@ export function apply(ctx: Context, config: Config): void {
       // the authoring independent of the loader's callback order.
       for (let attempt = 0; attempt <= PRESET_SOURCE_ATTEMPTS; attempt += 1) {
         try {
-          return await ensureEnginePresets(resolveDshHome(), presets)
+          return await authorHostedPresets(patchPath, presets)
         } catch (error: unknown) {
           lastError = error
           if (attempt < PRESET_SOURCE_ATTEMPTS) {

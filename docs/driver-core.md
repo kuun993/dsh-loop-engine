@@ -192,7 +192,7 @@ kimi agent 在步进路径上还单独用了一次 `raceAbort` 等 ACP prompt �
 
 `ownership.ts` 的 128 行是**原语**；真正的编排在 `hosted-engine-runtime.ts`（共享体约 380 行，`:183-560`），四个引擎的生命周期正确性全部压在这两份文件上。任何判定时序的变化（比如 `dispose()` 里 abort 与等待的顺序、`isActive()` 的双判条件）**同时**改变四个引擎的行为——这正是它现在只有一份的原因。改完必须跑 kimi/pi 的 `tests/engine-*/loop.spec.ts`、claude/codex 落在各自 `tests/engine-*/index.spec.ts` 里的挂载与中途卸载场景，以及 `tests/router-loop.spec.ts`（路由器分派给运行时的契约，§10）。注意 `dispose()` 里的错误文案 `agent loop is not active` 同时被守门分支复用（`src/driver-core/hosted-engine-runtime.ts:187`、`:537`），改文案要全局搜。
 
-**新增一个引擎时**：写一个 `extends HostedEngineRuntime<ResolvedConfig, XAgent>` 的子类，给出 label、配置解析、`buildAgent` 三件事即可，**不要**再复制事务体——`package.json` 的 `files` 与构建产物都会跟着涨，而事务体的正确性只需要维护一次。另外三处会自动或强制跟上：`src/agent-preset-ids.ts:27` 的 `LOOP_ENGINE_IDS` 加 id 后 `HOSTED_ENGINE_IDS`（`:36-38`）、per-engine preset 的 authoring（`ensureEnginePresets` 按 `HOSTED_ENGINE_IDS` 循环，`src/preset.ts:200`）与 `engineOfPreset`（`src/agent-preset-ids.ts:119-125`）都自动生效；`src/engine-surface.ts` 的 `SURFACES` 是 `Record<HostedEngineId, EngineSurface>`，新引擎不加一份就会编译报错（这是刻意的，命令/技能面必须显式声明）；最后在 `src/index.ts:557-568` 的 `buildEngine` 加一个分支。
+**新增一个引擎时**：写一个 `extends HostedEngineRuntime<ResolvedConfig, XAgent>` 的子类，给出 label、配置解析、`buildAgent` 三件事即可，**不要**再复制事务体——`package.json` 的 `files` 与构建产物都会跟着涨，而事务体的正确性只需要维护一次。另外三处会自动或强制跟上：`src/agent-preset-ids.ts:27` 的 `LOOP_ENGINE_IDS` 加 id 后 `HOSTED_ENGINE_IDS`（`:36-38`）、per-engine preset 的 authoring（`ensureEnginePresets` 与 `ensureEnginePresetRows` 都按 `HOSTED_ENGINE_IDS` 循环，`src/preset.ts`）与 `engineOfPreset`（`src/agent-preset-ids.ts:119-125`）都自动生效；`src/engine-surface.ts` 的 `SURFACES` 是 `Record<HostedEngineId, EngineSurface>`，新引擎不加一份就会编译报错（这是刻意的，命令/技能面必须显式声明）；最后在 `src/index.ts` 的 `buildEngine` 加一个分支。
 
 ## 5. inbox.ts / assistant-stream.ts：驱动自有的收件箱与流式尝试
 
@@ -428,7 +428,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 | `hosted-engine-runtime.ts` 事务体 | 四个引擎的 create/resume 正确性（进程内唯一一份） | 同上四份 spec + `tests/router-loop.spec.ts` |
 | `router-loop.ts` 分发/记账/换引擎（空白期与运行中） | 每个会话的引擎归属；`in-process` 与托管引擎的并发 | `tests/router-loop.spec.ts` + `tests/engine-remote.spec.ts` + 四个 `tests/engine-*/index.spec.ts` |
 | `engine-surface.ts` 命令/技能注册 | 托管会话的斜杠菜单与技能目录（按 agent scope 隔离） | `tests/index.spec.ts`（真 agent scope）；`tests/router-loop.spec.ts` 只断言"是否调用"（该模块被 mock） |
-| `preset.ts` `engineOfPreset` / `enginePresetId` / `ensureEnginePresets` | 每会话的引擎选择与磁盘上的 preset 文件 | `tests/preset.spec.ts` + `tests/router-loop.spec.ts` |
+| `preset.ts` `engineOfPreset` / `enginePresetId` / `ensureEnginePresets` / `ensureEnginePresetRows` | 每会话的引擎选择，以及两代各自的 preset 载体（目录 / profile patch 里的组合行） | `tests/preset.spec.ts` + `tests/index.spec.ts` + `tests/router-loop.spec.ts` |
 | `host-servers.ts` 结构切片 | 所有消费方（纯类型，编译期） | 无独立 spec；由 `pnpm run typecheck` 与各消费方 spec 兜住 |
 | `model-handover.ts` 解析 / 两张映射表 | 四个引擎的端点与凭据注入、warn 次数 | `tests/driver-core/model-handover.spec.ts` + `tests/engine-{kimi,pi,codex}/model-handover.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `inbox.ts` 折叠与落盘 | 四个引擎的收件箱语义与 `agent/inbox/spliced` 持久流 | `tests/driver-core/inbox.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |

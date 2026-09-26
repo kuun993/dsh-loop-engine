@@ -126,8 +126,8 @@ function managedSpan(
   }
 }
 
-/** Normalize a file so the managed span sits on its own lines with a blank separator. */
-function ensureTrailingNewline(text: string): string {
+/** Normalize a file so a managed span sits on its own lines with a blank separator. */
+export function ensureTrailingNewline(text: string): string {
   return text.endsWith('\n') ? text : `${text}\n`
 }
 
@@ -141,8 +141,14 @@ function ensureTrailingNewline(text: string): string {
  * managed block is the sole top-level collection. Anchored to column 0 so an
  * indented `[]` that is a real value inside an entry's nested config is never
  * touched.
+ *
+ * Shared with the preset-rows region (`./preset.ts`): both regions are
+ * root-level collections appended to the same file, so either one can be the
+ * first thing that meets a surviving seed.
+ * @param text - the patch-file text.
+ * @returns the text without a whole-line root `[]` placeholder.
  */
-function dropSeedPlaceholder(text: string): string {
+export function dropSeedPlaceholder(text: string): string {
   // Drop only the `[]` line itself; a following blank separator (the one the
   // file's base and the managed block already share) is preserved.
   return text.replace(/^\[\]\n/m, '')
