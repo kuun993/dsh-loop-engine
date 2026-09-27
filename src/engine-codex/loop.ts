@@ -53,6 +53,12 @@ export interface Config {
   env?: Record<string, string>
   /** Fallback model for the app-server thread, used when the session selects none; Codex native settings own the model when omitted. */
   model?: string
+  /**
+   * Idle window in milliseconds before a session's `codex app-server` child is
+   * shut down, spawned again by the next step. Omitted or non-positive keeps
+   * the child for the session's whole life.
+   */
+  childIdleMs?: number
 }
 
 /** Schema of the Codex loop plugin configuration. */
@@ -61,6 +67,7 @@ export const Config: z<Config> = z.object({
   approvalPolicy: z.union([...CODEX_APPROVAL_POLICIES]),
   env: z.dict(z.string()).default({}),
   model: z.string(),
+  childIdleMs: z.number(),
 })
 
 /** Resolve the driver configuration at the plugin config boundary. */
@@ -70,6 +77,7 @@ function resolveConfig(config: Config): ResolvedConfig {
     approvalPolicy: config.approvalPolicy,
     env: config.env ?? {},
     model: config.model,
+    childIdleMs: config.childIdleMs ?? 0,
   }
 }
 

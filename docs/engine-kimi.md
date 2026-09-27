@@ -67,7 +67,9 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 ### 3.4 ACP 客户端缓存
 
-`AcpClient` 按 **agent 实例**缓存、跨 step 复用（agent.ts:117-120）；`acpClient(cwd)` 在 spec（argv/cwd/env）变化或进程已关闭时 dispose 旧客户端并重 spawn（agent.ts:473-489）。`initialize` 失败会清缓存、dispose 并抛错（471-478）。agent scope 拆除时释放客户端（139-143）。
+`AcpClient` 按 **agent 实例**缓存、跨 step 复用（agent.ts:141-150）；`acpClient(cwd, handover)` 在 spec（argv/cwd/env）变化或进程已关闭时 dispose 旧客户端并重 spawn（agent.ts:522-538）；`initialize` 失败会清缓存、dispose 并抛错（530-536）。agent scope 拆除时释放客户端（183-186）。
+
+**空闲关停**（`childIdleMs`）：缓存是"跨 step 复用"的意思，也是"回合结束了子进程还在"的意思——harness 不会在回合结束时释放 agent，agent 与它所在会话的 scope 同寿，所以一条没人再动的会话会一直养着那个 `kimi acp` 子进程。`childIdleMs` 为正时，`setPhase` 每次落到 `idle` 相位就 arm 一个倒计时、落到 `running`/`maintenance` 就 cancel（agent.ts:200-207），到点执行 `closeChild()`（`agent.ts:190`，即 dispose + 清缓存）；下一次 step 的 `acpClient` 照旧懒 spawn，所以关掉的是**子进程**，不是 agent、不是会话——不会产生 `session/disposed`、页面不用刷新（对比 §5.2 的 release 路径，`docs/per-session-engine.md` §6）。倒计时用 `unref()`，不会自己把进程吊住。默认 `childIdleMs` 为 0 = 不关停（与加这个旋钮之前完全一致）。
 
 ## 4. ACP 客户端与进程管理
 
@@ -174,6 +176,7 @@ dsh `commands` 运行时本地执行注册命令，命令行不会到达模型�
 | （会话选真实 dsh 模型时）端点与凭据 | 非配置项 | 每个 step 解析一次（`resolveModelHandover`，`src/driver-core/model-handover.ts`，调用点 `src/engine-kimi/agent.ts:574`），结果经 `kimiModelEnv`（`src/engine-kimi/model-handover.ts`）叠进**子进程 env**：`KIMI_MODEL_NAME` = model、`KIMI_MODEL_API_KEY` = 凭据、`KIMI_MODEL_BASE_URL` = `baseURL`、`KIMI_MODEL_PROVIDER_TYPE`（`anthropic-messages`→`anthropic`，`openai-completions`/`openai-responses`→`openai`，`api` 为 `undefined` 或其余值**省略**——端点照旧交出去）。这是 Kimi 自己的 env-model 通路（`applyEnvModelConfig`，内嵌于 `kimi` 二进制），定义 provider + 一个 model alias 并把 `defaultModel` 指向它，所以**不碰** `~/.kimi-code/config.toml`；端点变了就换一个子进程 env（`handoverEnv` 按内容 memo，`agent.ts:550-556`，未变则复用同一对象、不重启子进程）。**有端点注入时跳过 `session/set_model`**（`agent.ts:623`）：env model 已是默认，而 `set_model` 要的是 kimi 侧的 model **alias**，不是 dsh 的裸 id。选 `external/default` 或没有选择、或**端点/凭据**解析不到时**不注入**（后者 warn 一次），退回原来的 `session/set_model` |
 | `env` | `env?: Record<string,string>`（默认 `{}`） | 显式传给 `kimi` 子进程的环境条目（loop.ts:36、52；spawn spec 原样带，agent.ts:496） |
 | `kimiBin` | `bin?: string` | Kimi CLI 可执行文件；未钉时按第 1 节三级回退解析（loop.ts:37-38、53） |
+| `childIdleMs` | `childIdleMs: number`（缺省 `0`） | 空闲关停窗口（毫秒，loop.ts:44、61；`z.number()` :52）。> 0 时，agent 落到 `idle` 相位就起倒计时、到点 dispose 掉 `kimi acp` 子进程并清缓存，下一次 step 懒 spawn（§3.4）。`0`/省略 = 子进程与 agent 同寿（改之前的行为）。**只影响 kimi/codex 这两个持有常驻子进程的引擎**：Pi 与 Claude Code 每步各起一次，本旋钮到不了它们 |
 
 环境变量：
 

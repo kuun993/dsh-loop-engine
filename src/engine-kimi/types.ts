@@ -20,4 +20,11 @@ export interface ResolvedConfig {
   readonly env: Record<string, string>
   /** Kimi CLI executable; `'kimi'` resolves through PATH when not pinned to an absolute path. */
   readonly bin: string
+  /**
+   * How long an idle session keeps its `kimi acp` child, in milliseconds; zero
+   * or less keeps it for the session's whole life. See
+   * `driver-core/idle-child.ts` for why the child, and not the agent, is what
+   * gets released.
+   */
+  readonly childIdleMs: number
 }

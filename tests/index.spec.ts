@@ -1382,6 +1382,7 @@ describe('apply router mount', () => {
       piProvider: 'anthropic',
       piThinking: 'high',
       kimiBin: '/fake/kimi',
+      childIdleMs: 15000,
     })
 
     await createHostedSessions(ctx)
@@ -1389,11 +1390,11 @@ describe('apply router mount', () => {
     expect(ctx.get('agentLoopClaudeCode')!.config)
       .toMatchObject({ permissionMode: 'plan', env, model: 'deployment-model', disposeGraceMs: 1000, maxTurns: 4 })
     expect(ctx.get('agentLoopCodex')!.config)
-      .toMatchObject({ sandboxMode: 'workspace-write', approvalPolicy: 'on-failure', env, model: 'deployment-model' })
+      .toMatchObject({ sandboxMode: 'workspace-write', approvalPolicy: 'on-failure', env, model: 'deployment-model', childIdleMs: 15000 })
     expect(ctx.get('agentLoopPi')!.config)
       .toMatchObject({ provider: 'anthropic', model: 'deployment-model', thinkingLevel: 'high', sandboxMode: 'workspace-write', env })
     expect(ctx.get('agentLoopKimi')!.config)
-      .toMatchObject({ env, model: 'deployment-model', bin: '/fake/kimi' })
+      .toMatchObject({ env, model: 'deployment-model', bin: '/fake/kimi', childIdleMs: 15000 })
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skip claude-code command'))
 
     // Each engine contributes its OWN skill catalog to the session it serves.

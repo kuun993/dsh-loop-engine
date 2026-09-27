@@ -88,9 +88,10 @@ src/engine-codex/
 
 ### 4.2 客户端生命周期
 
-- 每个 `CodexAgent` **懒建一个** `AppServerClient` 并跨 step 复用；进程已死（`closed`）时下次取用会重建（`src/engine-codex/agent.ts:145-152`）。agent scope 拆解时 `dispose()`：关 readline、`stdin.end()`、`kill()`（`src/engine-codex/appserver/client.ts:180-186`）。
-- 子进程 `exit` 时把所有 pending 请求统一 reject 为 `codex app-server process exited unexpectedly`（`src/engine-codex/appserver/client.ts:77-84`）；dispose 后的请求立即 reject `app-server client is disposed`（`src/engine-codex/appserver/client.ts:190-192`）。
-- stderr 行可通过 `onStderr` 订阅（`src/engine-codex/appserver/client.ts:71-76`），但 agent 没有注册 handler——目前 stderr 日志被丢弃。
+- 每个 `CodexAgent` **懒建一个** `AppServerClient` 并跨 step 复用；进程已死（`closed`）时下次取用会重建（`src/engine-codex/agent.ts:241`）。agent scope 拆解时 `dispose()`：关 readline、`stdin.end()`、`kill()`（`src/engine-codex/appserver/client.ts:163-169`）。
+- **空闲关停**（`childIdleMs`）：缓存是"跨 step 复用"的意思，也是"回合结束了子进程还在"的意思——harness 不会在回合结束时释放 agent，agent 与它所在会话的 scope 同寿，所以一条没人再动的会话会一直养着那个 `app-server`。`childIdleMs` 为正时，`setPhase` 每次落到 `idle` 相位就 arm 一个倒计时、落到 `running`/`maintenance` 就 cancel（`src/engine-codex/agent.ts:331-338`），到点执行 `closeChild()`（`:227`，即 dispose + 清缓存）；下一次 step 的 `appServerClient` 照旧懒 spawn。关掉的是**子进程**，不是 agent、不是会话——不产生 `session/disposed`、页面不用刷新（对比 `docs/per-session-engine.md` §5.2 的 release 路径与 §6）。倒计时用 `unref()`，不会自己把进程吊住。默认 `0` = 不关停（与加这个旋钮之前完全一致）。另：thread 本就 **每 step 新建**（`AppServerThread.create`），所以子进程重启不会丢任何跨 step 的会话状态
+- 子进程 `exit` 时把所有 pending 请求统一 reject 为 `codex app-server process exited unexpectedly`（`src/engine-codex/appserver/client.ts:77-84`）；dispose 后的请求立即 reject `app-server client is disposed`（`src/engine-codex/appserver/client.ts:173-175`）。
+- stderr 行可通过 `onStderr` 订阅（`src/engine-codex/appserver/client.ts:125`），但 agent 没有注册 handler——目前 stderr 日志被丢弃。
 
 ### 4.3 turn 流式生成的三个关键机制
 
@@ -234,6 +235,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 | `env` | `env` | `z.dict(z.string()).default({})` | `{}` | **当前未被消费**（见 §9.3 第 2 条） |
 | `model` | `model` | `z.string()` | 无 | **回落值**：每个 step 取 `sessionModelOverrideOf(ctx, session)?.model ?? config.model`（`src/driver-core/session-model.ts`），会话选的真实 dsh 模型优先，透传给 `thread/start` 与 `turn/start` 的 `model`（`src/engine-codex/agent.ts:673`、`:686`）；同时作为 header/消息 source 的模型标签，缺省时标签为 `'default'`（`HOSTED_DEFAULT_MODEL`，`src/engine-codex/agent.ts:603`），模型由 codex 原生设置决定 |
 | `env` | `env` | `z.dict(z.string()).default({})` | 无 | **不再是死旋钮**（0.1.5-rc5 起真的被消费）：`appServerClient` 把 `{ ...this.config.env, ...modeled.env }` 交给 `AppServerClient.create(argv, env)`，后者叠加在 `process.env` 之上（`src/engine-codex/agent.ts:228`、`src/engine-codex/appserver/client.ts:105-107`）。`modeled` 是本次会话选中的 dsh 端点解析出的 `-c`/env（见 §4.5 第二条），无端点时为空 |
+| `childIdleMs` | `childIdleMs` | `z.number()`（`src/engine-codex/loop.ts:70`） | `0` | 空闲关停窗口（毫秒）：> 0 时 agent 落到 `idle` 相位就起倒计时，到点 dispose 掉 `app-server` 子进程，下一次 step 懒 spawn（§4.2）。`0`/省略 = 子进程与 agent 同寿。**只影响 kimi/codex**：Pi 与 Claude Code 每步各起一次 |
 | （会话选真实 dsh 模型时）端点与凭据 | 非配置项 | 每个 step 解析一次（`resolveModelHandover`，调用点 `src/engine-codex/agent.ts:667`），经 `codexModelConfig`（`src/engine-codex/model-handover.ts`）变成 `codex app-server` 的 `-c model_provider="dsh"` + `-c model_providers.dsh={name,base_url,wire_api,env_key}` + env `DSH_LOOP_ENGINE_API_KEY`；协议映射见 §4.5（`api` 为 `undefined` 时省略 `wire_api`，端点照旧交出去），端点变了重启 app-server。选 `external/default` 或没有选择、或**端点/凭据**解析不到时**不注入**（后者 warn 一次） |
 
 `resolveConfig`（`src/engine-codex/loop.ts:67-74`）只做缺省补齐，产物为 `ResolvedConfig`（`src/engine-codex/types.ts:14-21`）。注意 schema 是"出现才校验"风格——缺省构造 `new CodexLoop(ctx, {})` 时 `env` 也会是 `{}`（`resolveConfig` 里的 `?? {}`），其余字段为 `undefined`（`tests/engine-codex/controls.spec.ts:574-581` 验证）。

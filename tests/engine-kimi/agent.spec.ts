@@ -595,6 +595,80 @@ describe('KimiAgent permission and client lifecycle', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('shuts the ACP child down once the configured idle window passes, respawning it on the next turn', async () => {
+    mock.updates.mockReturnValue([text('first')])
+    const ctx = await harness({ childIdleMs: 20 })
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('idle-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      // The window has not passed, so the child is still warm.
+      expect(mock.client.dispose).not.toHaveBeenCalled()
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(mock.client.dispose).toHaveBeenCalledTimes(1)
+      // The session is untouched by the shutdown: the next turn spawns a fresh
+      // child through the same lazy accessor and answers normally.
+      mock.updates.mockReturnValue([text('second')])
+      agent.followup(message('again'))
+      await agent.whenIdle()
+      expect(mock.created).toHaveLength(2)
+      expect(mock.client.prompt).toHaveBeenCalledTimes(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the child when a new turn starts inside the idle window', async () => {
+    mock.updates.mockReturnValue([text('one')])
+    const ctx = await harness({ childIdleMs: 80 })
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('warm-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 40))
+      mock.updates.mockReturnValue([text('two')])
+      agent.followup(message('again'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 40))
+      expect(mock.client.dispose).not.toHaveBeenCalled()
+      expect(mock.created).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the child for the session when no idle window is configured', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('no-window-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 40))
+      expect(mock.client.dispose).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports a failing idle shutdown and leaves the session usable', async () => {
+    mock.updates.mockReturnValue([text('ok')])
+    const ctx = await harness({ childIdleMs: 20 })
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    try {
+      // A child that refuses to die must not escape the countdown as an
+      // unhandled throw; it is reported and the session carries on.
+      mock.client.dispose.mockImplementationOnce(() => { throw new Error('child would not die') })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('idle-fail-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('child would not die'))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('KimiAgent error edges', () => {

@@ -33,6 +33,7 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { createIdleChildCloser, type IdleChildCloser } from '../driver-core/idle-child.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
@@ -147,6 +148,12 @@ export class KimiAgent implements Agent {
    * every step.
    */
   private handoverEnvCache: { key: string; env: Record<string, string> } | undefined
+  /**
+   * Countdown that shuts the child down once this agent has been idle past the
+   * configured window, so an idle session stops paying for a process nothing
+   * is driving. Armed and cancelled by {@link setPhase}.
+   */
+  private readonly idleChild: IdleChildCloser
 
   constructor(
     private loopCtx: Context,
@@ -167,11 +174,22 @@ export class KimiAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
+    this.idleChild = createIdleChildCloser({
+      idleMs: this.config.childIdleMs,
+      close: () => { this.closeChild() },
+      warn: message => { loopCtx.logger.warn(message) },
+    })
     // Release the shared ACP client when the agent scope is unwound.
     this.scope.ctx.effect(() => () => {
-      this.acp?.dispose()
-      this.acp = undefined
+      this.idleChild.dispose()
+      this.closeChild()
     }, 'kimi.acpClient()')
+  }
+
+  /** Shut the cached child down; the next step's {@link acpClient} spawns a fresh one. */
+  private closeChild(): void {
+    this.acp?.dispose()
+    this.acp = undefined
   }
 
   get status(): AgentStatus {
@@ -182,6 +200,11 @@ export class KimiAgent implements Agent {
   private setPhase(next: Phase): void {
     const previousStatus = this.status
     this.phase = next
+    // An idle agent is what the child's countdown exists for: nothing will
+    // touch the ACP child again until a new message arrives, and that arrival
+    // goes through here on its way back to `running`.
+    if (next.kind === 'idle') this.idleChild.arm()
+    else this.idleChild.cancel()
     const status = this.status
     if (status !== previousStatus) {
       this.dispatch.emit('agent/status', { status })

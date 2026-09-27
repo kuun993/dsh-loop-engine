@@ -27,6 +27,8 @@ type RunStreamed = (
 const mock = vi.hoisted(() => ({
   constructed: [] as Array<{ threadParams: Record<string, unknown> }>,
   spawns: [] as Array<{ argv: readonly string[]; env: NodeJS.ProcessEnv }>,
+  disposals: [] as Array<readonly string[]>,
+  failDispose: false,
   runStreamed: vi.fn<RunStreamed>(),
   requestHandler: undefined as undefined | ((method: string, params: unknown) => Promise<{ result?: unknown; error?: { code: number; message: string } }>),
 }))
@@ -45,7 +47,10 @@ vi.mock('../../src/engine-codex/appserver/client.ts', () => ({
         mock.requestHandler = handler
       },
       onStderr: () => {},
-      dispose: () => {},
+      dispose: () => {
+        mock.disposals.push(argv)
+        if (mock.failDispose) throw new Error('child would not die')
+      },
       }
     },
   },
@@ -71,6 +76,8 @@ vi.mock('../../src/engine-codex/appserver/thread.ts', () => ({
 beforeEach(() => {
   mock.constructed.length = 0
   mock.spawns.length = 0
+  mock.disposals.length = 0
+  mock.failDispose = false
   mock.runStreamed.mockReset()
   mock.requestHandler = undefined
 })
@@ -1715,6 +1722,62 @@ describe('CodexAgent dsh endpoint handover', () => {
       await agent.whenIdle()
       expect(mock.spawns).toHaveLength(2)
     } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('shuts the app-server down once the configured idle window passes, respawning it on the next turn', async () => {
+    const ctx = await harness({ childIdleMs: 20 })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('idle-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      expect(mock.spawns).toHaveLength(1)
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(mock.disposals).toHaveLength(1)
+      // The session is untouched by the shutdown: the next turn spawns a fresh
+      // app-server through the same lazy accessor and answers normally.
+      agent.followup(message('two'))
+      await agent.whenIdle()
+      expect(mock.spawns).toHaveLength(2)
+      expect(mock.constructed).toHaveLength(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the app-server while turns keep arriving inside the idle window', async () => {
+    const ctx = await harness({ childIdleMs: 80 })
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('warm-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 40))
+      agent.followup(message('two'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 40))
+      expect(mock.disposals).toHaveLength(0)
+      expect(mock.spawns).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports a failing idle shutdown and leaves the session usable', async () => {
+    const ctx = await harness({ childIdleMs: 20 })
+    const warnSpy = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    try {
+      mock.runStreamed.mockImplementation(() => stream([itemCompleted(agentMessage('ok')), turnCompleted()]))
+      mock.failDispose = true
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('idle-fail-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('one'))
+      await agent.whenIdle()
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('child would not die'))
+    } finally {
+      mock.failDispose = false
       await ctx.fiber.dispose()
     }
   })

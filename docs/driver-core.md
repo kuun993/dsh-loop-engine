@@ -22,6 +22,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 | `session-lifetime.ts` | 一个活会话的生命周期资源（在 `ctx.sessions` store 里的条目 + 存放它事件的写句柄）由**哪个 agent 持有**：原地换手时整个对象从旧机器交到继任者手里，所以会话不会离开 `ctx.sessions`，也就不会发出 `session/disposed`（见 §4） |
 | `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
 | `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
+| `idle-child.ts` | 常驻子进程（kimi / codex）的空闲关停倒计时：arm 在相位落到 `idle` 时、cancel 在回到 `running` 时，到点只关**子进程**（不动 agent/session，因此不需要页面重载），见 §7.8 |
 | `hosted-tool-vocabulary.ts` | 把托管引擎的工具名与参数归一化到 dsh 词汇（同一组值喂给 `tool/call` 事件与 assistant 消息的 `tool-call` block），并抽出计划工具的 `todo/write` 列表 |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
@@ -418,6 +419,36 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 
 `resolveModelHandover` 的判据改动会同时改变四个引擎的端点注入与 warn 行为；映射表（kimi 的 `KIMI_PROVIDER_TYPES`、codex 的 `CODEX_WIRE_APIS`、shipped 路由的 `SHIPPED_ROUTE_APIS`）改动只影响对应分支。测试：`tests/driver-core/model-handover.spec.ts` 覆盖解析的每个分支（无映射 / 无 settings / 无 baseURL / 缺凭据 / 无 `api` 照常交出 / shipped 表补协议 / 声明优先于表 / warn 一次 / 凭据不入文案）；`tests/engine-{kimi,pi,codex}/model-handover.spec.ts` 覆盖三张映射表、`api` 缺省时的省略行为与 pi 目录落盘；四个 `tests/engine-*/agent.spec.ts` 各有"端点/凭据注入到引擎入口 / `external` 或空不注入 / 解析不到不注入 + warn 一次 / 中途改端点生效"一组，pi 另有"无协议则整份 handover 丢弃"，codex 另在 `tests/engine-codex/appserver/client.spec.ts` 覆盖 `create(argv, env)` 通路本身（含 `config.env` 之前无人消费的回归）。驱动器夹具在 `tests/helpers/dsh-model-endpoint.ts`（传 `api: ''` 即模拟"profile 里没有协议"）。
 
+## 7.8 idle-child.ts：常驻子进程的空闲关停
+
+### 解决什么问题
+
+Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` / `kimi acp`），跨 step 复用是它们不做每步 spawn 的原因——但 harness **不会在回合结束时释放 agent**（agent 与它所在会话的 scope 同寿），所以一条"跑完就晾着"的会话会一直养着那个子进程，内存按**会话数**线性增长，而会话数不是引擎数。这个模块提供把**子进程**（而不是 agent、session）按空闲回收的那一件小事。
+
+### 契约
+
+- `createIdleChildCloser({ idleMs, close, warn })` → `{ arm, cancel, dispose }`。
+  - `arm()`：`idleMs > 0` 时重起倒计时（先 cancel 再 arm，所以重复 arm 只延长窗口）；`idleMs <= 0` 时**完全不动**。
+  - `cancel()`：撤销待发倒计时（未 arm 过时为 no-op）。
+  - `dispose()`：同 `cancel`，供 owner 的 scope 拆除调用，保证已拆的 agent 不会通过过期回调去关进程。
+  - 倒计时到点：`close()`；`close` 抛错**不逃逸**，报给 `warn`（一个卡死的子进程不该把句柄变成未捕获异常）。
+  - 计时器 `unref()`：倒计时永远不会成为进程活着的理由。
+- **它不释放 agent**：dispose agent 会发 `session/disposed`，浏览器半把这页当作"会话没了"（`removed` 标记不再清除），所以那条路必须配页面重载（`router-loop.ts` `move` 的注释、`docs/per-session-engine.md` §5.2）。关子进程完全不碰 agent/session，页面无需刷新，代价只是"休眠后第一次说话多一次 spawn 延迟"。
+
+### 哪些引擎怎么用
+
+| 引擎 | holder | arm/cancel 的挂点 | 关闭动作 |
+|---|---|---|---|
+| kimi | `KimiAgent.acp`（`AcpClient`） | `setPhase`：落到 `idle` → `arm()`，其余 → `cancel()`（`src/engine-kimi/agent.ts:200-207`） | `closeChild()`（`:190`）= `acp?.dispose()` + 清缓存；下一次 step 由 `acpClient()` 懒 spawn |
+| codex | `CodexAgent.appServer` | 同上（`src/engine-codex/agent.ts:331-338`） | `closeChild()`（`:227`）；`appServerClient()` 懒 spawn |
+| claude / pi | 无常驻子进程（每 step 一次 query / 一次 spawn） | — | 本模块**用不到**；`childIdleMs` 到不了它们 |
+
+两条 attach 点同时也在 agent scope 的 effect 里调用 `idleChild.dispose()` 再关一次缓存（kimi `:182-186`、codex `:220-224`），所以拆除时顺序是"先撤倒计时，再关缓存"，不会残留计时器。
+
+### 改它会波及谁
+
+`childIdleMs` 的组合字段经 `src/index.ts` 的 `kimiConfig` / `codexConfig` 转发（其他两个引擎的配置函数不转发它）。测试：`tests/driver-core/idle-child.spec.ts` 覆盖倒计时/重 arm/取消/dispose/关闭抛错；`tests/engine-{kimi,codex}/agent.spec.ts` 各有一组"窗口过后子进程被关 + 下一轮重新 spawn" / "窗口内继续说话不关" / "失败上报且会话仍可用"。
+
 ## 8. 改动影响矩阵
 
 | 改动点 | 直接受影响 | 必须跑的测试 |
@@ -436,6 +467,7 @@ Web 客户端的工具行（`@deepseek-ai/dsh-client-ui-chat` 的 tool Definitio
 | `context-files.ts` 行走/加载 | codex、pi、kimi 的 `agents-md` 技能 | `tests/driver-core/context-files.spec.ts` + 三个 `tests/engine-*/skills.spec.ts` |
 | `agents-md-skill-provider.ts` 算法/候选构造 | codex、pi、kimi 三个 provider 的全部发现行为 | 三个 `tests/engine-*/skills.spec.ts`（**缺一不可**：分支散布在三份 spec 里，见 §9） |
 | `hosted-tool-vocabulary.ts` 映射/重塑/计划 | 四个引擎的 UI 工具行与产出文件呈现；assistant 消息里 tool-call block 的工具名（与 `tool/call` 事件同投影）；claude 的待办面板 | `tests/driver-core/hosted-tool-vocabulary.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
+| `idle-child.ts` 倒计时语义 | kimi/codex 常驻子进程的空闲回收（`childIdleMs`） | `tests/driver-core/idle-child.spec.ts` + `tests/engine-{kimi,codex}/agent.spec.ts` |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
 | `skills.ts` `parseSkillFile` | claude provider + 共享 provider（codex/pi/kimi）的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |

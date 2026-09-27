@@ -116,6 +116,14 @@ export interface Config extends ClaudeCodeConfig {
   /** Kimi CLI executable; `'kimi'` resolves through PATH when not pinned to an absolute path. */
   kimiBin?: string
   /**
+   * Idle window in milliseconds after which a hosted session's PERSISTENT child
+   * process (Kimi's `kimi acp`, Codex's app-server) is shut down and spawned
+   * again by the next step. Zero or omitted keeps the child for the session's
+   * whole life. Only these two engines hold a child between steps: the Pi and
+   * Claude Code drivers spawn per step, so the knob does not reach them.
+   */
+  childIdleMs?: number
+  /**
    * Default engine NEW sessions are created on. A live, profile-backed field:
    * the settings shell edits it and the running plugin reads it through this
    * volatile reference (`config.engine.get()`).
@@ -191,6 +199,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   piProvider: z.string(),
   piThinking: z.string(),
   kimiBin: z.string(),
+  childIdleMs: z.number(),
   // The live fields exist only on the 0.1.7 line; the 0.1.5 line carries the
   // selection in a settings section instead. The empty arm never runs when the
   // coverage job is on 0.1.7; the 0.1.5 dep set is exercised by
@@ -321,6 +330,7 @@ function codexConfig(config: Config): CodexConfig {
     ...config.approvalPolicy === undefined ? {} : { approvalPolicy: config.approvalPolicy },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.model === undefined ? {} : { model: config.model },
+    ...config.childIdleMs === undefined ? {} : { childIdleMs: config.childIdleMs },
   }
 }
 
@@ -341,6 +351,7 @@ function kimiConfig(config: Config): KimiConfig {
     ...config.model === undefined ? {} : { model: config.model },
     ...config.env === undefined ? {} : { env: config.env },
     ...config.kimiBin === undefined ? {} : { bin: config.kimiBin },
+    ...config.childIdleMs === undefined ? {} : { childIdleMs: config.childIdleMs },
   }
 }
 

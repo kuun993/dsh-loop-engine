@@ -18,4 +18,11 @@ export interface ResolvedConfig {
   readonly approvalPolicy: CodexApprovalPolicy | undefined
   readonly env: Record<string, string>
   readonly model: string | undefined
+  /**
+   * How long an idle session keeps its `codex app-server` child, in
+   * milliseconds; zero or less keeps it for the session's whole life. See
+   * `driver-core/idle-child.ts` for why the child, and not the agent, is what
+   * gets released.
+   */
+  readonly childIdleMs: number
 }

@@ -36,6 +36,12 @@ export interface Config {
   env?: Record<string, string>
   /** Kimi CLI executable; `'kimi'` resolves through PATH when not pinned to an absolute path. */
   bin?: string
+  /**
+   * Idle window in milliseconds before a session's `kimi acp` child is shut
+   * down, spawned again by the next step. Omitted or non-positive keeps the
+   * child for the session's whole life.
+   */
+  childIdleMs?: number
 }
 
 /** Schema of the Kimi loop plugin configuration. */
@@ -43,6 +49,7 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   env: z.dict(z.string()).default({}),
   bin: z.string(),
+  childIdleMs: z.number(),
 })
 
 /** Resolve the driver configuration at the plugin config boundary. */
@@ -51,6 +58,7 @@ function resolveConfig(config: Config): ResolvedConfig {
     model: config.model,
     env: config.env ?? {},
     bin: kimiBinResolver(config.bin),
+    childIdleMs: config.childIdleMs ?? 0,
   }
 }
 
