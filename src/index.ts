@@ -79,6 +79,7 @@ import { LEGACY_HARNESS } from './compat.ts'
 import {
   LOOP_ENGINE_ENGINE_SCHEMA,
   LOOP_ENGINE_SETTINGS_SCHEMA,
+  LOOP_ENGINE_SHOW_ENGINE_BADGE_SCHEMA,
   LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA,
   loopEngineSettingsNamespace,
   type HostedEngineId,
@@ -131,12 +132,15 @@ export interface Config extends ClaudeCodeConfig {
   engine: Volatile<LoopEngineId>
   /** Whether the chat composer shows the engine picker; a live, profile-backed field. */
   showInComposer: Volatile<boolean>
+  /** Whether the conversation header shows the engine badge; a live, profile-backed field. */
+  showEngineBadge: Volatile<boolean>
 }
 
 /** Rejected input of the composition entry: live fields arrive as plain values and resolve to references. */
-type ConfigInput = Omit<Config, 'engine' | 'showInComposer'> & {
+type ConfigInput = Omit<Config, 'engine' | 'showInComposer' | 'showEngineBadge'> & {
   engine?: LoopEngineId
   showInComposer?: boolean
+  showEngineBadge?: boolean
 }
 
 /**
@@ -178,12 +182,13 @@ interface LegacySettingsService {
  * is an engine-agnostic superset: every hosted engine's knobs live here at
  * once, because any session may select any engine.
  *
- * On the 0.1.7 line `engine` and `showInComposer` are the entry's live fields:
- * `.volatile()` makes them profile-backed settings the settings shell projects
- * as form fields, and the runtime reads each one through its reference
- * (`config.engine.get()`). On the 0.1.5 line there are no live Config fields —
- * the selection is a settings section (`LOOP_ENGINE_SETTINGS_SCHEMA`), whose
- * provider owns the storage — so the entry is the engine knobs alone.
+ * On the 0.1.7 line `engine`, `showInComposer`, and `showEngineBadge` are the
+ * entry's live fields: `.volatile()` makes them profile-backed settings the
+ * settings shell projects as form fields, and the runtime reads each one through
+ * its reference (`config.engine.get()`). On the 0.1.5 line there are no live
+ * Config fields — the selection is a settings section
+ * (`LOOP_ENGINE_SETTINGS_SCHEMA`), whose provider owns the storage — so the
+ * entry is the engine knobs alone.
  */
 export const Config: z<ConfigInput, Config> = z.object({
   profile: z.string(),
@@ -205,7 +210,11 @@ export const Config: z<ConfigInput, Config> = z.object({
   // coverage job is on 0.1.7; the 0.1.5 dep set is exercised by
   // vitest.config.compat015.ts, which takes it.
   /* v8 ignore next -- legacy arm, exercised by vitest.config.compat015.ts */
-  ...(LEGACY_HARNESS ? {} : { engine: LOOP_ENGINE_ENGINE_SCHEMA, showInComposer: LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA }),
+  ...(LEGACY_HARNESS ? {} : {
+    engine: LOOP_ENGINE_ENGINE_SCHEMA,
+    showInComposer: LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA,
+    showEngineBadge: LOOP_ENGINE_SHOW_ENGINE_BADGE_SCHEMA,
+  }),
 }) as z<ConfigInput, Config>
 
 /** Resolve the managed patch file from configuration, defaulting to the web profile. */
@@ -824,7 +833,7 @@ export function apply(ctx: Context, config: Config): void {
         LOOP_ENGINE_SETTINGS_SCHEMA,
         // The managed block's engine survives the upgrade as the section's seed;
         // a deployment with no block keeps the in-process default.
-        { engine: legacyEngine ?? 'in-process', showInComposer: true },
+        { engine: legacyEngine ?? 'in-process', showInComposer: true, showEngineBadge: true },
         {
           setSource: (current) => { source = current },
           onChange: () => {

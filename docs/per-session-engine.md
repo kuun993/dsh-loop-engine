@@ -93,13 +93,14 @@ preset 现在的定位是**agent-plane 组合**：它决定这个会话的 promp
 
 它是只读的，而且它读的是会话列表里的 `agentPreset` hint —— 在**换过引擎**的会话上它会停在**创建时**记的那个 preset（主仓 `packages/client/ui-agent-preset/src/client/AgentPresetLabel.tsx:1-8` 的模块注释）。现在它额外的语义变化是：**引擎已经不写在 preset 里了**，所以它显示的是"这条会话的组合面"，而不是"这条会话跑哪个引擎"。
 
-同一个 header 里还有**本插件的引擎 chip**（座位 `conversation.session.header.actions`，`src/client/index.ts:114-127`；`order: -20`，排在 preset 标签前面，`:122`）。它读的是**本插件自己的 Remote**（`remote.loopEngine.engine`，`src/client/LoopEngineBadge.tsx:87-111`，取值 hook 在 `src/client/use-session-engine.ts:71`）——也就是 §1.3 那份「实际 + 记录」报告。呈现规则：
+同一个 header 里还有**本插件的引擎 chip**（座位 `conversation.session.header.actions`，`src/client/index.ts:196-213`；`order: -20`，排在 preset 标签前面，`:208`）。它读的是**本插件自己的 Remote**（`remote.loopEngine.engine`，`src/client/LoopEngineBadge.tsx:97-132`，取值 hook 在 `src/client/use-session-engine.ts:79`）——也就是 §1.3 那份「实际 + 记录」报告。它同时读设置里的 `showEngineBadge` 一个字段（**只**这一个，`showInComposer` 对应的是 composer 选择器）：**关掉时 chip 整个不渲染**，与 composer 选择器受 `showInComposer` 控制是同一件事。呈现规则：
 
 - **名字永远取自 `engine`（实际）**：有引擎（活 agent 的、记录的、或 preset 映射给出的）→ 那个引擎的名字，tooltip 用 `sessionNotice` 说明"本会话当前运行的引擎：有活 agent 时就是正在驱动它的那个引擎，没有活 agent 时才看插件的会话级记录，没有记录再回退到它自己的 agent preset"（`src/client/locales.ts:116` 中文、`:161` 英文）。
 - **记录多出来的那一半只作为标注追加**，例如 `循环引擎 · Pi CLI · 切到 进程内引擎（默认） · 尚未接管`：文案由 `enginePendingPrefix`/`enginePendingSuffix`（`src/client/locales.ts:118-119` / `:163-164`）加目标引擎自己的名字拼出（`pendingEngineText`，`src/client/locales.ts:237`），tooltip 换成 `pendingSessionNotice`（`:121` / `:166`）说清"记录里的引擎没能接管，此刻仍由另一个引擎驱动；出现这种情况只有一种原因（上一次切换要释放旧 agent，而那次释放没有完成），再选一次目标引擎即可重试"。没有这一半时 chip 上一个字都不多。
 - 旧版单 preset id `loop-engine` → **"旧版托管引擎"**（`engineLegacy`，`:103` / `:148`）。它当时跑的确实是托管引擎，但那个 id 没记录是哪一个，所以 chip 不冒充"进程内引擎"；tooltip 换成 `legacySessionNotice`（`:117` / `:162`）如实说明"这是本插件早期版本创建的会话，它实际跑的引擎没有被记录"，并提示**选一个引擎就能在本会话里切换**。⚠️ 例外：这条会话**已经打开**时它由 harness loop 跑着，报告里的 `engine` 是 `in-process`（§1.3 末条），chip 就如实写 `in-process`；`legacy` 只在这条会话**没有活 agent** 时出现。
 - 其它 preset（harness 自带的 `standard` / 部署自建的）→ `in-process`（映射规则 §1.2）。
 - 会话没有记录任何 preset 且没有插件记录（或宿主答不出来）→ **chip 不渲染**（返回 `null`）。宿主第一次回答到达之前同样不渲染——**chip 从不猜**。
+- 设置在**设置 → 循环引擎**里把 *在对话头部显示引擎标记* 取消勾选 → 同样**整个不渲染**（`showEngineBadge`，默认 `true`），header 上不留下插件的任何痕迹；重新勾选即恢复。它只影响这个 chip，不影响 composer 选择器（那是 `showInComposer`）与 turn-status 行的配色。
 
 **chip 与 preset 标签的差别（重要）**：chip 显示的是"这条会话实际在跑什么"，而 harness 自己的 preset 标签读的是会话列表里的 `agentPreset` 投影 hint，在**换过引擎**的会话上它会停在**创建时**记的那个 preset。真实数据佐证：一条 header 记 `loop-engine-claude-code`、之后换到 pi 的会话，实际跑的是 pi（它自己写进 `request/header` 的 provider 就是 `pi`），chip 显示 Pi 而 preset 标签仍显示 Claude Code。判断"这条会话到底在跑什么"以 chip（或实际行为）为准。
 

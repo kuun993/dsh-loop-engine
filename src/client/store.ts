@@ -17,6 +17,7 @@ export interface LoopEngineState {
   status: 'loading' | 'ready' | 'unavailable' | 'saving'
   engine: LoopEngineId
   showInComposer: boolean
+  showEngineBadge: boolean
   writable: boolean
   error: string | null
 }
@@ -49,32 +50,42 @@ export interface LoopEngineSettingsTransport {
    * @param value - the value to write.
    * @returns whether the write was accepted, when the transport reports it.
    */
-  set(field: 'engine' | 'showInComposer', value: unknown): Promise<boolean | void>
+  set(field: 'engine' | 'showInComposer' | 'showEngineBadge', value: unknown): Promise<boolean | void>
 }
 
 /**
- * Narrow a wire section to the stored engine id and display toggle; an invalid
+ * Narrow a wire section to the stored engine id and display toggles; an invalid
  * one reads default. Used by the 0.1.5 `settingsScope.bind` decoder, whose scope
  * receives raw wire sections.
  * @param section - the wire section value.
  * @returns the decoded selection, or `undefined` when the section is unusable.
  */
-export function decodeLoopEngine(section: unknown): { engine: LoopEngineId; showInComposer: boolean } | undefined {
+export function decodeLoopEngine(
+  section: unknown,
+): { engine: LoopEngineId; showInComposer: boolean; showEngineBadge: boolean } | undefined {
   if (typeof section !== 'object' || section === null || Array.isArray(section)) return undefined
-  const { engine, showInComposer } = section as { engine?: unknown; showInComposer?: unknown }
+  const { engine, showInComposer, showEngineBadge } = section as {
+    engine?: unknown
+    showInComposer?: unknown
+    showEngineBadge?: unknown
+  }
   if (engine !== 'in-process' && engine !== 'claude-code' && engine !== 'codex' && engine !== 'pi' && engine !== 'kimi') {
     return undefined
   }
-  // Absent or non-boolean reads true: the composer picker stays visible unless
-  // the setting explicitly clears it.
-  return { engine, showInComposer: showInComposer !== false }
+  // Absent or non-boolean reads true: each surface stays visible unless the
+  // setting explicitly clears it.
+  return {
+    engine,
+    showInComposer: showInComposer !== false,
+    showEngineBadge: showEngineBadge !== false,
+  }
 }
 
 /** Coordinates the settings-backed loop engine selection. */
 export class LoopEngineStore {
   /** uSES-safe state source shared by the registered settings section. */
   readonly store: SnapshotStore<LoopEngineState> = createSnapshotStore<LoopEngineState>({
-    status: 'loading', engine: 'in-process', showInComposer: true, writable: false, error: null,
+    status: 'loading', engine: 'in-process', showInComposer: true, showEngineBadge: true, writable: false, error: null,
   })
 
   private following: (() => void) | undefined
@@ -145,6 +156,33 @@ export class LoopEngineStore {
     return landed
   }
 
+  /**
+   * Persist whether the conversation header shows the engine badge. Unlike
+   * {@link setEngine}, landing does not reload the page — the toggle only
+   * changes header visibility.
+   * @param show - whether the conversation header reveals the engine badge.
+   * @returns whether the write landed.
+   */
+  async setShowEngineBadge(show: boolean): Promise<boolean> {
+    this.saving = true
+    this.store.update((state) => { state.status = 'saving'; state.error = null })
+    let accepted: boolean | void = true
+    try {
+      accepted = await this.transport.set('showEngineBadge', show)
+    } finally {
+      this.saving = false
+    }
+    this.derive()
+    const landed = accepted !== false && this.store.getSnapshot().showEngineBadge === show
+    if (!landed) {
+      this.store.update((state) => {
+        state.status = 'unavailable'
+        state.error = 'the loop engine display setting did not persist'
+      })
+    }
+    return landed
+  }
+
   /** Stop following the transport. */
   dispose(): void {
     this.following?.()
@@ -163,16 +201,19 @@ export class LoopEngineStore {
           state.status = 'unavailable'
           state.engine = 'in-process'
           state.showInComposer = true
+          state.showEngineBadge = true
           state.error = null
         })
         return
       case 'ready': {
         const engine = snapshot.value?.engine ?? 'in-process'
         const showInComposer = snapshot.value?.showInComposer ?? true
+        const showEngineBadge = snapshot.value?.showEngineBadge ?? true
         this.store.update((state) => {
           state.status = 'ready'
           state.engine = engine
           state.showInComposer = showInComposer
+          state.showEngineBadge = showEngineBadge
           state.writable = snapshot.writable
           state.error = null
         })

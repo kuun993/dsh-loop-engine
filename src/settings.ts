@@ -14,8 +14,9 @@
  * generations: the 0.1.5 line addresses a settings SECTION registered by a
  * provider under a namespace string ({@link LOOP_ENGINE_SETTINGS_SCHEMA} via
  * {@link loopEngineSettingsNamespace}), while the 0.1.7 line makes the plugin's
- * two live fields profile-backed Config entries
- * ({@link LOOP_ENGINE_ENGINE_SCHEMA} / {@link LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA}).
+ * three live fields profile-backed Config entries
+ * ({@link LOOP_ENGINE_ENGINE_SCHEMA} / {@link LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA}
+ * / {@link LOOP_ENGINE_SHOW_ENGINE_BADGE_SCHEMA}).
  * Which family a running plugin builds is decided by `./compat.ts`
  * (`LEGACY_HARNESS`) in `./index.ts`.
  *
@@ -41,6 +42,8 @@ export interface LoopEngineSettings {
   engine: LoopEngineId
   /** Whether the composer's loop engine picker is shown on the chat page. */
   showInComposer: boolean
+  /** Whether the conversation header shows this plugin's engine badge. */
+  showEngineBadge: boolean
 }
 
 /**
@@ -51,6 +54,7 @@ export interface LoopEngineSettings {
 export const LOOP_ENGINE_SETTINGS_SCHEMA: z<LoopEngineSettings> = z.object({
   engine: z.union(LOOP_ENGINE_IDS.map(id => z.const(id))).default('in-process'),
   showInComposer: z.boolean().default(true),
+  showEngineBadge: z.boolean().default(true),
 })
 
 /** The 0.1.5-line namespace branded as a settings namespace on the node side. */
@@ -93,3 +97,6 @@ export const LOOP_ENGINE_ENGINE_SCHEMA = withVolatile(
 
 /** Live Config field schema for the composer picker toggle (0.1.7 line). */
 export const LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA = withVolatile(z.boolean().default(true))
+
+/** Live Config field schema for the conversation-header badge toggle (0.1.7 line). */
+export const LOOP_ENGINE_SHOW_ENGINE_BADGE_SCHEMA = withVolatile(z.boolean().default(true))

@@ -43,6 +43,7 @@ Boot `dsh web` once (the router retries for a bounded window while the base bund
   - Hosted → hosted: in place, applies on the spot.
   - Anything involving `in-process`: the composer asks first, then the page reloads and reopens the same session (scroll position and unsent draft are lost; the record is not).
   - A mid-turn session is refused, and a subagent's session cannot be moved.
+- **The header chip** beside the preset label names the engine the session on screen actually runs; *Show the engine badge in the conversation header* turns it off (and the header keeps no trace of the plugin).
 - **Models** — all hosted engines share one `external` group whose single entry, `default`, means "the engine decides". Picking a **real dsh model** hands it to the engine together with its endpoint and credential; whether the engine can serve it is the engine's business, and a refusal is reported rather than swallowed. `in-process` sessions use dsh's models normally.
 - **`childIdleMs`** (composition entry, milliseconds, default `0` = off) — Kimi and Codex keep **one child process per session** across steps; this closes it after that much idle time and respawns it on the next step. Only the child is closed, so nothing reloads. Pi and Claude Code spawn per step and are unaffected.
 - **dsh's own commands** (`/export`, `/feedback`, `/permission`) keep working under a hosted engine. Its preset is a copy of `standard` with the dsh-native rows an external engine replaces stripped out (dsh's `/plan`, `/compact`, the goal tool and `/goal`, the skill rows).

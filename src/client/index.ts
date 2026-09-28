@@ -187,13 +187,18 @@ export function apply(ctx: ClientContext): void {
   })
 
   // The conversation header badge reads the session's own engine through the
-  // plugin's Remote, so it needs only this plugin's copy plus that cache — not
-  // the settings store: the settings engine is the default for sessions created
-  // later, while the chip names what the session on screen actually runs.
-  // Registered in the conversation scope so it exists only where a session header
-  // is rendered.
+  // plugin's Remote, so it needs only this plugin's copy plus that cache — the
+  // settings store it also takes carries one thing only: the `showEngineBadge`
+  // toggle. The settings ENGINE is deliberately not read here: that value is the
+  // default for sessions created later, while the chip names what the session on
+  // screen actually runs. Registered in the conversation scope so it exists only
+  // where a session header is rendered.
   ctx.inject(['slots', 'conversation'], (scope: ClientContext) => {
-    const badgeInjected = (): LoopEngineBadgeInjected => ({ sessionEngines, t })
+    const badgeInjected = (): LoopEngineBadgeInjected => ({
+      sessionEngines,
+      hooks: { snapshot: controller.store },
+      t,
+    })
     scope.effect(() => {
       return scope.slots.register({
         name: 'conversation.session.header.actions',

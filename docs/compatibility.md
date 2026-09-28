@@ -92,7 +92,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 | 位置 | 0.1.5 线 | 0.1.7 线 | 手法 | 回归用例 |
 |---|---|---|---|---|
-| `src/index.ts` 的 `Config` 形状 | `Config` 只有引擎旋钮，选中值在 settings 段 | 多出 `engine` / `showInComposer` 两个 `.volatile()` 字段 | A（`...(LEGACY_HARNESS ? {} : {…})`） | `tests/index.spec.ts` |
+| `src/index.ts` 的 `Config` 形状 | `Config` 只有引擎旋钮，选中值在 settings 段 | 多出 `engine` / `showInComposer` / `showEngineBadge` 三个 `.volatile()` 字段 | A（`...(LEGACY_HARNESS ? {} : {…})`） | `tests/index.spec.ts` |
 | `src/index.ts` 的 `authorHostedPresets()` | preset 的载体是**目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`（`ensureEnginePresets`） | preset 的载体是 profile patch 里的四条 `insert` 行（`ensureEnginePresetRows`，`name: '@deepseek-ai/dsh-agent-preset'`） | A（`if (LEGACY_HARNESS) return …`） | `tests/index.spec.ts`（两代各断言自己那一半：现代行 + `describe.runIf(!LEGACY_HARNESS)` 块）与 `tests/preset.spec.ts` |
 | `src/index.ts` `apply()` 尾部的 settings 接线 | `ctx.inject(['settings'])` → `settings.installSection(ctx, ns, schema, seed, { setSource, onChange })` | `settings.configure({ auto: false })` + `ctx.on('settings/document-updated')` + `config.engine.get()` | A | `tests/index.spec.ts` |
 | `src/router-loop.ts` 的 `super(ctx, …)` | `maxParallelToolCalls?: number`，基础 loop 自带默认 | 必填 `Volatile<number>`，`super` 自己钉 `{ get: () => DEFAULT_MAX_PARALLEL_TOOL_CALLS }` | A | `tests/router-mount.spec.ts` |
@@ -103,7 +103,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 
 | 位置 | 差异 | 手法 |
 |---|---|---|
-| `src/settings.ts` 两族 schema | `LOOP_ENGINE_SETTINGS_SCHEMA`（0.1.5 的 settings 段）+ `loopEngineSettingsNamespace()` vs `LOOP_ENGINE_ENGINE_SCHEMA` / `LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA`（0.1.7 的活 Config 字段） | 两族都导出，由 `src/index.ts` 按代际选 |
+| `src/settings.ts` 两族 schema | `LOOP_ENGINE_SETTINGS_SCHEMA`（0.1.5 的 settings 段）+ `loopEngineSettingsNamespace()` vs `LOOP_ENGINE_ENGINE_SCHEMA` / `LOOP_ENGINE_SHOW_IN_COMPOSER_SCHEMA` / `LOOP_ENGINE_SHOW_ENGINE_BADGE_SCHEMA`（0.1.7 的活 Config 字段） | 两族都导出，由 `src/index.ts` 按代际选 |
 | `src/settings.ts` `withVolatile()` | 0.1.5 的 schemastery `3.18.1` **没有** `.volatile()`；模块在两代都会加载到这段声明 | B：能力探测，缺席时降级返回普通 schema |
 | `src/namespace.ts` | `'agent-loop-engine'`（0.1.5 settings 段命名空间）vs `'loop-engine'`（0.1.7 profile 条目 id） | C：两个字面量并存 |
 | `src/driver-core/prompt.ts` | tool-result 在 0.1.5 是 `role:'user'` + 单块 `tool-result` 内嵌 `content`/`isError`；0.1.7 是一等 `role:'tool'` 消息 | B：按 `role` 结构分发，**不引代际常量** |

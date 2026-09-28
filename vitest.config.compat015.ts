@@ -9,6 +9,10 @@
  * are aliased, so a nested transitive dependency still resolves through pnpm's
  * own layout rather than being redirected at a path that does not exist.
  *
+ * The two React entry points the browser half imports are aliased to the same
+ * node stand-ins the 0.1.7 config uses: they are harness module-table externals
+ * and are installed neither here nor in `node_modules`.
+ *
  * Run with: `npx vitest run --config vitest.config.compat015.ts`.
  */
 import { readdirSync } from 'node:fs'
@@ -17,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 const compatScope = fileURLToPath(new URL('./.compat-015/node_modules/@deepseek-ai/', import.meta.url))
+const fakeReact = fileURLToPath(new URL('./tests/helpers/fake-react.ts', import.meta.url))
 
 /** One alias per harness-scope package installed in the 0.1.5 set. */
 const alias = readdirSync(compatScope).map(name => ({
@@ -25,7 +30,14 @@ const alias = readdirSync(compatScope).map(name => ({
 }))
 
 export default defineConfig({
-  resolve: { alias },
+  resolve: {
+    alias: [
+      ...alias,
+      { find: /^react$/, replacement: fakeReact },
+      { find: /^react\/jsx-runtime$/, replacement: fakeReact },
+      { find: /^react\/jsx-dev-runtime$/, replacement: fakeReact },
+    ],
+  },
   test: {
     include: ['tests/**/*.spec.ts'],
   },

@@ -132,7 +132,7 @@ const error: CSSProperties = {
   color: 'var(--dsw-alias-state-error-primary)',
 }
 
-/** The composer-visibility toggle row: a labelled checkbox in the section tone. */
+/** One display-toggle row: a labelled checkbox in the section tone. */
 const toggleRow: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -159,7 +159,7 @@ const confirmBody: CSSProperties = {
 /** Render the engine dropdown plus the interrupt notice and the switch confirmation. */
 export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
   const { controller, useSnapshot, t } = props as SectionFace
-  const { status, engine, showInComposer, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
+  const { status, engine, showInComposer, showEngineBadge, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState<LoopEngineId | null>(null)
   const navId = useId()
@@ -235,6 +235,16 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
           onChange={(event) => { void controller.setShowInComposer(event.currentTarget.checked) }}
         />
         {t('showInComposerLabel')}
+      </label>
+      <label style={toggleRow}>
+        <input
+          type="checkbox"
+          checked={showEngineBadge}
+          disabled={disabled}
+          style={toggleCheckbox}
+          onChange={(event) => { void controller.setShowEngineBadge(event.currentTarget.checked) }}
+        />
+        {t('showEngineBadgeLabel')}
       </label>
       <Modal
         open={pending !== null}

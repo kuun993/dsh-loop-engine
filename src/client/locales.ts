@@ -29,6 +29,8 @@ export interface LoopEngineKey {
   engineLoading: string
   /** Settings toggle: show the engine picker in the chat page composer. */
   showInComposerLabel: string
+  /** Settings toggle: show the engine chip in the conversation header. */
+  showEngineBadgeLabel: string
   /** Unavailable-state message. */
   unavailable: string
   /** Notice shown when the selection would interrupt running agents. */
@@ -104,6 +106,7 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   engineUnrecorded: '未记录',
   engineLoading: '读取中…',
   showInComposerLabel: '在对话页显示引擎选择器',
+  showEngineBadgeLabel: '在对话头部显示引擎标记',
   unavailable: '循环引擎设置不可用',
   switchNotice: '这一选择只决定新会话用哪个引擎，已经在跑的会话不受影响。',
   saving: '保存中…',
@@ -149,6 +152,7 @@ export const en: Record<keyof LoopEngineKey, string> = {
   engineUnrecorded: 'Not recorded',
   engineLoading: 'Reading…',
   showInComposerLabel: 'Show the engine selector in the chat page',
+  showEngineBadgeLabel: 'Show the engine badge in the conversation header',
   unavailable: 'Loop engine settings are unavailable',
   switchNotice: 'This only decides what new sessions run; sessions already running keep their own engine.',
   saving: 'Saving…',

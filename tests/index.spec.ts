@@ -117,7 +117,7 @@ interface Booted {
   readonly ctx: Context
   /** The profile-backed settings service, or undefined for a settings-less boot. */
   readonly settings: FakeSettings | undefined
-  /** The plugin's own live Config fields (`engine`, `showInComposer`). */
+  /** The plugin's own live Config fields (`engine`, `showInComposer`, `showEngineBadge`). */
   readonly live: LiveLoopConfig
 }
 
@@ -468,8 +468,8 @@ describe('apply managed block', () => {
     expect(text).toContain(MANAGED_BLOCK_END)
     expect(text).not.toContain(LEGACY_MANAGED_BLOCK_BEGIN)
     // The plugin reads its own live Config fields, which the profile composed.
-    expect({ engine: live.engine(), showInComposer: live.showInComposer() })
-      .toEqual({ engine: 'in-process', showInComposer: true })
+    expect({ engine: live.engine(), showInComposer: live.showInComposer(), showEngineBadge: live.showEngineBadge() })
+      .toEqual({ engine: 'in-process', showInComposer: true, showEngineBadge: true })
   })
 
   it('leaves a file that already carries the block byte for byte intact', async () => {
@@ -772,10 +772,12 @@ describe('apply engine presets', () => {
       expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
     })
 
-    // A later commit that leaves the engine alone re-judges nothing: the
-    // picker's visibility is a presentation knob, not an engine selection.
+    // A later commit that leaves the engine alone re-judges nothing: a display
+    // toggle is a presentation knob, not an engine selection.
     live.setShowInComposer(false)
-    expect(live.showInComposer()).toBe(false)
+    live.setShowEngineBadge(false)
+    expect({ showInComposer: live.showInComposer(), showEngineBadge: live.showEngineBadge() })
+      .toEqual({ showInComposer: false, showEngineBadge: false })
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
   })

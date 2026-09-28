@@ -9,7 +9,8 @@
  *    `SettingsMutator` (`mutate`, optional `describe`) for the roster default,
  *    and the descriptor's `base` layer for the deployment's composed default
  *    model;
- *  - the plugin's OWN live Config fields (`engine`, `showInComposer`), which the
+ *  - the plugin's OWN live Config fields (`engine`, `showInComposer`,
+ *    `showEngineBadge`), which the
  *    running plugin reads through their references (`config.engine.get()`) and
  *    which a committed edit signals with a `settings/document-updated` event.
  *
@@ -147,31 +148,36 @@ export function installFakeSettings(
 }
 
 /**
- * The plugin's own two live Config fields, as the profile's Loader supplies them.
+ * The plugin's own live Config fields, as the profile's Loader supplies them.
  *
  * A committed edit is two things at once: the reference's new value and the
  * `settings/document-updated` event the plugin steers off. `setEngine` /
- * `setShowInComposer` do both, so a test drives the running plugin exactly the
- * way the settings shell does.
+ * `setShowInComposer` / `setShowEngineBadge` do both, so a test drives the
+ * running plugin exactly the way the settings shell does.
  */
 export interface LiveLoopConfig {
-  /** The references to hand `apply` as its `engine` / `showInComposer` config fields. */
+  /** The references to hand `apply` as its live config fields. */
   readonly config: {
     engine: { get(): LoopEngineId }
     showInComposer: { get(): boolean }
+    showEngineBadge: { get(): boolean }
   }
   /** Commit a new default engine and notify the plugin. */
   setEngine(engine: LoopEngineId): void
   /** Commit a new composer-picker visibility and notify the plugin. */
   setShowInComposer(show: boolean): void
+  /** Commit a new header-badge visibility and notify the plugin. */
+  setShowEngineBadge(show: boolean): void
   /** The current default engine. */
   engine(): LoopEngineId
   /** The current composer-picker visibility. */
   showInComposer(): boolean
+  /** The current header-badge visibility. */
+  showEngineBadge(): boolean
 }
 
 /**
- * Build the two references `apply` requires, plus the commit helpers.
+ * Build the live references `apply` requires, plus the commit helpers.
  *
  * The commit path is generation-aware so one spec drives either harness: on the
  * 0.1.7 line the selection is the plugin's own live Config field, committed by
@@ -186,11 +192,12 @@ export interface LiveLoopConfig {
  */
 export function createLiveLoopConfig(
   ctx: Context,
-  initial: { engine?: LoopEngineId; showInComposer?: boolean } = {},
+  initial: { engine?: LoopEngineId; showInComposer?: boolean; showEngineBadge?: boolean } = {},
   settings?: FakeSettings,
 ): LiveLoopConfig {
   let engine: LoopEngineId = initial.engine ?? 'in-process'
   let showInComposer = initial.showInComposer ?? true
+  let showEngineBadge = initial.showEngineBadge ?? true
   let revision = 0
   const legacySection = LEGACY_HARNESS && settings !== undefined ? settings : undefined
   const notify = (): void => {
@@ -205,10 +212,13 @@ export function createLiveLoopConfig(
     (legacySection?.sections.get(LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL)?.value.engine as LoopEngineId | undefined) ?? engine
   const readShowInComposer = (): boolean =>
     (legacySection?.sections.get(LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL)?.value.showInComposer as boolean | undefined) ?? showInComposer
+  const readShowEngineBadge = (): boolean =>
+    (legacySection?.sections.get(LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL)?.value.showEngineBadge as boolean | undefined) ?? showEngineBadge
   return {
     config: {
       engine: { get: readEngine },
       showInComposer: { get: readShowInComposer },
+      showEngineBadge: { get: readShowEngineBadge },
     },
     setEngine(next) {
       if (legacySection !== undefined) {
@@ -226,7 +236,16 @@ export function createLiveLoopConfig(
       showInComposer = next
       notify()
     },
+    setShowEngineBadge(next) {
+      if (legacySection !== undefined) {
+        legacySection.commitSection(LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL, { showEngineBadge: next })
+        return
+      }
+      showEngineBadge = next
+      notify()
+    },
     engine: readEngine,
     showInComposer: readShowInComposer,
+    showEngineBadge: readShowEngineBadge,
   }
 }

@@ -14,7 +14,10 @@
  *
  * The settings section's engine is NOT what this chip shows: that value is only
  * the default for sessions created later, and a session created before a default
- * change keeps running the engine it has. The two sessions that name no engine
+ * change keeps running the engine it has. The one settings value this chip DOES
+ * read is the display toggle: `showEngineBadge` off means the chip renders
+ * nothing at all, the way the composer picker renders nothing when
+ * `showInComposer` is off. The two sessions that name no engine
  * are reported as themselves rather than as the in-process loop: the pre-routing
  * single preset id reads as "legacy hosted engine" (it ran a hosted engine, the
  * id just never recorded which), and a session whose engine is not known — no
@@ -37,16 +40,22 @@
 
 import type { CSSProperties, JSX } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 // Type-only: pulls the ui-conversation SlotMap merge (the header actions).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { useEngineOfSession } from './use-session-engine.ts'
 import type { SessionEngineCache, SessionSeat } from './session-engine.ts'
+import type { LoopEngineState } from './store.ts'
 import { engineStateLabelKey, pendingEngineText, type en } from './locales.ts'
 
 /** Registration-side business face for the header badge. */
 export interface LoopEngineBadgeInjected {
   /** The plugin's authoritative per-session engine cache. */
   sessionEngines: SessionEngineCache
+  hooks: {
+    /** Badge-visibility snapshot bound by the UI renderer as useSnapshot. */
+    snapshot: SnapshotStore<LoopEngineState>
+  }
   /** Section copy bound to the engine dictionaries. */
   t: (key: keyof typeof en) => string
 }
@@ -81,16 +90,23 @@ const pill: CSSProperties = {
 /**
  * Render the session header's loop-engine chip for the session on screen.
  * @param props - composed slot props.
- * @returns the chip, or null when the seat carries no session to speak about or
- * the session's engine is not known yet (or not recorded at all).
+ * @returns the chip, or null when the seat carries no session to speak about,
+ * the session's engine is not known yet (or not recorded at all), or the
+ * settings hide the chip.
  */
 export function LoopEngineBadge(props: LoopEngineBadgeProps): JSX.Element | null {
-  const { sessionId, sessionEngines, useSession, t } = props as BadgeFace
+  const { sessionId, sessionEngines, useSession, useSnapshot, t } = props as BadgeFace
   // The session's live state, so the row stops painting when the turn ends —
   // the badge is a surface of the session on screen and carries the same
   // session-scoped kit as the composer. Called before the early returns below.
   const running = useSession?.(snapshot => snapshot.running)
   const report = useEngineOfSession(sessionEngines, sessionId, running)
+  // The settings' own display toggle, read here like the composer reads
+  // `showInComposer`: the chip is part of this plugin's surface, so a
+  // deployment that turns it off gets a header with no trace of the plugin.
+  // Read after the session hooks so the hook order is the same on every render.
+  const showEngineBadge = useSnapshot((snapshot: LoopEngineState) => snapshot.showEngineBadge)
+  if (!showEngineBadge) return null
   if (sessionId === undefined || report === undefined) return null
   const engine = report.engine
   // A session the host reads as recording no preset: nothing is claimed for it,
