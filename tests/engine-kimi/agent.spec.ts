@@ -850,8 +850,13 @@ describe('KimiAgent tool and chunk edges', () => {
       expect(events.find(event => event.type === 'tool/call')).toMatchObject({
         data: { callId: '0:call_orphan', name: 'bash', arguments: '{}' },
       })
-      // Nothing ran, so there is no result to pair it with.
-      expect(events.some(event => event.type === 'tool/result')).toBe(false)
+      // Nothing ran and no outcome ever arrived, so the step closes the call
+      // itself: an announced call left unresolved at `step/end` is exactly the
+      // shape Session V4 refuses (`step/end leaves unresolved tool call …`).
+      const results = events.filter(event => event.type === 'tool/result')
+      expect(results).toHaveLength(1)
+      expect(toolResultView(results[0]!.data.message)).toMatchObject({ toolCallId: '0:call_orphan', isError: true })
+      expect(results[0]!.data).toMatchObject({ error: { code: 'TOOL_OUTCOME_UNKNOWN' } })
     } finally {
       await ctx.fiber.dispose()
     }

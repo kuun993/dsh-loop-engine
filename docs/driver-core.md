@@ -23,6 +23,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 | `inbox.ts` | 驱动自有的 durable 收件箱：从会话自己的 `agent/inbox/spliced` 事件折叠待处理输入，每次改动先落日志再改内存列表 |
 | `assistant-stream.ts` | 一次流式尝试的 live 帧发布（`agent/assistant-stream` 的 start/chunk/end）、交给 durable `assistant/message` 的精确计时 stream 压缩，以及按内容边界切分该 stream 的 `takeStream()` |
 | `idle-child.ts` | 常驻子进程（kimi / codex）的空闲关停倒计时：arm 在相位落到 `idle` 时、cancel 在回到 `running` 时，到点只关**子进程**（不动 agent/session，因此不需要页面重载），见 §7.8 |
+| `step-tools.ts` + `step-close.ts` | 一个 step 里"已宣告、未结算"的工具调用：`step-tools` 记这笔账（并顺带保证同一个 call 在一个 step 里只写一次结果），`step-close` 在 `step/end` 之前给仍未结算的调用补一条明确的失败结果。v4 不允许 `step/end` 带着未结算的宣告（否则整条日志拒绝加载），见 §7.9 |
 | `hosted-tool-vocabulary.ts` | 把托管引擎的工具名与参数归一化到 dsh 词汇（同一组值喂给 `tool/call` 事件与 assistant 消息的 `tool-call` block），并抽出计划工具的 `todo/write` 列表 |
 | `context-files.ts` | 从会话 cwd 向上走到 git root 的上下文文件发现与读取 |
 | `skill-inject.ts` | 复刻 dsh `/name` 技能手势扫描与 `<skill_content>` 渲染 |
@@ -449,6 +450,45 @@ Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` /
 
 `childIdleMs` 的组合字段经 `src/index.ts` 的 `kimiConfig` / `codexConfig` 转发（其他两个引擎的配置函数不转发它）。测试：`tests/driver-core/idle-child.spec.ts` 覆盖倒计时/重 arm/取消/dispose/关闭抛错；`tests/engine-{kimi,codex}/agent.spec.ts` 各有一组"窗口过后子进程被关 + 下一轮重新 spawn" / "窗口内继续说话不关" / "失败上报且会话仍可用"。
 
+## 7.9 step-tools.ts + step-close.ts：一个 step 的"宣告—结果"平衡
+
+### 解决什么问题
+
+会话格式 v4 有一条硬规则：**一个 step 在 `step/end` 时，它宣告过的每个工具调用都必须已经有结果**（校验器 `packages/session/session-format-v3-to-v4/src/relationships.ts` 的 `closeTools`：`if (this.tools.size !== 0) throw new SessionFormatError(\`${type} leaves unresolved tool call …\`)`）。违反的后果不是"少一条记录"，而是**整条会话日志读不出来**（用户侧就是"历史加载失败"）。
+
+主持久引擎的驱动是**从两个不同的流**分别得知"宣告"与"结果"的（一个模型回合可以一次宣告多个调用，而结果随后陆续回来），所以"这一步还欠哪些结果"是驱动必须自己记的状态，**不能指望转录里的位置去暗示**。真机上撞过：`turn 32 / step 4` 宣告 6 个调用、只回了 1 个结果就 `step/end`，整条会话 707 个 step 里有 **57 个**这样。
+
+### 契约
+
+`step-tools.ts` 的 `createStepTools()` → `{ announce, settle, balanced, pending, clear }`：
+
+- `announce(callId)`：这个 step 宣告了一个调用；
+- `settle(callId)`：这个 step 写了一个结果。**返回 `false` 表示这个调用在本 step 已经结算过**——那第二次写入正是 v4 会拒的镜像违规（`tool/result … has no advertised tool lifecycle`，SDK 会在 ~57ms 后把同一个结果再送一遍）；
+- `balanced`：本 step 宣告的调用是否都已有结果；
+- `pending`：还欠结果的那些，**按宣告顺序**（补写时保持转录顺序）；
+- `clear()`：下一个 step 换一套账（call id 在会话内唯一，清掉只会放宽去重，不会漏掉真实结果）。
+
+`step-close.ts` 的 `closeStep(session, tools, turn, step)`：**先**给每个 `pending` 补一条 `isError: true` 的 `tool/result`（文案说明"引擎结束了这一步却没报回结果、结果未知、是否重试看工具语义"，`error.code = TOOL_OUTCOME_UNKNOWN`——这两个词表都取自 harness 自己的 closer，`TOOL_OUTCOME_UNKNOWN` 由 `@deepseek-ai/dsh-session` 导出），**再**写 `step/end`。它是**收口**而不是修历史：只处理正在关的那一步。
+
+### 哪些引擎怎么用
+
+四个驱动同一套接法（claude 为样板）：
+
+| 位置 | 接法 |
+|---|---|
+| 驱动字段 | `private readonly stepTools = createStepTools()`（每步重置；claude 用它替掉了原先只做去重的 `settledCalls`） |
+| 宣告点 | 每个写 `tool/call` 事件的地方，紧邻其前 `this.stepTools.announce(<callId>)` |
+| 结果点 | 每个写 `tool/result` 的地方，先 `if (!this.stepTools.settle(<callId>)) continue`（按各自控制流落地） |
+| `beginSegment` | 早退条件加一条：`… \|\| !this.stepTools.balanced`——**还欠结果就不翻页**。翻页原本的判据是"这一步已经跑过任意一个工具"，而引擎在一个回合里宣告多个调用后会一个一个回结果，第一个结果一到就翻页会把其余调用丢在一个再也无法结算的 step 里 |
+| 每个 `step/end` | 改成 `closeStep(this.session, this.stepTools, turn, step)`，并把 `stepTools.clear()` 放在同一处（与 `stepSettledTools = 0` 并列） |
+| 每步入口 | 与 `stepSettledTools = 0` 一起 `this.stepTools.clear()` |
+
+各驱动的形态差异：**claude** 与 **kimi/pi** 都有一段真实的"宣告了还没结果"的窗口（claude 的 SDK 逐条送结果、kimi 的 `flushSegment` 一次写多个 `tool/call` 而结果只写settled 的那个、pi 同理），所以这条对它们是实打实的修复；**codex** 把 `tool/call` 与 `tool/result` 背靠背写在同一个分支里（本来就是平衡的），接上之后 `closeStep` 在那里是一张网而不是常用路径。
+
+### 改它会波及谁
+
+`beginSegment` 的翻页判据与每个 `step/end` 的收口点，都直接决定**日志能不能被加载**，所以四个引擎的 `tests/engine-*/agent.spec.ts` 都要跑。测试：`tests/driver-core/step-close.spec.ts` 覆盖 `stepTools` 的每条语义（宣告/结算/重复结算被拒/顺序/**未宣告就结算**/清理）与 `closeStep`（平衡时只写 `step/end`、欠结果时按序补错误结果、多个欠账）；`tests/engine-claude/agent.spec.ts` 另有两条端到端回归——"宣告了两个只回一个 → 收口补齐"与"还欠结果时不翻页"。
+
 ## 8. 改动影响矩阵
 
 | 改动点 | 直接受影响 | 必须跑的测试 |
@@ -468,6 +508,7 @@ Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` /
 | `agents-md-skill-provider.ts` 算法/候选构造 | codex、pi、kimi 三个 provider 的全部发现行为 | 三个 `tests/engine-*/skills.spec.ts`（**缺一不可**：分支散布在三份 spec 里，见 §9） |
 | `hosted-tool-vocabulary.ts` 映射/重塑/计划 | 四个引擎的 UI 工具行与产出文件呈现；assistant 消息里 tool-call block 的工具名（与 `tool/call` 事件同投影）；claude 的待办面板 | `tests/driver-core/hosted-tool-vocabulary.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `idle-child.ts` 倒计时语义 | kimi/codex 常驻子进程的空闲回收（`childIdleMs`） | `tests/driver-core/idle-child.spec.ts` + `tests/engine-{kimi,codex}/agent.spec.ts` |
+| `step-tools.ts` / `step-close.ts` 平衡语义 | **四个驱动写出的日志能否被 v4 加载**（宣告—结果的配对与收口） | `tests/driver-core/step-close.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
 | `skill-inject.ts` 手势/渲染 | 四个引擎的技能注入文本 | 四个 `tests/engine-*/agent.spec.ts` |
 | `skills.ts` `parseSkillFile` | claude provider + 共享 provider（codex/pi/kimi）的技能解析 | `tests/skills.spec.ts`、`tests/engine-pi/skills.spec.ts`、`tests/engine-kimi/skills.spec.ts` |
 | `skills.ts` `findProjectRoot` | claude 技能锚定 + codex/pi/kimi 目录链（context-files 反向依赖） | 全部 skills 相关 spec |

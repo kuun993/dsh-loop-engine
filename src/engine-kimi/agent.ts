@@ -33,6 +33,8 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { createStepTools } from '../driver-core/step-tools.ts'
+import { closeStep, settleResult } from '../driver-core/step-close.ts'
 import { createIdleChildCloser, type IdleChildCloser } from '../driver-core/idle-child.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
@@ -448,8 +450,9 @@ export class KimiAgent implements Agent {
         } finally {
           // The driver rotates steps as kimi's internal segments complete, so
           // `phase.step` — not the step this iteration opened — is the one still
-          // open here.
-          this.session.append('step/end', { turn, step: phase.step })
+          // open here, and it may still owe results the engine never reported.
+          closeStep(this.session, this.stepTools, turn, phase.step)
+          this.stepTools.clear()
         }
         signal.throwIfAborted()
         /* v8 ignore start -- every step() completes, so turnEnds is always set here; the short-circuit arm is a defensive backstop */
@@ -575,6 +578,7 @@ export class KimiAgent implements Agent {
     this.toolContent = new Map()
     this.producedOutput = false
     this.stepSettledTools = 0
+    this.stepTools.clear()
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -673,6 +677,22 @@ export class KimiAgent implements Agent {
    * opens the next step (see {@link beginSegment}).
    */
   private stepSettledTools = 0
+
+  /**
+   * The current step's calls, and which of them already carry a result.
+   *
+   * Kimi announces a call and reports its outcome on separate ACP updates, so
+   * "which calls of THIS step are still open" is state the driver has to keep.
+   * Both halves of the Session V4 rule read it: a call may not be given a second
+   * result in one step, and a step may not end while a call it announced has no
+   * result at all — the closing pass writes the missing outcome instead
+   * ({@link closeStep}).
+   *
+   * Reset per step (see {@link step}), never on an internal segment rotation:
+   * call ids are unique for the life of the session, so retaining the marks only
+   * widens duplicate suppression and can never hide a legitimate result.
+   */
+  private readonly stepTools = createStepTools()
   /**
    * Tool calls the current segment has already received input for, awaiting the
    * segment's single assistant message. A model turn that announces several
@@ -711,13 +731,21 @@ export class KimiAgent implements Agent {
    * applied belongs to the next one. Rotating here (rather than when a call is
    * announced) keeps calls that were announced before any result — one model
    * turn — in a single step.
+   *
+   * A step that still OWES a result does not rotate: Kimi announces several
+   * calls in one turn and settles them one at a time, and rotating on the first
+   * outcome would strand the rest in a step that can never resolve them
+   * (`step/end leaves unresolved tool call …`). Those calls run one model turn
+   * later instead, which is what they belong to, and a call the engine never
+   * answers is closed by {@link closeStep} rather than by moving on.
    */
   private beginSegment(phase: RunningPhase): void {
-    if (this.stepSettledTools === 0) return
-    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    if (this.stepSettledTools === 0 || !this.stepTools.balanced) return
+    closeStep(this.session, this.stepTools, phase.turn, phase.step)
     phase.step += 1
     this.session.append('step/start', { turn: phase.turn, step: phase.step })
     this.stepSettledTools = 0
+    this.stepTools.clear()
   }
 
   /** Apply one streamed update to the open step's blocks and stream. */
@@ -793,10 +821,12 @@ export class KimiAgent implements Agent {
         this.flushSegment(phase)
         // The branch guards above guarantee the entry exists, so a bare get() is
         // defined and needs no `?? ''` fallback.
-        const message = toolResult(callId, this.toolContent.get(callId)!, isToolErrorStatus(status))
-        this.session.append('tool/result', { turn: phase.turn, step: phase.step, message }, { surfaceOp: 'append' })
-        this.toolContent.delete(callId)
-        this.stepSettledTools += 1
+        settleResult(this.stepTools, ToolCallId(callId), () => {
+          const message = toolResult(callId, this.toolContent.get(callId)!, isToolErrorStatus(status))
+          this.session.append('tool/result', { turn: phase.turn, step: phase.step, message }, { surfaceOp: 'append' })
+          this.toolContent.delete(callId)
+          this.stepSettledTools += 1
+        })
       }
       return
     }
@@ -842,6 +872,7 @@ export class KimiAgent implements Agent {
     })
     this.flushAssistant(phase, normalized)
     for (const call of normalized) {
+      this.stepTools.announce(ToolCallId(call.callId))
       this.session.append('tool/call', { turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments })
     }
   }

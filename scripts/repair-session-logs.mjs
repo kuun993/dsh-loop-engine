@@ -74,7 +74,9 @@
  * backup is written next to the artifact as `<file>.bak`, whatever the
  * generation.
  *
- * `--check` reports, per file, the structural defect counts (family 1) and the
+ * `--check` reports, per file, the structural defect counts (family 1, including
+ * `unresolved-at-step-end` — the count of advertised calls that a `step/end`
+ * still owed a result, which is what v4 load refuses) and the
  * projection-mismatch count (family 6), then a summary broken down by
  * generation. With `--check` and no file arguments it scans the session root
  * (`$DSH_SESSIONS_ROOT`, else `~/.dsh/sessions`). A repair that changes nothing
@@ -829,6 +831,36 @@ function inspectArtifact(path) {
   for (const count of counts.values()) duplicateResults += count - 1
   const started = events.filter(event => event.type === 'tool/call').map(event => event.data.callId)
   const unresolved = started.filter(callId => !settled.has(callId)).length
+  // A result in the WRONG step is a different defect from a missing one, and it
+  // is the one v4 actually refuses (`step/end leaves unresolved tool call …`):
+  // the log has an outcome for the call, but not in the step that announced it.
+  // The repair moves such a result back; this counter is what tells `--check`
+  // that the file needs it.
+  let unresolvedAtStepEnd = 0
+  const openByStep = new Map()
+  for (const event of events) {
+    const key = stepKey(event.data?.turn, event.data?.step)
+    if (event.type === 'step/start') {
+      openByStep.set(key, new Set())
+      continue
+    }
+    if (event.type === 'step/end') {
+      unresolvedAtStepEnd += openByStep.get(key)?.size ?? 0
+      openByStep.delete(key)
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      for (const id of advertisedIds(event)) openByStep.get(key)?.add(id)
+      continue
+    }
+    if (event.type === 'tool/call') {
+      openByStep.get(key)?.add(event.data.callId)
+      continue
+    }
+    if (event.type === 'tool/result') {
+      openByStep.get(key)?.delete(event.data?.message?.source?.callId)
+    }
+  }
   let count = 0
   for (const group of unadvertised.values()) count += group.length
   return {
@@ -837,6 +869,7 @@ function inspectArtifact(path) {
     lateAdvertisement,
     duplicateResults,
     unresolved,
+    unresolvedAtStepEnd,
     systemHead: needsSystemHead(events),
     projectionMismatch: countProjectionMismatches(events),
   }
@@ -1041,7 +1074,7 @@ async function main() {
     for (const path of scanned) {
       const finding = inspectArtifact(path)
       const structural = finding.unadvertised + finding.lateAdvertisement + finding.duplicateResults
-        + finding.unresolved + (finding.systemHead ? 1 : 0)
+        + finding.unresolved + finding.unresolvedAtStepEnd + (finding.systemHead ? 1 : 0)
       const totals = stats.get(finding.generation) ?? { files: 0, structural: 0, projection: 0 }
       totals.files += 1
       stats.set(finding.generation, totals)
@@ -1052,6 +1085,7 @@ async function main() {
       console.log(`v${finding.generation} ${path}`)
       console.log(`  family-1 structural: unadvertised ${finding.unadvertised}, late ${finding.lateAdvertisement},`
         + ` duplicate-results ${finding.duplicateResults}, unresolved ${finding.unresolved},`
+        + ` unresolved-at-step-end ${finding.unresolvedAtStepEnd},`
         + ` system-head ${finding.systemHead ? 'yes' : 'no'}`)
       console.log(`  family-6 projection-mismatch: ${finding.projectionMismatch} tool/call(s)`)
     }

@@ -583,8 +583,7 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
-  it('writes one tool/result when the SDK redelivers the same result', async () => {
-    // The Claude Agent SDK delivers the same tool result in two `user`
+  it('writes one tool/result when the SDK redelivers the same result', async () => {    // The Claude Agent SDK delivers the same tool result in two `user`
     // messages ~57 ms apart. Session V4 deletes a call's pending entry on the
     // first result, so a second one for the same call is refused
     // (`tool/result <id> has no advertised tool lifecycle`) and the whole log
@@ -611,6 +610,81 @@ describe('ClaudeCodeAgent turn mapping', () => {
         toolCallId: 'toolu_dup',
         content: [{ type: 'text', text: 'contents of a' }],
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('closes a step whose announced calls the engine never answered', async () => {
+    // Session V4 refuses a `step/end` that leaves an announced call unresolved
+    // (`step/end leaves unresolved tool call …`), and the whole log then fails
+    // to load. A model turn that announces several calls and reports fewer
+    // outcomes than it announced is exactly that shape, so the closing pass
+    // states the missing outcome instead of leaving the step unbalanced.
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        assistantToolUse('toolu_a', 'Read', { file_path: 'a.txt' }),
+        assistantToolUse('toolu_b', 'Read', { file_path: 'b.txt' }),
+        toolResultMessage('toolu_a', 'contents of a'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('unanswered-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read both' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // Both announcements stay in one step (the second could not rotate past an
+      // unresolved first call), and the step ends balanced.
+      expect(stepStructure(agent.session).filter(tag => tag.endsWith('@1'))).toEqual([
+        'step/start@1', 'assistant/message@1', 'tool/call@1',
+        'assistant/message@1', 'tool/call@1', 'tool/result@1', 'tool/result@1', 'step/end@1',
+      ])
+      const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+      expect(results.map(event => toolResultView(event.data.message).toolCallId)).toEqual(['toolu_a', 'toolu_b'])
+      expect(results.map(event => toolResultView(event.data.message).isError)).toEqual([false, true])
+      expect(results[1]!.data).toMatchObject({ error: { code: 'TOOL_OUTCOME_UNKNOWN' } })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not rotate away from a step that owes a result', async () => {
+    // A settled result lets the next assistant content rotate — that is how one
+    // segment per step is built — but a call announced since then is still open,
+    // and rotating again would strand it in a step that can never resolve it.
+    const ctx = await harness()
+    try {
+      queryMock.mockImplementation(() => stream([
+        assistantToolUse('toolu_a', 'Read', { file_path: 'a.txt' }),
+        toolResultMessage('toolu_a', 'contents of a'),
+        assistantToolUse('toolu_b', 'Read', { file_path: 'b.txt' }),
+        assistantText('and b is next'),
+        successResult(),
+      ]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('owed-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'read a then b' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      const events = agent.session.snapshotEvents()
+      const announcedB = events.find(event => event.type === 'tool/call' && event.data.callId === 'toolu_b')!
+      const trailingText = events.find(event => event.type === 'assistant/message'
+        && JSON.stringify(event.data).includes('and b is next'))!
+      const answeredB = events.find(event => event.type === 'tool/result'
+        && toolResultView(event.data.message).toolCallId === 'toolu_b')!
+
+      // `b` was announced in the step the settled `a` opened...
+      expect(announcedB.data.step).toBe(2)
+      // ...and the content that arrived while `b` was still owed stayed there,
+      // as did the outcome `b` never produced.
+      expect(trailingText.data.step).toBe(announcedB.data.step)
+      expect(answeredB.data.step).toBe(announcedB.data.step)
+      expect(toolResultView(answeredB.data.message).isError).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

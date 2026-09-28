@@ -18,7 +18,7 @@ import type {
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import {
   AssistantStreamAccumulator,
   LlmError,
@@ -44,6 +44,8 @@ import {
 } from './mapping.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { createStepTools } from '../driver-core/step-tools.ts'
+import { closeStep } from '../driver-core/step-close.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover } from '../driver-core/model-handover.ts'
@@ -147,18 +149,25 @@ export class ClaudeCodeAgent implements Agent {
   private stepSettledTools = 0
 
   /**
-   * Calls already given a `tool/result` in the current step. The Claude Agent
-   * SDK delivers the same tool result in two `user` messages ~57 ms apart, and
-   * Session V4 keys its pending-tool map by call id alone — it deletes the call
-   * on the first result, so a second result for the same call is refused
-   * (`tool/result <id> has no advertised tool lifecycle`) and the whole session
-   * log fails to load. The durable contract is exactly one result per call, so
-   * a repeat is dropped rather than appended. Reset per step (see {@link step}),
-   * never on an internal segment rotation: call ids are unique for the life of
-   * the session, so retaining the marks only widens duplicate suppression and
-   * can never hide a legitimate result.
+   * The current step's calls, and which of them already carry a result.
+   *
+   * Two facts, both of them load-bearing for Session V4:
+   *
+   *  - a call must not be given a SECOND result in one step. The Claude Agent
+   *    SDK delivers the same tool result in two `user` messages ~57 ms apart,
+   *    and V4 keys its pending-tool map by call id alone — it deletes the call
+   *    on the first result, so a repeat is refused (`tool/result <id> has no
+   *    advertised tool lifecycle`) and the whole session log fails to load;
+   *  - a step must not END while a call it announced has no result at all
+   *    (`step/end leaves unresolved tool call <id>`). An engine that announces
+   *    several calls in one model turn and reports fewer outcomes leaves the
+   *    step unbalanced, so the closing pass writes the missing outcomes.
+   *
+   * Reset per step (see {@link step}), never on an internal segment rotation:
+   * call ids are unique for the life of the session, so retaining the marks
+   * only widens duplicate suppression and can never hide a legitimate result.
    */
-  private readonly settledCalls = new Set<ToolCallId>()
+  private readonly stepTools = createStepTools()
 
   /**
    * Whether the current query has rotated into a second step. The query-total
@@ -468,8 +477,9 @@ export class ClaudeCodeAgent implements Agent {
         } finally {
           // The driver rotates steps as the query's segments complete, so
           // `phase.step` — not the step this iteration opened — is the one still
-          // open here.
-          this.session.append('step/end', { turn, step: phase.step })
+          // open here, and it may still owe results the engine never reported.
+          closeStep(this.session, this.stepTools, turn, phase.step)
+          this.stepTools.clear()
         }
         signal.throwIfAborted()
         if (turnEnds && this.inbox.nextStep.length === 0) {
@@ -514,14 +524,22 @@ export class ClaudeCodeAgent implements Agent {
    * result means the previous segment is complete, and the content about to be
    * written belongs to the next one. Rotating here (rather than when a call is
    * announced) keeps calls announced together — one model turn — in one step.
+   *
+   * A step that still OWES a result does not rotate: an engine that announces
+   * several calls in one turn reports their outcomes one at a time, and rotating
+   * on the first one would strand the rest in a step that can never resolve them
+   * (`step/end leaves unresolved tool call …`). Those calls run one model turn
+   * later instead, which is what they belong to, and a call the engine never
+   * answers is closed by {@link closeStep} rather than by moving on.
    * @param phase - the running phase carrying the open step's position.
    */
   private beginSegment(phase: RunningPhase): void {
-    if (this.stepSettledTools === 0) return
-    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    if (this.stepSettledTools === 0 || !this.stepTools.balanced) return
+    closeStep(this.session, this.stepTools, phase.turn, phase.step)
     phase.step += 1
     this.session.append('step/start', { turn: phase.turn, step: phase.step })
     this.stepSettledTools = 0
+    this.stepTools.clear()
     this.rotated = true
   }
 
@@ -553,7 +571,7 @@ export class ClaudeCodeAgent implements Agent {
     const { abort: { signal } } = phase
     signal.throwIfAborted()
     this.stepSettledTools = 0
-    this.settledCalls.clear()
+    this.stepTools.clear()
     this.rotated = false
 
     const cwd = this.session.header.cwd
@@ -744,6 +762,7 @@ export class ClaudeCodeAgent implements Agent {
             }
             for (const call of mapped.toolCalls) {
               const normalized = normalizedCalls.get(call.callId)!
+              this.stepTools.announce(call.callId)
               this.session.append('tool/call', {
                 turn: phase.turn,
                 step: phase.step,
@@ -764,14 +783,12 @@ export class ClaudeCodeAgent implements Agent {
             for (const result of mapToolResults(message.message)) {
               // The SDK redelivers each result in a second `user` message; the
               // contract keeps exactly one `tool/result` per call, so a call
-              // already settled this step is a no-op (see {@link settledCalls}).
+              // already settled this step is a no-op (see {@link stepTools}).
               // `source.callId` is the id both harness generations carry; the
               // 0.1.5 message nests its call id in a block and has no top-level
               // `toolCallId`, so reading the source is what makes the guard
               // generation-neutral.
-              const callId = result.source.callId
-              if (this.settledCalls.has(callId)) continue
-              this.settledCalls.add(callId)
+              if (!this.stepTools.settle(result.source.callId)) continue
               this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: result }, { surfaceOp: 'append' })
               this.stepSettledTools += 1
             }

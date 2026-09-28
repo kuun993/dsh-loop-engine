@@ -37,6 +37,8 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { createStepTools } from '../driver-core/step-tools.ts'
+import { closeStep, settleResult } from '../driver-core/step-close.ts'
 import { createIdleChildCloser, type IdleChildCloser } from '../driver-core/idle-child.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
@@ -161,6 +163,22 @@ export class CodexAgent implements Agent {
   private stepSettledTools = 0
 
   /**
+   * The current step's calls, and which of them already carry a result.
+   *
+   * Codex reports a call and its outcome as one item, so this pairing settles as
+   * it is written and the closing pass is normally a net — it is wired anyway,
+   * because the Session V4 rule it enforces is the step's, not the item's: a
+   * call may not be given a second result in one step, and a step may not end
+   * while a call it announced has no result at all ({@link closeStep} writes the
+   * missing outcome).
+   *
+   * Reset per step (see {@link step}), never on an internal segment rotation:
+   * call ids are unique for the life of the session, so retaining the marks only
+   * widens duplicate suppression and can never hide a legitimate result.
+   */
+  private readonly stepTools = createStepTools()
+
+  /**
    * Rotate to the next step when the segment that ran a tool has finished, so
    * each assistant segment lands in its own step.
    *
@@ -168,15 +186,22 @@ export class CodexAgent implements Agent {
    * result means the previous segment is complete, and the content about to be
    * written belongs to the next one. Rotating here (rather than when a call is
    * announced) keeps calls announced together — one model turn — in one step.
+   *
+   * A step that still OWES a result does not rotate: a call whose outcome Codex
+   * has not reported yet would be stranded in a step that can never resolve it
+   * (`step/end leaves unresolved tool call …`). Such a call runs one model turn
+   * later instead, which is what it belongs to, and a call the engine never
+   * answers is closed by {@link closeStep} rather than by moving on.
    * @param phase - the running phase carrying the open step's position.
    */
   private beginSegment(phase: RunningPhase): void {
-    if (this.stepSettledTools === 0) return
-    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    if (this.stepSettledTools === 0 || !this.stepTools.balanced) return
+    closeStep(this.session, this.stepTools, phase.turn, phase.step)
     phase.step += 1
     this.session.append('step/start', { turn: phase.turn, step: phase.step })
     appendSystemHeadIfMissing(this.session, phase.turn, phase.step)
     this.stepSettledTools = 0
+    this.stepTools.clear()
   }
 
   /** Lazily created app-server client, reused across steps and released on scope teardown. */
@@ -585,8 +610,9 @@ export class CodexAgent implements Agent {
         } finally {
           // The driver rotates steps as the turn's segments complete, so
           // `phase.step` — not the step this iteration opened — is the one still
-          // open here.
-          this.session.append('step/end', { turn, step: phase.step })
+          // open here, and it may still owe results the engine never reported.
+          closeStep(this.session, this.stepTools, turn, phase.step)
+          this.stepTools.clear()
         }
         signal.throwIfAborted()
         if (turnEnds && this.inbox.nextStep.length === 0) {
@@ -651,6 +677,7 @@ export class CodexAgent implements Agent {
     const { abort: { signal } } = phase
     signal.throwIfAborted()
     this.stepSettledTools = 0
+    this.stepTools.clear()
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -919,33 +946,42 @@ export class CodexAgent implements Agent {
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
                 flushHeld()
+                this.stepTools.announce(activity.call.callId)
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
-                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
-                this.stepSettledTools += 1
+                settleResult(this.stepTools, activity.call.callId, () => {
+                  this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                  this.stepSettledTools += 1
+                })
               } else if (item.type === 'fileChange') {
                 this.beginSegment(phase)
                 const activity = mapFileChange(item as { id: string; changes?: unknown[]; status?: string })
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
                 flushHeld()
+                this.stepTools.announce(activity.call.callId)
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
-                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
-                this.stepSettledTools += 1
+                settleResult(this.stepTools, activity.call.callId, () => {
+                  this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                  this.stepSettledTools += 1
+                })
               } else if (item.type === 'mcpToolCall') {
                 this.beginSegment(phase)
                 const activity = mapMcpToolCall(item as { id: string; server?: string; tool?: string; arguments?: unknown; result?: { content?: unknown[] }; error?: { message?: string } })
                 const normalizedCall = normalizeHostedToolCall('codex', activity.call.name, activity.call.arguments)
                 foldToolCall({ ...activity.call, name: normalizedCall.name, arguments: normalizedCall.arguments })
                 flushHeld()
+                this.stepTools.announce(activity.call.callId)
                 this.session.append('tool/call', {
                   turn: phase.turn, step: phase.step, callId: activity.call.callId, name: normalizedCall.name, arguments: normalizedCall.arguments,
                 })
-                this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
-                this.stepSettledTools += 1
+                settleResult(this.stepTools, activity.call.callId, () => {
+                  this.session.append('tool/result', { turn: phase.turn, step: phase.step, message: activity.result }, { surfaceOp: 'append' })
+                  this.stepSettledTools += 1
+                })
               }
               break
             }

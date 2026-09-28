@@ -33,6 +33,8 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
+import { createStepTools } from '../driver-core/step-tools.ts'
+import { closeStep, settleResult } from '../driver-core/step-close.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
@@ -136,6 +138,22 @@ export class PiAgent implements Agent {
   private stepSettledTools = 0
 
   /**
+   * The current step's calls, and which of them already carry a result.
+   *
+   * Pi announces a call from its streamed assistant message and reports the
+   * outcome from a separate execution event, so "which calls of THIS step are
+   * still open" is state the driver has to keep. Both halves of the Session V4
+   * rule read it: a call may not be given a second result in one step, and a
+   * step may not end while a call it announced has no result at all — the
+   * closing pass writes the missing outcome instead ({@link closeStep}).
+   *
+   * Reset per step (see {@link step}), never on an internal segment rotation:
+   * call ids are unique for the life of the session, so retaining the marks only
+   * widens duplicate suppression and can never hide a legitimate result.
+   */
+  private readonly stepTools = createStepTools()
+
+  /**
    * Rotate to the next step when the segment that ran a tool has finished, so
    * each assistant segment lands in its own step.
    *
@@ -143,15 +161,23 @@ export class PiAgent implements Agent {
    * result means the previous segment is complete, and the content about to be
    * written belongs to the next one. Rotating at a message boundary keeps calls
    * announced together — one model turn — in one step.
+   *
+   * A step that still OWES a result does not rotate: Pi announces several calls
+   * in one turn and reports their outcomes one at a time, and rotating on the
+   * first one would strand the rest in a step that can never resolve them
+   * (`step/end leaves unresolved tool call …`). Those calls run one model turn
+   * later instead, which is what they belong to, and a call the engine never
+   * answers is closed by {@link closeStep} rather than by moving on.
    * @param phase - the running phase carrying the open step's position.
    */
   private beginSegment(phase: RunningPhase): void {
-    if (this.stepSettledTools === 0) return
-    this.session.append('step/end', { turn: phase.turn, step: phase.step })
+    if (this.stepSettledTools === 0 || !this.stepTools.balanced) return
+    closeStep(this.session, this.stepTools, phase.turn, phase.step)
     phase.step += 1
     this.session.append('step/start', { turn: phase.turn, step: phase.step })
     appendSystemHeadIfMissing(this.session, phase.turn, phase.step)
     this.stepSettledTools = 0
+    this.stepTools.clear()
   }
 
   constructor(
@@ -449,8 +475,9 @@ export class PiAgent implements Agent {
         } finally {
           // The driver rotates steps as the prompt's segments complete, so
           // `phase.step` — not the step this iteration opened — is the one still
-          // open here.
-          this.session.append('step/end', { turn, step: phase.step })
+          // open here, and it may still owe results the engine never reported.
+          closeStep(this.session, this.stepTools, turn, phase.step)
+          this.stepTools.clear()
         }
         signal.throwIfAborted()
         /* v8 ignore start -- every step() completes, so turnEnds is always set here; the short-circuit arm is a defensive backstop */
@@ -575,6 +602,7 @@ export class PiAgent implements Agent {
     const { abort: { signal } } = phase
     signal.throwIfAborted()
     this.stepSettledTools = 0
+    this.stepTools.clear()
 
     const cwd = this.session.header.cwd
     if (cwd === undefined || cwd.length === 0) {
@@ -727,6 +755,7 @@ export class PiAgent implements Agent {
         // `emitToolCall` already projected them onto dsh's vocabulary, so the
         // event and the message block carry byte-identical name and arguments.
         for (const call of callsToLog) {
+          this.stepTools.announce(ToolCallId(call.callId))
           this.session.append('tool/call', {
             turn: phase.turn, step: phase.step, callId: ToolCallId(call.callId), name: call.name, arguments: call.arguments,
           })
@@ -891,12 +920,14 @@ export class PiAgent implements Agent {
             ensureToolCallOwner()
             if (!settledToolCalls.has(event.toolCallId)) {
               settledToolCalls.add(event.toolCallId)
-              this.session.append('tool/result', {
-                turn: phase.turn,
-                step: phase.step,
-                message: mapToolResult({ toolCallId: event.toolCallId, result: event.result, isError: event.isError }),
-              }, { surfaceOp: 'append' })
-              this.stepSettledTools += 1
+              settleResult(this.stepTools, ToolCallId(event.toolCallId), () => {
+                this.session.append('tool/result', {
+                  turn: phase.turn,
+                  step: phase.step,
+                  message: mapToolResult({ toolCallId: event.toolCallId, result: event.result, isError: event.isError }),
+                }, { surfaceOp: 'append' })
+                this.stepSettledTools += 1
+              })
             }
             break
           case 'turn_end': {
@@ -914,8 +945,10 @@ export class PiAgent implements Agent {
               if (settledToolCalls.has(toolResult.toolCallId)) continue
               settledToolCalls.add(toolResult.toolCallId)
               ensureToolCallOwner()
-              this.appendToolResult(phase.turn, phase.step, toolResult)
-              this.stepSettledTools += 1
+              settleResult(this.stepTools, ToolCallId(toolResult.toolCallId), () => {
+                this.appendToolResult(phase.turn, phase.step, toolResult)
+                this.stepSettledTools += 1
+              })
             }
             finished = true
             break
