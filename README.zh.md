@@ -15,6 +15,13 @@ dsh plugin --profile web add dsh-loop-engine
 **安装须知**
 
 - 安装会重写 profile 的 `cordis.patch.yml` 里一小段**不带引擎 id** 的受管理块;文件里你写的其它部分逐字节保留。从更早版本升级**不需要手工改文件**。
+- **装到 `web` 以外的 profile**(桌面版的 `desktop`、`headless` 部署、改过名的 profile)必须在该 profile 的组合条目里写上 `profile: <名字>`:
+  ```yaml
+  - id: loop-engine
+    config:
+      profile: desktop
+  ```
+  `profile` 默认是 `web`,不写的话插件会把受管块写进 `<home>/profiles/web/cordis.patch.yml`,而正在跑的那个 profile 永远不会读它:插件挂着,但基础 `agent-loop` 行没被禁,路由器拿不到 factory 槽位,任何托管引擎都不可达。(这是装进桌面版时踩出来的。)
 - **卸载**是 `dsh plugin --profile web remove dsh-loop-engine` **再加上删掉那段受管理块**——块会比插件活得久,而它还在时 profile 里没有任何 agent factory,会话一条也建不出来。
 - **pnpm 10+** 可能拦下依赖的 build script(`ERR_PNPM_IGNORED_BUILDS`,列出 `esbuild`、`@google/genai`、`protobufjs`)。执行 `pnpm approve-builds`(或加一条 `allowBuilds`)后重试;只有安装方能授予这个权限。
 - **用源码启动 harness** 时还要多做一步:用 `file:` shim 把 profile 的 harness peer 包桥接到 checkout 源码,否则恢复会话会报 `agent-presets: refusing to compose an unscoped context`。步骤见 [docs/source-checkout.md](docs/source-checkout.md)。

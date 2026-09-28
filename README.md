@@ -15,6 +15,13 @@ Boot `dsh web` once (the router retries for a bounded window while the base bund
 **Install notes**
 
 - The install rewrites one **engine-agnostic** managed block in the profile's `cordis.patch.yml`; every other byte you wrote there is preserved. Upgrading from an older release needs no hand edit.
+- **Installing into any profile but `web`** — the Desktop app's `desktop`, a `headless` deployment, a renamed profile — needs `profile: <name>` in the composition entry for that profile:
+  ```yaml
+  - id: loop-engine
+    config:
+      profile: desktop
+  ```
+  `profile` defaults to `web`, so without it the plugin writes its managed block into `<home>/profiles/web/cordis.patch.yml` while the running profile never reads it: the plugin mounts, but the base `agent-loop` row is never disabled, so its router cannot take the factory slot and no hosted engine is reachable. (Found by installing into the Desktop app.)
 - **Uninstall** is `dsh plugin --profile web remove dsh-loop-engine` **plus deleting that managed block** — the block outlives the plugin, and while it is present the profile has no agent factory, so no session can be created.
 - **pnpm 10+** may block dependency build scripts (`ERR_PNPM_IGNORED_BUILDS`, naming `esbuild`, `@google/genai`, `protobufjs`). Run `pnpm approve-builds` (or add an `allowBuilds` entry) and retry; only the installing project can grant this.
 - **Booting the harness from its source checkout** additionally needs the profile's harness peers bridged with `file:` shims — otherwise session resume fails with `agent-presets: refusing to compose an unscoped context`. Steps in [docs/source-checkout.md](docs/source-checkout.md).
