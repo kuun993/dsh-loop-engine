@@ -457,7 +457,7 @@ Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` /
 | `permission-knobs.ts` 读取/枚举 | 四个引擎每次查询的权限立场 | 四个 `tests/engine-*/permission.spec.ts`（claude 侧直接 import 读者，`tests/engine-claude/permission.spec.ts:8`） |
 | `ownership.ts` 生命周期/竞速 | 四个运行时的创建/卸载正确性 | kimi/pi 的 `tests/engine-*/loop.spec.ts` + claude/codex 的 `tests/engine-*/index.spec.ts` + `tests/router-loop.spec.ts` |
 | `hosted-engine-runtime.ts` 事务体 | 四个引擎的 create/resume 正确性（进程内唯一一份） | 同上四份 spec + `tests/router-loop.spec.ts` |
-| `router-loop.ts` 分发/记账/换引擎（空白期与运行中） | 每个会话的引擎归属；`in-process` 与托管引擎的并发 | `tests/router-loop.spec.ts` + `tests/engine-remote.spec.ts` + 四个 `tests/engine-*/index.spec.ts` |
+| `router-loop.ts` 分发/记账/换引擎（空白期与运行中） | 每个会话的引擎归属；`in-process` 与托管引擎的并发；**判定读不出来时的降级（对别人的会话零副作用）** | `tests/router-loop.spec.ts`（含 `resolution failures degrade to the harness loop`）+ `tests/engine-remote.spec.ts` + 四个 `tests/engine-*/index.spec.ts` |
 | `engine-surface.ts` 命令/技能注册 | 托管会话的斜杠菜单与技能目录（按 agent scope 隔离） | `tests/index.spec.ts`（真 agent scope）；`tests/router-loop.spec.ts` 只断言"是否调用"（该模块被 mock） |
 | `preset.ts` `engineOfPreset` / `enginePresetId` / `ensureEnginePresets` / `ensureEnginePresetRows` | 每会话的引擎选择，以及两代各自的 preset 载体（目录 / profile patch 里的组合行） | `tests/preset.spec.ts` + `tests/index.spec.ts` + `tests/router-loop.spec.ts` |
 | `host-servers.ts` 结构切片 | 所有消费方（纯类型，编译期） | 无独立 spec；由 `pnpm run typecheck` 与各消费方 spec 兜住 |
@@ -523,19 +523,31 @@ harness 的 `AgentRegistry.setFactory` 只接受一个工厂（第二次注册�
 
 ### create 侧
 
-`createAgent`（`src/router-loop.ts:284-292`）先问记录，记录缺席才走判定链（`engineFor`，`:212-223`）：
+`createAgent`（`src/router-loop.ts:378-387`）先问记录，记录缺席才走判定链（`engineFor`，`:232-243`）：
 
 1. 插件自己的记录（`:286`）：有记录就以它为准，连调用方已经 compose 好的 preset 都不看——否则路由与 Remote 会对同一个会话给出不同答案；
 2. 读 `options.meta?.agentPreset`。这个 meta 不用自己 resolve——主仓的 `composeAgent` 已经 resolve 好并塞进创建选项（`../deepseek-harness/packages/api/session-controller/src/agent.ts:374`、`:484`）；
-3. preset 不归本插件（部署自己的 preset，或根本没有）且传了 `parentAgent` 时，读**父会话**的记录或投影来继承引擎（`:218-221`）——被委派的子 agent 不该因为自己 preset 的名字而悄悄换引擎；
+3. preset 不归本插件（部署自己的 preset，或根本没有）且传了 `parentAgent` 时，读**父会话**的记录或投影来继承引擎（`:238-241`）——被委派的子 agent 不该因为自己 preset 的名字而悄悄换引擎；
 4. 都不命中 → `in-process`，走 `super.createAgent`；
-5. 命中托管引擎 → `runtimeOf(engine).createAgent(...)`（`:226-232` 的记忆化 builder；分派在 `:289-291`）。
+5. 命中托管引擎 → `runtimeOf(engine).createAgent(...)`（`:320-326` 的记忆化 builder；分派在 `:384-386`）。
+
+**这些都不在调用点直接做**：`createAgent` 交给 `engineForCreate`（`:260-272`），见下面的「判不出来就交给 harness loop」。
 
 ### resume 侧
 
-`resume`（`src/router-loop.ts:316-324`）必须走另一条路：`ResumeAgentOptions` **没有 meta**，会话头（header）也只记"创建时用的 preset"，不记空白会话后来 commit 的那次切换。判定同样从记录开始，而读它的函数**不在路由器里**：`engineOfSession`（`src/engine-of-session.ts:77-91`）先查插件记录（`:82-83`，命中就直接返回，连日志都不读），没有记录才做 `ctx.sessionQuery.observeSession(id, { projectionMode: 'all' })`、取 `observation.projections.values.agentPreset`、`using` 立刻释放观察租约（`:84-90`），再用共享的 `sessionEngineOf` / `hostedEngineOf` 折成引擎。这不是"路由器顺手抽出去的 helper"：**插件自己的 Remote（`src/engine-remote.ts`，端点 `loopEngine/engine`）调的是同一个函数**（没有路由器挂载时是它回答；路由器在时由 `reportEngine` 在它之上叠一层"活 agent 优先"，见上），所以"路由用哪个引擎"与"页面显示哪个引擎"在构造上是同一段代码（`docs/architecture.md` §4.3）。
+`resume`（`src/router-loop.ts:409-417`）必须走另一条路：`ResumeAgentOptions` **没有 meta**，会话头（header）也只记"创建时用的 preset"，不记空白会话后来 commit 的那次切换。判定同样从记录开始，而读它的函数**不在路由器里**：`engineOfSession`（`src/engine-of-session.ts:77-91`）先查插件记录（`:82-83`，命中就直接返回，连日志都不读），没有记录才做 `ctx.sessionQuery.observeSession(id, { projectionMode: 'all' })`、取 `observation.projections.values.agentPreset`、`using` 立刻释放观察租约（`:84-90`），再用共享的 `sessionEngineOf` / `hostedEngineOf` 折成引擎。这不是"路由器顺手抽出去的 helper"：**插件自己的 Remote（`src/engine-remote.ts`，端点 `loopEngine/engine`）调的是同一个函数**（没有路由器挂载时是它回答；路由器在时由 `reportEngine` 在它之上叠一层"活 agent 优先"，见上），所以"路由用哪个引擎"与"页面显示哪个引擎"在构造上是同一段代码（`docs/architecture.md` §4.3）。
 
-这也是主仓自己选组合时读的同一个投影（`../deepseek-harness/packages/api/session-controller/src/agent.ts:508`），两边读同一份事实。**代价**：没有记录的会话在 resume 与浏览器半的每次查询各多一次只读观察（都不占写锁）。**有活 agent 的会话不付这个代价**：报告的 `engine` 来自 `live` 记账、另一个字段来自侧车记录，两者都不需要日志（`src/engine-of-session.ts:137-140`）。投影读不到（部署没组合 preset 花名册、或没有 `sessionQuery` 服务）时答 `unset`，路由器据此退回 `engineFor(undefined, options.parentAgent)`（`src/router-loop.ts:321`），即"父引擎或 in-process"。**失败的读取不吞**：`engineOfSession` 让 `observeSession` 的 rejection 抛出去（路由器不能因为读不到就把会话悄悄搬到别的引擎），只有 Remote 那一侧把它收成 `unset` + 一条 warn（UI 要安静）。
+这也是主仓自己选组合时读的同一个投影（`../deepseek-harness/packages/api/session-controller/src/agent.ts:508`），两边读同一份事实。**代价**：没有记录的会话在 resume 与浏览器半的每次查询各多一次只读观察（都不占写锁）。**有活 agent 的会话不付这个代价**：报告的 `engine` 来自 `live` 记账、另一个字段来自侧车记录，两者都不需要日志（`src/engine-of-session.ts:137-140`）。投影读不到（部署没组合 preset 花名册、或没有 `sessionQuery` 服务）时答 `unset`，路由器据此退回 `engineFor(undefined, options.parentAgent)`（`src/router-loop.ts:285-293`），即"父引擎或 in-process"。**读不出来时绝不把会话卡住**：整个 resume 判定包在 `engineForResume`（`:285-293`）里，失败就降级到 harness loop——见下条；Remote 那一侧则把它收成 `unset` + 一条 warn（UI 要安静）。
+
+### 判不出来就交给 harness loop
+
+这是本插件对**不属于它的会话**的硬承诺：`RouterLoop` 替掉了进程里唯一的 AgentFactory，所以**每一条**会话——包括跟托管引擎毫无关系的 in-process 会话——都从这里过。判定要读宿主的状态（`sessionQuery` 的观察租约、投影折叠、插件自己的侧车记录），而这些读取都可能失败；一旦失败，正确的行为不是让这条会话打不开，而是**退回到"如果没装这个插件，它会用哪个引擎"**，也就是 harness loop 自己。
+
+实现落在一个包装上：`engineForCreate`（`:260-272`，create 侧：记录优先，否则判定链）与 `engineForResume`（`:285-293`，resume 侧：`engineOfSession` 的记录/日志优先，否则父继承/预设）各自 `try` 整个判定，`catch` 交给 `degradeToHarnessLoop`（`:303-306`）——它返回 `'in-process'`，并按**每条会话一次**的粒度报一条 warn（`warnOnce`，`:313-318`，按文案去重）。粒度是刻意的：读不出来的会话每次重建都会失败，而 warn 是给人指名这条会话的，不是给人看重试次数的。
+
+预设通道那条监听器（`rebuildOnEngineChange`）同理：它跑在**宿主自己的 preset 切换**里，抛出去就是插件的错砸在宿主的操作上，所以读 `turnBoundary` 的投影失败时按"会话已经开始"处理——引擎留在原地、warn 一次，切换照常收尾。
+
+**还有一条同源的安全阀在下发侧**：把某个托管 preset 设成名册默认，等于让**之后每一条新会话**都从它 compose；而"authoring 报成功"与"名册真的服务这个 id"是两件事——本插件曾经正是栽在这里（写的是 0.1.5 的目录载体，0.1.7 根本不读它，于是名册一个 `loop-engine-*` 都没有，每条新托管会话都退回 in-process）。所以 `steerPresetDefault`（`src/index.ts:626-658`）在把默认指过去之前，先用 `rosterServes`（`:669-681`）**问名册自己**：列不出来（0.1.5 线的服务没有 `list`）就照旧，列出来但没有这个 id、或列的过程报错，就**不指**、留一条 warn——不指只是新会话落在部署自己的 preset 上，指错是每条新会话都响亮失败。
 
 ### 每会话记账与 handle 包装
 
@@ -548,7 +560,7 @@ harness 的 `AgentRegistry.setFactory` 只接受一个工厂（第二次注册�
 
 ### 空白期换引擎
 
-`rebuildOnEngineChange`（`:637-663`）监听 harness 的无 scope 事件 `agent-preset/selected(sessionId, preset)`——事件类型在本文件用 `declare module '@deepseek-ai/cordis'` 声明（`:84-96`），刻意**不** import `@deepseek-ai/dsh-agent-presets`：最小 profile 可能根本不组合那个花名册。事件的源头是花名册把持久记录转发到事件总线（`../deepseek-harness/packages/preset/agent-presets/src/index.ts:228-230`），而持久记录的写入点是 `swap`（`:726`）。
+`rebuildOnEngineChange`（`:727-763`）监听 harness 的无 scope 事件 `agent-preset/selected(sessionId, preset)`——事件类型在本文件用 `declare module '@deepseek-ai/cordis'` 声明（`:84-96`），刻意**不** import `@deepseek-ai/dsh-agent-presets`：最小 profile 可能根本不组合那个花名册。事件的源头是花名册把持久记录转发到事件总线（`../deepseek-harness/packages/preset/agent-presets/src/index.ts:228-230`），而持久记录的写入点是 `swap`（`:726`）。
 
 分支：
 

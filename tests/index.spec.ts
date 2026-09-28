@@ -509,6 +509,74 @@ describe('apply managed block', () => {
     }, { timeout: 8000 })
   })
 
+  it('leaves the roster default alone when the roster does not serve the authored preset', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    await writeFile(path, legacyBlockFile('pi'))
+    const { ctx, settings } = await boot({})
+    registerRosterNamespace(settings!)
+    // AUTHORING IS NOT SERVING. The files land (the rows are written below) but
+    // this roster serves none of them — the exact shape a mismatched preset
+    // carrier produces, where the plugin reported success while every NEW
+    // session failed to compose. Pointing the default at that id would break
+    // every new session, so it stays where it was.
+    ctx.provide('agentPresets', {
+      ...fakeRoster(settings),
+      list: vi.fn(async () => [{ id: SOURCE_PRESET_ID }]),
+    })
+    await mountPlugin(ctx, { patchPath: path })
+
+    await waitForEnginePresets(home, path)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
+  })
+
+  it('steers the roster default when the roster serves the authored preset', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    await writeFile(path, legacyBlockFile('pi'))
+    const { ctx, settings } = await boot({})
+    registerRosterNamespace(settings!)
+    // The roster enumerates its presets AND serves the managed one: the plugin
+    // verifies against the roster itself, not against the files it wrote.
+    ctx.provide('agentPresets', {
+      ...fakeRoster(settings),
+      list: vi.fn(async () => [{ id: SOURCE_PRESET_ID }, { id: enginePresetId('pi') }]),
+    })
+    await mountPlugin(ctx, { patchPath: path })
+
+    await waitForEnginePresets(home, path)
+    await vi.waitFor(() => {
+      expect(rosterDefault(settings!)).toBe(enginePresetId('pi'))
+    }, { timeout: 8000 })
+  })
+
+  it('leaves the roster default alone when the roster cannot be listed', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    await writeFile(path, legacyBlockFile('pi'))
+    const { ctx, settings } = await boot({})
+    registerRosterNamespace(settings!)
+    // A roster that answers with an error is not evidence that the preset is
+    // served, so the default is left where it is rather than pointed at an id
+    // nobody confirmed.
+    ctx.provide('agentPresets', {
+      ...fakeRoster(settings),
+      list: vi.fn(async () => { throw new Error('roster unavailable') }),
+    })
+    await mountPlugin(ctx, { patchPath: path })
+
+    await waitForEnginePresets(home, path)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(rosterDefault(settings!)).toBe(SOURCE_PRESET_ID)
+  })
+
   it('rewrites a legacy block naming an unknown engine and leaves the roster default alone', async () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')

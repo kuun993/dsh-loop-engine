@@ -179,6 +179,12 @@ export class RouterLoop extends AgentLoop {
   private readonly records: EngineRecordStore
   private readonly warn: (message: string) => void
   /**
+   * Diagnostics already reported: a condition that repeats on every build (a
+   * session whose engine cannot be read, a projection that will not fold) is
+   * worth naming once, not once per rebuild.
+   */
+  private readonly warned = new Set<string>()
+  /**
    * The model-selection half of routing: the seat a session's engine owns, moved
    * at a switch ({@link RouterLoop.moveModelSelection}) and written at a build
    * ({@link RouterLoop.engineOptions}). Owned here because each warning it owes
@@ -234,6 +240,80 @@ export class RouterLoop extends AgentLoop {
       if (inherited !== undefined) return inherited
     }
     return 'in-process'
+  }
+
+  /**
+   * The engine to build one session on for a CREATE, with the plugin's own
+   * record read ahead of the caller's preset.
+   *
+   * Reading an engine is a read of the HOST's session state, and a session this
+   * plugin does not own is the host's business: a failure here (a session-query
+   * lease that refuses, a projection that cannot be computed, a corrupt log)
+   * must never become the reason that session cannot be created. Every failure
+   * degrades to the harness loop, which is what would have served the session if
+   * this plugin were not installed at all.
+   * @param sessionId - the session being created.
+   * @param presetId - the preset the caller composed with, when it named one.
+   * @param parent - the live parent agent, for a child session's inheritance.
+   * @returns the engine, or the harness loop when the answer could not be read.
+   */
+  private async engineForCreate(
+    sessionId: SessionId,
+    presetId: string | undefined,
+    parent: Agent | undefined,
+  ): Promise<LoopEngineId> {
+    try {
+      return this.records.engineOf(sessionId) ?? await this.engineFor(presetId, parent)
+    } catch (error) {
+      return this.degradeToHarnessLoop(sessionId, error)
+    }
+  }
+
+  /**
+   * The engine to build a PERSISTED session on, degrading exactly as
+   * {@link engineForCreate} does.
+   *
+   * The read is the same plugin record first, then the durable `agentPreset`
+   * projection — and a resumed session is the case where those reads touch the
+   * host the most (a cold open, a repair, a projection fold), so it is the case
+   * where a read failure is most likely and least acceptable to surface as
+   * "this session will not open".
+   * @param sessionId - the persisted session being resumed.
+   * @param parent - the live parent agent, for a child session's inheritance.
+   * @returns the engine, or the harness loop when the answer could not be read.
+   */
+  private async engineForResume(sessionId: SessionId, parent: Agent | undefined): Promise<LoopEngineId> {
+    try {
+      return hostedEngineOf(await engineOfSession(this.ctx, sessionId, this.records))
+        ?? await this.engineFor(undefined, parent)
+    } catch (error) {
+      return this.degradeToHarnessLoop(sessionId, error)
+    }
+  }
+
+  /**
+   * Report one unreadable engine answer and hand the session to the harness
+   * loop. Owed once per session, not once per build: a session that fails to
+   * read keeps failing on every rebuild, and the point of the warning is to name
+   * the session, not to count the retries.
+   * @param sessionId - the session the plugin could not answer for.
+   * @param error - the failure the read produced.
+   * @returns the engine the session is degraded to.
+   */
+  private degradeToHarnessLoop(sessionId: SessionId, error: unknown): 'in-process' {
+    this.warnOnce(`loop-engine: could not read the engine of session "${sessionId}"; running it on the harness loop instead: ${String(error)}`)
+    return 'in-process'
+  }
+
+  /**
+   * Report one diagnostic once per process, for a condition that repeats on
+   * every build of the session it names.
+   * @param message - the diagnostic to report at most once.
+   */
+  private warnOnce(message: string): void {
+    if (this.warned.has(message)) return
+    this.warned.add(message)
+    this.warn(message)
   }
 
   /** The engine's runtime, built on first use and kept for the plugin's lifetime. */
@@ -297,8 +377,7 @@ export class RouterLoop extends AgentLoop {
    */
   override async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     const recipe = recipeOf(ownerCtx, options)
-    const engine = this.records.engineOf(options.sessionId)
-      ?? await this.engineFor(options.meta?.agentPreset, options.parentAgent)
+    const engine = await this.engineForCreate(options.sessionId, options.meta?.agentPreset, options.parentAgent)
     if (engine === 'in-process') {
       return this.adopt(engine, await super.createAgent(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
@@ -329,10 +408,7 @@ export class RouterLoop extends AgentLoop {
    */
   override async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
     const recipe = recipeOf(ownerCtx, options)
-    const engine = hostedEngineOf(
-      await engineOfSession(this.ctx, options.resumeSessionId, this.records),
-    )
-      ?? await this.engineFor(undefined, options.parentAgent)
+    const engine = await this.engineForResume(options.resumeSessionId, options.parentAgent)
     if (engine === 'in-process') {
       return this.adopt(engine, await super.resume(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
@@ -654,8 +730,18 @@ export class RouterLoop extends AgentLoop {
       if (entry === undefined) return
       const next = engineOfPreset(preset) ?? 'in-process'
       if (next === entry.engine) return
-      const boundary = this.projections().stateOf(entry.agent.session, 'turnBoundary')
-      if (boundary !== undefined && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)) {
+      // A listener that throws would surface inside the host's own preset
+      // switch, so the whole read is contained: an unreadable boundary is
+      // treated exactly like a started session — the engine stays where it is.
+      let started: boolean
+      try {
+        const boundary = this.projections().stateOf(entry.agent.session, 'turnBoundary')
+        started = boundary !== undefined && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)
+      } catch (error: unknown) {
+        this.warnOnce(`loop-engine: could not read the turn boundary of session "${sessionId}"; its engine stays ${entry.engine}: ${String(error)}`)
+        return
+      }
+      if (started) {
         this.warn(`loop-engine: session "${sessionId}" has already started; its engine stays ${entry.engine}`)
         return
       }

@@ -634,18 +634,48 @@ export function apply(ctx: Context, config: Config): void {
     const started = authorEnginePresets()
     // A profile without the preset roster has nothing to steer.
     if (started === undefined) return
-    void started.settled.then((authored) => {
+    void started.settled.then(async (authored) => {
       // No presets on disk: pointing the roster at a missing preset would fail
       // every new session loud, so the default stays where it was.
       if (!authored) return
       const current = started.presets.defaultId
       const target = enginePresetId(engine)
       if (current === target) return
+      // AUTHORING IS NOT SERVING. Each generation reads presets out of its own
+      // carrier, and the plugin has already shipped one build that reported a
+      // successful authoring while the roster served no `loop-engine-*` id at
+      // all — which made every NEW session fail to compose. So the roster
+      // itself is asked before it is pointed anywhere.
+      if (!await rosterServes(started.presets, target)) return
       // Remember the deployment's own default only when it is not one of ours,
       // so switching between hosted engines never overwrites it with a managed id.
       if (!current.startsWith('loop-engine-')) savedPresetDefault = current
       mutatePresetDefault({ op: 'set', path: ['default'], value: target })
     })
+  }
+
+  /**
+   * Whether the roster actually serves one preset id.
+   *
+   * A roster that cannot enumerate its presets is taken at its word (the 0.1.5
+   * line's service has no list at all), and a listing that fails leaves the
+   * default alone rather than pointing it at something unverified: the cost of
+   * not steering is a session on the deployment's own preset, the cost of
+   * steering wrong is every new session failing loud.
+   * @param presets - the roster service.
+   * @param id - the preset id about to be made the default.
+   * @returns whether the roster serves it.
+   */
+  const rosterServes = async (presets: AgentPresetsService, id: string): Promise<boolean> => {
+    if (presets.list === undefined) return true
+    try {
+      if ((await presets.list()).some(preset => preset.id === id)) return true
+    } catch (error: unknown) {
+      pluginWarn(`loop-engine: could not list the preset roster, so the default preset stays where it is: ${String(error)}`)
+      return false
+    }
+    pluginWarn(`loop-engine: the preset roster does not serve "${id}", so the default preset stays where it is`)
+    return false
   }
 
   /**

@@ -34,6 +34,13 @@ export interface SkillsService {
 export interface AgentPresetsService {
   /** The effective default preset id. */
   readonly defaultId: string
+  /**
+   * The presets this roster serves, when it can enumerate them. Authoring a
+   * preset can report success while the roster still serves nothing (each
+   * generation reads presets out of a different carrier), so a caller that is
+   * about to NAME one of them asks the roster itself rather than the disk.
+   */
+  list?(): Promise<readonly { readonly id: string }[]>
   /** 0.1.5 line: read one preset's composition text directly. */
   read?(id: string): Promise<string>
   /** 0.1.7 line: read one preset's document; its `content` is the composition text. */

@@ -418,6 +418,83 @@ describe('create routing', () => {
   })
 })
 
+/**
+ * The plugin replaced the harness's own factory, so every session in the
+ * process is built through it — including sessions this plugin has nothing to
+ * do with. Reading an engine touches the host (a session-query lease, a
+ * projection fold, the plugin's own record), and a failure there must never
+ * become the reason a session cannot be created or opened: the answer degrades
+ * to the harness loop, which is what would have served that session had the
+ * plugin never been installed.
+ *
+ * Each case pins the real incident it stands for: the failures this plugin has
+ * actually produced (an uncomposable context, an unknown preset, a projection
+ * read that refused) all arrived the same way — as a broken session belonging
+ * to somebody else.
+ */
+describe('resolution failures degrade to the harness loop', () => {
+  it('resumes a foreign session on the harness loop when its engine cannot be read', async () => {
+    const app = await boot()
+    app.query!.observeSession.mockRejectedValueOnce(new Error('projection fold refused'))
+
+    // Reaching `super.resume` without a backend is the harness loop's own
+    // complaint, which is exactly what proves the router sent it there instead
+    // of failing the open.
+    await expect(app.ctx.agents.resume({ resumeSessionId: SessionId('unreadable-resume') }))
+      .rejects.toThrow('session persistence is not configured')
+    expect(app.build).not.toHaveBeenCalled()
+    expect(app.warn).toHaveBeenCalledWith(expect.stringContaining('could not read the engine of session "unreadable-resume"'))
+  })
+
+  it('creates a child session on the harness loop when its parent engine cannot be read', async () => {
+    const app = await boot()
+    app.query!.observeSession.mockRejectedValueOnce(new Error('projection fold refused'))
+
+    const handle = await app.ctx.agents.create({
+      sessionId: SessionId('child-session'),
+      meta: { agentPreset: UNOWNED },
+      parentAgent: parentAgent('parent-session'),
+    })
+
+    expect(handle.agent.status).toBe('idle')
+    expect(app.build).not.toHaveBeenCalled()
+    expect(app.warn).toHaveBeenCalledWith(expect.stringContaining('could not read the engine of session "child-session"'))
+    await handle.dispose()
+  })
+
+  it('reports an unreadable engine once per session, not once per build', async () => {
+    const app = await boot()
+    app.query!.observeSession.mockRejectedValue(new Error('projection fold refused'))
+
+    for (const id of ['first-resume', 'second-resume']) {
+      await expect(app.ctx.agents.resume({ resumeSessionId: SessionId(id) }))
+        .rejects.toThrow('session persistence is not configured')
+    }
+    // The same session read twice more: the warning is owed once, the
+    // degradation happens every time.
+    for (const id of ['first-resume', 'first-resume']) {
+      await expect(app.ctx.agents.resume({ resumeSessionId: SessionId(id) }))
+        .rejects.toThrow('session persistence is not configured')
+    }
+
+    const degraded = app.warn.mock.calls.filter(([message]) => String(message).includes('could not read the engine'))
+    expect(degraded).toHaveLength(2)
+  })
+
+  it('keeps a live agent on its engine when the turn boundary cannot be read', async () => {
+    const app = await boot()
+    const handle = await createSession(app, 'live-session', CODEX)
+    app.projections.stateOf.mockImplementationOnce(() => { throw new Error('boundary unreadable') })
+
+    // The host's own preset switch reaches the listener: an unreadable boundary
+    // must mean "the engine stays", never an exception inside the switch.
+    expect(() => { selectPreset(app.ctx, 'live-session', KIMI) }).not.toThrow()
+
+    expect(app.warn).toHaveBeenCalledWith(expect.stringContaining('could not read the turn boundary of session "live-session"'))
+    await handle.dispose()
+  })
+})
+
 describe('resume routing', () => {
   it('resumes on the engine the recorded preset names and releases the observation lease', async () => {
     const app = await boot()
