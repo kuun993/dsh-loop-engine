@@ -42,6 +42,7 @@ import {
 } from '../src/client/reload.ts'
 import { engineStateLabelKey, pendingEngineText, refusalFace, zh, en } from '../src/client/locales.ts'
 import { LOOP_ENGINE_REFUSAL_CODES, hostedEngineOf, type LoopEngineId } from '../src/agent-preset-ids.ts'
+import { installFakeTurnStatusDom, type FakeTurnStatusDom } from './helpers/fake-dom.ts'
 
 /** One controllable namespace: each call hands out a promise the test resolves. */
 function fakeRemote(): {
@@ -139,16 +140,19 @@ const ENGINE_KEY = 'loopEngine'
  */
 const RUNNING_KEY = 'loopEngineRunning'
 
+/** The fake DOM the current test installed, so `afterEach` can hand the globals back. */
+let installedDom: FakeTurnStatusDom | undefined
+
 /**
- * Install a minimal `document` and hand back the root dataset the turn-status
- * reflection writes to. `reflectTurnStatusEngine` touches nothing else of the
- * document, and the reflection is a no-op without one — which is what the rest of
- * this file (and every node boot) relies on.
+ * Install a minimal `document` (and the `MutationObserver` the live row's mark
+ * follows the rows with — `../helpers/fake-dom.ts`) and hand back the root
+ * dataset the turn-status reflection writes to. The reflection is a no-op
+ * without a document, which is what the rest of this file (and every node boot)
+ * relies on.
  */
 function fakeDocument(): Record<string, string | undefined> {
-  const dataset: Record<string, string | undefined> = {}
-  ;(globalThis as unknown as { document?: unknown }).document = { documentElement: { dataset } }
-  return dataset
+  installedDom = installFakeTurnStatusDom()
+  return installedDom.dataset
 }
 
 describe('SessionEngineCache', () => {
@@ -588,7 +592,14 @@ function reflectAsSurface(cache: SessionEngineCache, sessionId: string, running?
 }
 
 describe('the turn-status row the session on screen paints', () => {
-  afterEach(() => { delete (globalThis as { document?: unknown }).document })
+  afterEach(() => {
+    // Release the mid-turn gate before handing the globals back: the module
+    // keeps its row follower (and its mark) until the gate goes off.
+    focusTurnStatusSession('s1')
+    reflectTurnStatusEngine('s1', 'pi', false)
+    installedDom?.restore()
+    installedDom = undefined
+  })
 
   it('paints a hosted engine and clears for in-process or an unnamed engine', () => {
     const dataset = fakeDocument()
@@ -632,61 +643,55 @@ describe('the turn-status row the session on screen paints', () => {
     expect(RUNNING_KEY in dataset).toBe(true)
   })
 
-  it('clears both attributes when the sheet is torn down', () => {
-    const dataset = fakeDocument()
+  it('clears both attributes, and the live row\'s mark, when the sheet is torn down', () => {
+    const dom = installFakeTurnStatusDom()
+    installedDom = dom
     let disposer: (() => void) | undefined
-    let removed = 0
     const ctx = {
       effect: (body: () => () => void, name: string) => {
         expect(name).toBe('loop-engine: per-engine turn status styles')
         disposer = body()
       },
     }
-    // The install path writes to `document.head` and later removes the tag.
-    ;(globalThis as { document?: unknown }).document = {
-      documentElement: { dataset },
-      head: { appendChild: () => {} },
-      createElement: () => ({ dataset: {}, textContent: '', remove: () => { removed += 1 } }),
-    }
 
     installTurnStatusStyles(ctx as never)
     focusTurnStatusSession('s1')
+    const row = dom.addRow(1)
     reflectTurnStatusEngine('s1', 'pi', true)
-    expect(dataset[ENGINE_KEY]).toBe('pi')
-    expect(RUNNING_KEY in dataset).toBe(true)
+    expect(dom.dataset[ENGINE_KEY]).toBe('pi')
+    expect(RUNNING_KEY in dom.dataset).toBe(true)
+    expect(row.hasAttribute('data-loop-engine-live')).toBe(true)
 
-    // Tearing the sheet down names no engine and leaves no turn live.
+    // Tearing the sheet down names no engine, leaves no turn live, and takes the
+    // live row's mark with it — nothing is left watching for one either.
     disposer?.()
-    expect(ENGINE_KEY in dataset).toBe(false)
-    expect(RUNNING_KEY in dataset).toBe(false)
-    expect(removed).toBe(1)
+    expect(ENGINE_KEY in dom.dataset).toBe(false)
+    expect(RUNNING_KEY in dom.dataset).toBe(false)
+    expect(row.hasAttribute('data-loop-engine-live')).toBe(false)
+    expect(dom.created.filter(tag => tag.removed)).toHaveLength(1)
   })
 
   it('paints only the live 0.1.7 row, gated on both the session and the row', () => {
     // The regression this pins: a session-level gate alone re-paints EVERY row
     // on screen while any turn runs, and the 0.1.7 line keeps one row per turn.
-    // The row selector must therefore also pick out the live row (`:disabled`,
-    // ui-chat's "this turn cannot be collapsed"), while the 0.1.5 selector stays
-    // plain — that row only exists while its turn runs.
-    const dataset = fakeDocument()
-    const tags: Array<{ textContent: string }> = []
-    ;(globalThis as { document?: unknown }).document = {
-      documentElement: { dataset },
-      head: { appendChild: () => {} },
-      createElement: () => {
-        const tag = { dataset: {}, textContent: '', remove: () => {} }
-        tags.push(tag)
-        return tag
-      },
-    }
+    // The row selector must therefore also pick out the live row — the one the
+    // client marks with `data-loop-engine-live` — while the 0.1.5 selector stays
+    // plain, because that row only exists while its turn runs. `:disabled` used
+    // to stand in for the mark and cannot: ui-chat leaves a turn that ended
+    // `aborted` or `error` disabled forever, so those finished rows kept the
+    // glyph and the sweep while a later turn ran.
+    const dom = installFakeTurnStatusDom()
+    installedDom = dom
 
     installTurnStatusStyles({ effect: (body: () => () => void) => { body() } } as never)
-    const css = tags[0]!.textContent
+    const css = dom.created[0]!.textContent
 
     // Both attributes gate every rule, so an idle session paints nothing at all.
     expect(css).toContain('html[data-loop-engine][data-loop-engine-running]')
-    // The 0.1.7 row carries `:disabled`; the unguarded form must not appear.
-    expect(css).toContain('button[data-turn-process]:disabled [class$="_label"]')
+    // The 0.1.7 row is painted through the live mark...
+    expect(css).toContain('button[data-turn-process][data-loop-engine-live] [class$="_label"]')
+    // ...and never through `:disabled` or through an unmarked row.
+    expect(css).not.toContain('button[data-turn-process]:disabled')
     expect(css).not.toContain('button[data-turn-process] [class$="_label"]')
     // The 0.1.5 row keeps the plain class selector.
     expect(css).toContain('[class$="_turnStatus"]')

@@ -22,9 +22,11 @@
  * The reflection's SUBJECT is still a document-level attribute rather than the
  * row's own element: the sheet has to reach a class the harness hashes (see
  * {@link ROW_SELECTORS}), which takes an attribute selector on an ancestor,
- * and the row offers no session-scoped hook for a plugin to hang it on. A
- * document-level attribute has exactly ONE owner at a time, though — and on this
- * page the WRITERS outnumber the reader: the chip and the composer of every
+ * and the row offers no session-scoped hook for a plugin to hang it on — the one
+ * attribute this module does put on a row ({@link LIVE_ATTR}) claims no session,
+ * it says "the turn in flight is this one" and is re-derived every time the rows
+ * change. A document-level attribute has exactly ONE owner at a time, though —
+ * and on this page the WRITERS outnumber the reader: the chip and the composer of every
  * session that has been rendered carry an answer, the session the user has just
  * left included, and the cache publishes a session's answer regardless of what is
  * on screen. So "whoever reflected last" is not "the session on screen", and an
@@ -63,10 +65,13 @@
  * 0.1.7 line EVERY turn's row stays on screen, so while turn N runs, turns
  * 1..N-1 are still there. A session-wide gate turns the whole sheet on for all
  * of them — the finished rows would wear the glyph again for as long as any
- * later turn ran. The row selector therefore carries `:disabled` (see
- * {@link ROW_SELECTORS}), which is how ui-chat marks the live row. The two
- * gates answer different questions — "is a turn in flight for this session" and
- * "is this row the one it belongs to" — and neither alone is enough.
+ * later turn ran. So the live row is MARKED, and the row selector is gated on
+ * the mark (see {@link LIVE_ATTR}, {@link markLiveRow} and
+ * {@link ROW_SELECTORS}): "the last row in the document" is the turn in flight,
+ * because the rows are rendered in turn order and only the newest one can still
+ * be running. The two gates answer different questions — "is a turn in flight
+ * for this session" and "is this row the one it belongs to" — and neither alone
+ * is enough.
  *
  * Three facts about the harness markup make that safe and specific:
  *   - the row has one stable handle per harness generation — an
@@ -98,10 +103,25 @@ const ENGINE_ATTR = 'data-loop-engine'
 
 /**
  * Attribute on `<html>` marking that the session on screen is mid-turn; absent
- * means it is not. Session-level half of the gate: the 0.1.7 row outlives the
- * turn it belongs to, and the per-row half lives in {@link ROW_SELECTORS}.
+ * means it is not. Session-level half of the gate: the 0.1.7 rows outlive the
+ * turns they belong to, and the per-row half is {@link LIVE_ATTR}.
  */
 const RUNNING_ATTR = 'data-loop-engine-running'
+
+/**
+ * The 0.1.7 turn-process button: one per turn, in turn order, every one of them
+ * still on screen after its turn ends. The row's only stable handle.
+ */
+const ROW_BUTTON = 'button[data-turn-process]'
+
+/**
+ * Attribute this module stamps on the row of the turn in flight; absent means
+ * no row is claimed. The per-ROW half of the gate — the session-level
+ * {@link RUNNING_ATTR} says a turn is in flight for the session on screen, this
+ * says which of the many rows still on screen is that turn's own. Written only
+ * while the gate is on, and by {@link markLiveRow} only.
+ */
+const LIVE_ATTR = 'data-loop-engine-live'
 
 /** Owning plugin id, stamped on the injected tag for identification. */
 const PLUGIN_ID = 'dsh-loop-engine'
@@ -117,36 +137,35 @@ const PLUGIN_ID = 'dsh-loop-engine'
  *
  *   - the 0.1.5 row exists only while its turn runs, so "the row" and "the live
  *     turn" are the same thing and the plain class selector is exact;
- *   - the 0.1.7 row is a `button[data-turn-process]` that STAYS on screen after
- *     its turn ends, as the collapsed "用时 …" summary — one per turn, all of
- *     them still rendered. So the session-wide mid-turn gate alone is not
- *     enough: while turn N runs, turns 1..N-1 (all normally finished, all
- *     enabled buttons) are on screen too and would be painted with it. The
- *     `:disabled` in the selector is what picks out the live one — ui-chat sets
- *     `disabled={!canCollapse}` and `canCollapse` is false exactly while the
- *     turn is open (`turnProcessAlwaysOpen`, and the chevron renders under the
- *     same condition, so the live row is the one with no chevron).
+ *   - the 0.1.7 row is a {@link ROW_BUTTON} that STAYS on screen after its turn
+ *     ends, as the collapsed "用时 …" summary — one per turn, all of them still
+ *     rendered. So the session-wide mid-turn gate alone is not enough: while
+ *     turn N runs, turns 1..N-1 are on screen too and would be painted with it.
+ *     The live one is picked out by {@link LIVE_ATTR}, which
+ *     {@link markLiveRow} puts on the LAST row in the document. Nothing the row
+ *     itself carries can stand in for it: the only state a row exposes is
+ *     `disabled` (ui-chat's `disabled={!canCollapse}`, which reads "this turn
+ *     cannot be collapsed" rather than "this turn is running"), and a turn that
+ *     ended `aborted` or `error` is left disabled forever — a rule keyed on it
+ *     paints exactly the zombie rows this mark exists to avoid, which is what
+ *     the previous `:disabled` selector did.
  *
- * Known edge: `turnProcessAlwaysOpen` is ALSO true for a turn that ended
- * `aborted` or `error`, so such a row stays disabled forever and keeps the
- * glyph while a later turn runs. The DOM carries the end reason nowhere a
- * selector can reach, so this stays a documented limit rather than a rule.
+ * The 0.1.7 status text is a `<span>` whose hashed class ends `_label` (the
+ * literal `.label` does not exist: the harness's CSS Modules name classes
+ * `[hash]_[local]`).
  */
 const ROW_SELECTORS = [
   /** 0.1.5 line: the turn-status row, whose class name ends `_turnStatus`. */
   '[class$="_turnStatus"]',
-  /**
-   * 0.1.7 line: the LIVE turn-process button — `disabled` is ui-chat's "this
-   * turn cannot be collapsed", which is true only while the turn is open — and
-   * its status text is the label span.
-   */
-  'button[data-turn-process]:disabled [class$="_label"]',
+  /** 0.1.7 line: the marked live turn-process button, and its label span. */
+  `${ROW_BUTTON}[${LIVE_ATTR}] [class$="_label"]`,
 ] as const
 
 /** Emit the sheet once for one generation's row selector. */
 const sheetFor = (ROW: string): string => {
-  // Every rule is gated on the engine AND on the turn being live, so the sheet
-  // is inert both for a stock row and for a finished one.
+  // Every rule is gated on the engine AND on the session being mid-turn, and on
+  // the 0.1.7 line the row selector carries the live-row mark as well, so the
+  // sheet is inert both for a stock row and for one that has finished.
   const GATE = `html[${ENGINE_ATTR}][${RUNNING_ATTR}]`
   return `
 ${GATE} ${ROW}::before {
@@ -432,19 +451,100 @@ function writeTurnStatusEngine(engine: LoopEngineId | undefined): void {
 }
 
 /**
- * Write — or clear — the document-level mid-turn gate {@link RUNNING_ATTR}.
+ * Write — or clear — the mid-turn gate, both halves of it.
  *
- * The state is a boolean, and the gate is a PRESENCE attribute: the sheet selects
- * `[data-loop-engine-running]`, so `true` puts the attribute on (empty is enough)
- * and `false` takes it off.
+ * The state is a boolean, and the session-level half is a PRESENCE attribute:
+ * the sheet selects `[data-loop-engine-running]`, so `true` puts the attribute
+ * on (empty is enough) and `false` takes it off. The per-row half is the
+ * {@link LIVE_ATTR} mark, and its lifetime is this gate's exactly: turning it on
+ * marks the live row and starts following the rows, turning it off takes the
+ * mark away and stops (see {@link startLiveRowWatch}).
  * @param running - whether the focused session is mid-turn.
  */
 function writeTurnStatusRunning(running: boolean): void {
   // Non-browser boots of the client tree have no document to paint.
   if (typeof document === 'undefined') return
   const root = document.documentElement
-  if (running) root.dataset.loopEngineRunning = ''
-  else delete root.dataset.loopEngineRunning
+  if (!running) {
+    delete root.dataset.loopEngineRunning
+    stopLiveRowWatch()
+    return
+  }
+  root.dataset.loopEngineRunning = ''
+  startLiveRowWatch()
+}
+
+/** The element carrying {@link LIVE_ATTR}, so the mark can be moved off it. */
+let liveRow: Element | undefined
+
+/** The row follower while the gate is on; undefined means nothing is watched. */
+let liveRowObserver: MutationObserver | undefined
+
+/**
+ * Stamp {@link LIVE_ATTR} on the LAST {@link ROW_BUTTON} in the document, and
+ * take it off any other row — at most one row is claimed.
+ *
+ * "Last" is the live one: the rows are rendered in turn order, one per turn, and
+ * the turn in flight is always the newest. The mark is moved rather than merely
+ * added, and a row that is already marked is left untouched — this module's own
+ * writes must not re-enter the observer that called it
+ * ({@link startLiveRowWatch}).
+ */
+function markLiveRow(): void {
+  const live = Array.from(document.querySelectorAll(ROW_BUTTON)).at(-1)
+  if (live === liveRow) return
+  liveRow?.removeAttribute(LIVE_ATTR)
+  liveRow = live
+  live?.setAttribute(LIVE_ATTR, '')
+}
+
+/**
+ * Whether a mutated node is a turn-process row, or contains one.
+ *
+ * The observer filters on this so the chat's own streaming churn — text and
+ * markup arriving inside messages — costs nothing: only an inserted or removed
+ * row can change which row is the last one.
+ * @param node - one node of an observer record.
+ */
+function bringsRow(node: Node): boolean {
+  if (node.nodeType !== 1) return false
+  const element = node as Element
+  return element.matches(ROW_BUTTON) || element.querySelector(ROW_BUTTON) !== null
+}
+
+/**
+ * Mark the live row and follow the rows from then on.
+ *
+ * The observer is what keeps the mark on the turn in flight once it is set: the
+ * turn advances (a newer row appears last, the marked one becomes the previous
+ * turn's summary) and it ends (the last row is unmounted with the session, or
+ * the next turn's row replaces it). Both are DOM insertions and removals, and
+ * both are all the observer listens for — no polling, and no work at all while
+ * the gate is off, because the observer is disconnected with it.
+ *
+ * Idempotent, because a running turn is reflected by every surface of the
+ * session on screen (the chip and the composer both make one).
+ */
+function startLiveRowWatch(): void {
+  markLiveRow()
+  if (liveRowObserver !== undefined) return
+  liveRowObserver = new MutationObserver((records) => {
+    const rowTouched = records.some(record =>
+      Array.from(record.addedNodes).some(bringsRow) || Array.from(record.removedNodes).some(bringsRow))
+    if (rowTouched) markLiveRow()
+  })
+  liveRowObserver.observe(document.body ?? document.documentElement, { childList: true, subtree: true })
+}
+
+/**
+ * Stop following the rows and give the mark up — the gate is off, so no row is
+ * claimed and nothing is watched.
+ */
+function stopLiveRowWatch(): void {
+  liveRowObserver?.disconnect()
+  liveRowObserver = undefined
+  liveRow?.removeAttribute(LIVE_ATTR)
+  liveRow = undefined
 }
 
 /**
@@ -469,10 +569,12 @@ export function installTurnStatusStyles(ctx: ClientContext): void {
     document.head.appendChild(tag)
     return () => {
       // The sheet that selected the attributes goes with it, so no engine is
-      // named any more and no turn is live.
+      // named any more and no turn is live — which also takes the live row's
+      // mark and its follower away.
       tag.remove()
       delete document.documentElement.dataset.loopEngine
       delete document.documentElement.dataset.loopEngineRunning
+      stopLiveRowWatch()
     }
   }, 'loop-engine: per-engine turn status styles')
 }

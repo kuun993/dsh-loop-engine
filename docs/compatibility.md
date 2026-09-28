@@ -119,6 +119,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | `src/client/session-engine.ts` 的 `RemoteCodec` | strict 分支从 `{ typeSymbol, schema }` 变成 `{ typeSymbol, create: () => schema }` | **C：两个字段都带** |
 | `src/client/turn-status.ts` 的 `ROW_SELECTORS` | 行本身换了元素与类名机制（见 §5） | D：按代各出一份样式表 |
 | `src/client/turn-status.ts` 的 `RUNNING_ATTR` | 不是代际差异，是**行为**差异：0.1.7 的行在轮次结束后仍留在屏上 | 新增门控属性（`session.running`） |
+| `src/client/turn-status.ts` 的 `LIVE_ATTR` | 同上：0.1.7 **每一轮的行都留在屏上**，会话级门控分不出"在跑的这行" | 新增逐行标记（客户端盖在文档里最后一行上）＋ `MutationObserver` 跟随行的增删 |
 | `src/client/use-session-engine.ts` 的 `SessionSeat` | 需要 `useSession`（`SessionStandardProps`）读 `session.running` | 声明为**可选**，缺席时门保持不动而不是猜 |
 | `src/client/LoopEngineSection.tsx` 的 `IconChevronDown` | 0.1.7 把图标从 `IconChevronDownOutline14` 改名为 `IconChevronDownOutlineRegular` | B：`Regular ?? 14` 运行期回退 |
 
@@ -128,6 +129,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 |---|---|
 | `tests/helpers/harness-generation.ts` | 测试侧代际探测 + `toolResultView()` / `toolResultRole()`，把两代的 tool-result 读成**同一份事实**，让同一份 spec 两代都过 |
 | `tests/helpers/fake-settings.ts` | 假 settings 服务同时实现两代接口（`installSection` 与 `configure`/`mutate`/`describe`），按代际把"提交默认引擎"写进正确通道 |
+| `tests/helpers/fake-dom.ts` | node 里能跑 turn-status 反射的最小 DOM（`querySelector(All)`、元素属性、以及**手工投递记录**的假 `MutationObserver`——真的那个什么时候触发由浏览器定，逐行标记就没法测） |
 | `.compat-015/` | **隔离的 0.1.5 依赖集**（`package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml`；`node_modules` 不进仓库）。只装 0.1.5 那一套，与本仓库的 0.1.7 `node_modules` 互不干扰 |
 | `vitest.config.compat015.ts` | 把每个 `@deepseek-ai/*` 别名到 `.compat-015/node_modules/@deepseek-ai/`，跑**同一批 spec**：`npx vitest run --config vitest.config.compat015.ts`（**不跑覆盖率**，是功能性验证） |
 | `package.json` `peerDependencies` | 联合范围 `">=0.1.5-rc.1 <0.1.6-0 \|\| >=0.1.7-rc.1 <0.1.8-0"`；`@deepseek-ai/cordis` 放宽到 `^4.0.1`（`Volatile` 只在**构建期**用）；`schemastery` 钉 `3.18.4` |
@@ -146,14 +148,14 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | Remote contribution 的 strict codec | `{ schema }` → `{ create: () => schema }` | 会话级 Remote 从没挂上，**对话页引擎选择器永远「读取中」**，而设置页（另一条路径）正常 |
 | agent-presets roster 读法 | `read(id)` → `readDocument(id)` | `Unknown agent preset: loop-engine-claude-code`——预设根本没写出来，恢复会话失败 |
 | **托管 preset 的载体** | 用户 preset 根下的目录（`<home>/.agent-presets/<id>/agent.cordis.yml`）→ **组合行**（`insert` 一行 `@deepseek-ai/dsh-agent-preset`，`config.plugins` 就是组合） | 两代都"写成功"：0.1.7 上 roster 只答内置那四个 preset，`Unknown agent preset: loop-engine-<engine>`，托管引擎**根本选不了**。类型、构建、单测**全绿**——死掉的是机制而不是 API，旧代的位置照旧能跑，所以只有"在 0.1.7 真机上看 roster 答什么"才暴露 |
-| turn-status 行挂点 | `[class$="_turnStatus"]` → `button[data-turn-process]:disabled [class$="_label"]` | 0.1.7 上托管引擎那一行**没有字形/扫光**；`:disabled`（= ui-chat 的"这一轮不可折叠"，只在轮次进行中为真）是**逐行**区分"在跑的这行"与"已经收尾但仍留在屏上的那些行"的唯一手段——只按会话门控时，新一轮开始会把前面所有已结束的行一起重新涂上 |
+| turn-status 行挂点 | `[class$="_turnStatus"]` → `button[data-turn-process][data-loop-engine-live] [class$="_label"]` | 0.1.7 上托管引擎那一行**没有字形/扫光**；这一代**每一轮的行都留在屏上**，所以选择器还得逐行区分"在跑的这行"与"已收尾的那些行"——只按会话门控时，新一轮开始会把前面所有已结束的行一起重新涂上。**别再用行自己的 `:disabled` 顶替这个标记**：它表达的是 ui-chat 的"这一轮不可折叠"，`aborted` / `error` 收尾的行会一直留着它，于是那些僵尸行会在后续轮次里一起被画上（实测：一条"用时 3秒"的旧行戴着引擎字形与扫光）。标记由客户端自己写（`data-loop-engine-live` 盖在文档里最后一行上） |
 | turn-status 行的生命周期 | 0.1.5 行随轮次消失 → 0.1.7 行**结束后仍留在屏上**（折叠摘要「用时 X 秒」） | **对话结束后动画还在** |
 | CSS Modules 命名 | `[hash]_[local]`：真实类名是 `<hash>_label`，**不存在**字面量 `.label` | 选择器匹配不到任何元素（静默失效） |
 | `dataset` 键拼写 | `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError` | 整条反射路径带塌（只能写 camelCase 的 `dataset.loopEngine`） |
 | 事件名 / 方法签名 | `agent/session-start`、`sessions.enter/announce`、`agents.announce(agent)` vs `announce(agent, source, signal)` | 会话创建公告缺失，或 `announce` 被当作同步调用 |
 | 图标/原语名 | `IconChevronDownOutline14` → `IconChevronDownOutlineRegular` | 图标不渲染 |
 
-**挑锚点的优先级**（对 harness 内部 DOM/类名）：**稳定属性**（`data-*`）> **类名后缀**（`[class$="_x"]`）> **类名字面量**（`.label`，基本必错）。0.1.7 的 turn-status 行就是靠 `data-turn-process` + `[class$="_label"]` 才站住的。
+**挑锚点的优先级**（对 harness 内部 DOM/类名）：**稳定属性**（`data-*`）> **类名后缀**（`[class$="_x"]`）> **类名字面量**（`.label`，基本必错）。0.1.7 的 turn-status 行就是靠 `data-turn-process` + `[class$="_label"]` 才站住的；**自己写的 `data-*` 属性比 harness 的状态属性更可靠**——`data-loop-engine-live` 由插件在"文档里最后一行"上盖出来，而不是去解读 ui-chat 的 `disabled` 想表达什么（§5 turn-status 行挂点那条）。
 
 **降级路径**：跨代要稳定的字符串（namespace、事件名、remote 方法名、dataset 键、CSS 锚点、preset 前缀）尽量集中到**零导入模块**（`src/namespace.ts`、`src/agent-preset-ids.ts`、`src/client/turn-status.ts` 顶部常量），让"改一处"就是"改一处"。
 
