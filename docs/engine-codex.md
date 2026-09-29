@@ -8,7 +8,7 @@ Codex 引擎让 dsh 会话由 OpenAI Codex CLI 驱动：每个 dsh step 通过 J
 
 核心设计约束（与 claude-code 引擎同源）：
 
-- **"Model-visible ⟺ logged"**：发给 codex 的 prompt 是 `Session.deriveMessages()` 的纯序列化（`src/engine-codex/agent.ts:623-624` + `src/driver-core/prompt.ts:150`），会话日志是模型上下文的唯一事实源。**codex 是四个引擎里唯一不走斜杠命令步的**（`src/driver-core/prompt.ts:122` 的 `engineSlashPrompt`，见 `docs/driver-core.md` §2）：app-server 协议没有文本斜杠面——`turn/start` 的 `UserInput` 只有 text/image/localImage/audio/localAudio/skill/mention，压缩是独立 RPC `thread/compact/start`（核自 codex 0.149.1 的 app-server 协议 schema）——把裸行原样发过去只会平白丢掉上下文，而换不来任何本地展开。要让引擎的命令面在 codex 下可用，得另找协议项（`SkillUserInput` 之类），不是 prompt 形状的事。
+- **"Model-visible ⟺ logged"**：发给 codex 的 prompt 是 `Session.deriveMessages()` 的纯序列化（`src/engine-codex/agent.ts:694-695` + `src/driver-core/prompt.ts:246`），会话日志是模型上下文的唯一事实源。**codex 是四个引擎里唯一不走斜杠命令步的**（`src/driver-core/prompt.ts:216` 的 `engineSlashPrompt`，见 `docs/driver-core.md` §2）：app-server 协议没有文本斜杠面——`turn/start` 的 `UserInput` 只有 text/image/localImage/audio/localAudio/skill/mention，压缩是独立 RPC `thread/compact/start`（核自 codex 0.149.1 的 app-server 协议 schema）——把裸行原样发过去只会平白丢掉上下文，而换不来任何本地展开。要让引擎的命令面在 codex 下可用，得另找协议项（`SkillUserInput` 之类），不是 prompt 形状的事。
 - **审批请求经 dsh 审批 seam 应答**：app-server 把审批实现为 server→client 的 JSON-RPC request（`item/commandExecution|fileChange|permissions/requestApproval`），客户端注册 handler 写回应答（`src/engine-codex/appserver/client.ts`），agent 侧转 `ctx.approval`（§6.4）；线程启动参数仍按声明式折叠 `sandboxMode`/`approvalPolicy`。
 - **不走 dsh subprocess 接缝**：与 pi 引擎不同，codex 子进程由驱动自己用 `node:child_process.spawn` 拉起（`src/engine-codex/appserver/client.ts:89`），不经 `dsh-subprocess` 服务，因此没有 harness 沙箱包装——整个子进程的权限边界就是 codex CLI 自己的 sandbox。
 - **CLI 二进制来自 pinned 依赖**：入口解析自本包锁死的 `@openai/codex` 依赖（`package.json` 中 `@openai/codex: 0.149.1`），用当前 Node 解释器执行其 `bin/codex.js app-server`（`src/engine-codex/appserver/client.ts:46-48, 89-108`）。
@@ -256,7 +256,7 @@ app-server 用 `turn/start` 启动的 turn 里，模型请求审批时会从 **s
 - **无沙箱包装**：子进程不经 `dsh-subprocess` 接缝，harness 的 Landlock/超时等包装对本引擎不适用；权限边界完全依赖 codex CLI 自身 sandbox。
 - **单槽通知 handler**：`AppServerClient.onNotification` 是覆盖赋值，叠加订阅会互相顶掉；当前依赖"一个 agent 同一时刻至多一个活跃 turn"成立。
 - **stderr 丢弃**：`onStderr` 无人订阅，app-server 的日志不可见，排查协议问题时只能自己临时挂 handler。
-- **图片不进 prompt**：序列化把 image 块替换为 `[image omitted: ...]` 占位文本（`src/driver-core/prompt.ts:20-21`）；reasoning 块不进转录（各引擎每次查询自行重新推理，`src/driver-core/prompt.ts:33-37`）。
+- **图片不进 prompt**：序列化把 image 块替换为指名图片身份、并按能否解析出 attachment 只读路径给出两种恢复尾部的占位文本（`src/driver-core/prompt.ts:31`、`:62-75`，见 `docs/driver-core.md` §2）；reasoning 块不进转录（各引擎每次查询自行重新推理，`src/driver-core/prompt.ts:98-100`）。
 - **推理摘要 vs 正文**：终态优先取非空的 `summary`，其次非空的 `content`，两者都空则回退到这一步流式收到的思考文本（plan delta 不计入），三者皆无才记空串（`agent.ts:813-829`）。plan delta 会流进 reasoning 块但不算思考文本，所以它不参与这个回退。
 
 ### 9.3 注释与实现不一致（撰写时发现）

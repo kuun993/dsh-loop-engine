@@ -18,7 +18,7 @@ import type {
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ImageAttachmentAccessResolver, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import {
   AssistantStreamAccumulator,
   LlmError,
@@ -43,6 +43,7 @@ import {
   type StreamToolCall,
 } from './mapping.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
+import { createImageAccessResolver } from '../driver-core/image-access.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { createStepTools } from '../driver-core/step-tools.ts'
 import { closeStep } from '../driver-core/step-close.ts'
@@ -175,6 +176,13 @@ export class ClaudeCodeAgent implements Agent {
    */
   private rotated = false
 
+  /**
+   * Resolves the read-only path behind each image block of the prompt. The
+   * attachment service is read lazily on every call, so a host that composes it
+   * after this agent still reaches the transcript.
+   */
+  private readonly imageAccess: ImageAttachmentAccessResolver
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -199,6 +207,7 @@ export class ClaudeCodeAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
+    this.imageAccess = createImageAccessResolver(loopCtx)
   }
 
   get status(): AgentStatus {
@@ -582,7 +591,7 @@ export class ClaudeCodeAgent implements Agent {
     // A live slash command is the engine's own control line: send it verbatim
     // (the transcript framing would hide it from Claude Code's local-command
     // dispatch, which only inspects the head of the prompt).
-    const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
+    const prompt = engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)

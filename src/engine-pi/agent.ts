@@ -22,7 +22,7 @@ import type {
   PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ImageAttachmentAccessResolver, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { ToolCallId, LlmError, createAssistantMessage, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -32,6 +32,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
+import { createImageAccessResolver } from '../driver-core/image-access.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { createStepTools } from '../driver-core/step-tools.ts'
 import { closeStep, settleResult } from '../driver-core/step-close.ts'
@@ -131,6 +132,13 @@ export class PiAgent implements Agent {
   private rpc: PiRpcClient | undefined
 
   /**
+   * Resolves the read-only path behind each image block of the prompt. The
+   * attachment service is read lazily on every call, so a host that composes it
+   * after this agent still reaches the transcript.
+   */
+  private readonly imageAccess: ImageAttachmentAccessResolver
+
+  /**
    * Tool results logged into the currently open step. A result means the
    * segment that requested the call is finished, so the next assistant content
    * opens the next step (see {@link beginSegment}).
@@ -199,6 +207,7 @@ export class PiAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
+    this.imageAccess = createImageAccessResolver(loopCtx)
     // Release the shared RPC client when the agent scope is unwound.
     this.scope.ctx.effect(() => () => {
       this.rpc?.dispose()
@@ -611,7 +620,7 @@ export class PiAgent implements Agent {
     const history: Message[] = this.session.deriveMessages()
     // A live slash command is the engine's own control line: send it verbatim
     // (Pi expands commands/templates only when the prompt opens with `/`).
-    const prompt = engineSlashPrompt(history) ?? serializeHistory(history)
+    const prompt = engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)

@@ -9,7 +9,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 两个核心设计动机：
 
 - **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:164-170`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
-- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:606-609`、`src/driver-core/prompt.ts:150`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:851-856`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
+- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:620-623`、`src/driver-core/prompt.ts:246`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:216`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:851-856`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
 
@@ -78,7 +78,7 @@ client.clearEvents()        // 丢弃上一 step 残留事件（client.ts:135-13
 await client.prompt(prompt) // 整条序列化历史作为一条 prompt
 ```
 
-prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<user>` / `<assistant>` / `<tool-result>` 标签帧起来的转录文本；reasoning 块不进转录（每个引擎每次查询自己重新推导，`prompt.ts:36-37`）；图片块用占位文本 `OMITTED_IMAGE_TEXT`（`prompt.ts:20-21`）。因为输出是日志前缀的纯函数，同一日志重放得到同一 prompt。
+prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:246`）生成：`<user>` / `<assistant>` / `<tool-result>` 标签帧起来的转录文本；reasoning 块不进转录（每个引擎每次查询自己重新推导，`prompt.ts:98-100`）；图片块用占位文本 `OMITTED_IMAGE_TEXT`（`prompt.ts:31`）并在能拿到 attachment 只读路径时指名该路径（`prompt.ts:62-75`）。因为输出是日志前缀的纯函数，同一日志重放得到同一 prompt。
 
 `abort` 在取消路径上 fire-and-forget 发送（见第 9 节）；`get_session_stats` 已定义但驱动目前不调用。
 
@@ -179,7 +179,7 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:93-127`）生成：`<
 - **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`hosted-engine-runtime.ts:375-381`）。
 - **静默降级**：非 JSON 行忽略（`client.ts:234-236`）；技能加载失败静默跳过（`agent.ts:348-350`）；skills 目录不可读当空处理（`agents-md-skill-provider.ts:174-176`）。
 - **已知功能边界**：
-  - 图片不转写，统一替换为占位文本（`prompt.ts:20-21`）；
+  - 图片不转写，统一替换为占位文本（`prompt.ts:31`、`:62-75`）；
   - `extension_ui_request`（select/confirm/input 等交互请求）被忽略，没有应答路径——依赖交互扩展的 pi 配置在 dsh 下会卡住或无响应（`agent.ts:746`、`rpc/types.ts:153-162`）；
   - `get_session_stats` 客户端方法已实现但驱动未调用，usage 完全依赖事件流携带（`client.ts:158-161`）；
   - `rpc/mapping.ts` 的 `mapToolCall` 驱动未使用（agent 内联了 `emitToolCall`），仅测试引用——属冗余导出。

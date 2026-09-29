@@ -181,7 +181,7 @@ managed block 本身是**根级 block sequence**，这带来一个真实踩过�
 
 几条不变的语义：
 
-- **命令的 handler 是转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎自己的 CLI/ACP 面，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:72-79`）。注册的意义是让命令出现在 web 斜杠菜单里。转发只解决"行回到 agent"；真正让它生效的是驱动侧的裸命令行步（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`）。
+- **命令的 handler 是转发**：dsh 的 `commands` 运行时会在本地消费已注册命令（不会到达模型），而真正展开命令的是引擎自己的 CLI/ACP 面，所以 handler 把原始 `/name args` 行作为普通用户消息回投给接收 agent（`src/commands.ts:72-79`）。注册的意义是让命令出现在 web 斜杠菜单里。转发只解决"行回到 agent"；真正让它生效的是驱动侧的裸命令行步（`engineSlashPrompt`，`src/driver-core/prompt.ts:216`）。
 - **命令清单按懒求值**：claude 的 `discoverUserSlashCommands()` 每次调用都重新扫 `~/.claude/commands/`，所以会话中途新增的文件会落进该引擎下一次构建的 agent（`src/engine-surface.ts:41-46`）。项目级 `.claude/commands/` 有意不注册——它按 cwd 生效，注册进 agent scope 也会跨项目冲突（`src/commands.ts:16-17`）。
 - **撞名时 warn 跳过而不是让 agent 起不来**（`src/engine-surface.ts:88-90`）：引擎自己会展开裸 `/name` 行，菜单少一条好过 agent 拒绝启动。
 - **命名禁区**：宿主命令与 client 侧贡献撞名会让 `ui-commands` 把整个 command 菜单源判死（主仓 `packages/client/ui-commands/src/client/service.ts:214-215` 抛错），表现是斜杠菜单全消失、只剩技能。Kimi 的 `/model` 因此刻意不桥接（`src/engine-kimi/commands.ts:21-24`）。

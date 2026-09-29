@@ -7,7 +7,7 @@
 claude-code 引擎用官方 **Claude Agent SDK**（`@anthropic-ai/claude-agent-sdk`）驱动 dsh 会话。核心模型是：
 
 - **每个 dsh step 一次无状态 query**（`src/engine-claude/loop.ts:2-6` 模块注释）。SDK 进程不保留任何会话状态：`persistSession: false`（`src/engine-claude/sdk.ts:97`），dsh 的持久化 session log 是模型上下文的唯一来源。注意**反方向不成立**：一次 query 里模型会跑很多个内部轮次，driver 会在片段边界把 dsh step 轮转开（§4.1），所以一个 query ≠ 一个 step。
-- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:528-532`、`src/driver-core/prompt.ts:150`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。**例外**是本步最后一条消息就是一条斜杠命令：那时改发裸行（`engineSlashPrompt(history) ?? serializeHistory(history)`，`src/driver-core/prompt.ts:122`，见 §7.1），否则 CLI 的本地命令派发看不到它。
+- **prompt 是 session log 的纯序列化**。每个 step 调用 `Session.deriveMessages()` 派生历史，经 `serializeHistory` 渲染成 `<user>...</user>` / `<assistant>...</assistant>` / `<tool-result>...</tool-result>` 标签文本作为整段 prompt（`src/engine-claude/agent.ts:590-594`、`src/driver-core/prompt.ts:246`）。这实现了 harness 的"model-visible ⟺ logged"约束：重放同一份 log 必然得到同一份 prompt。**例外**是本步最后一条消息就是一条斜杠命令：那时改发裸行（`engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)`，`src/driver-core/prompt.ts:216`，见 §7.1），否则 CLI 的本地命令派发看不到它。
 - **Claude Code 拥有自己的 prompt、工具和权限**。SDK 子进程是真正的 agent 运行时（自带系统提示、内置工具、技能展开）；dsh 侧只做收件箱、turn/step 边界、事件落盘和审批转发（`src/engine-claude/agent.ts:1-8`）。
 - **进程模型**：SDK 的 `query()` 内部 spawn 一个 `claude` CLI 子进程。引擎通过 SDK 的 `spawnClaudeCodeProcess` 钩子把 spawn 请求转交给 dsh 的 subprocess seam（`src/engine-claude/sdk.ts:145-148`），子进程树的生命周期（终止升级阶梯、grace）由 harness 统一管理，而不是 SDK 直接 `child_process.spawn`。
 
@@ -201,7 +201,7 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 - **query 失败**：SDK result 错误 → `LlmError`（`CLAUDE_CODE_*` 码）→ `turn/end` 记 `error` + `agent/error` 事件；空流 → `CLAUDE_CODE_NO_RESULT`；无 cwd → 普通 Error，错误码 `UNKNOWN`（`src/engine-claude/agent.ts:420-425`）。
 - **静默降级**：技能加载失败/不存在/不可调用跳过；无 `approval` 服务时 ask 策略落 deny；无 `skills` 服务时手势不注入；无 `commands` 服务时斜杠菜单不注册。这些都有意不 fail-loud，因为可选宿主服务可能缺席（`src/index.ts:82-89`）。
 - **已知边界**：
-  - 图片不转录，以占位文本代替（`src/driver-core/prompt.ts:20-21`）；思维链不进 prompt（每次 query 重新思考，`src/driver-core/prompt.ts:34-37`）。
+  - 图片不转录，以占位文本代替——文本是 `[image "<name>" (<mediaType>, WxHpx, N bytes) omitted: this engine receives text, not image bytes; …]`，尾部按能否拿到 attachment 只读路径分"read <path> to view it"与"no readable path … attach the image again"两种（`src/driver-core/prompt.ts:31`、`:62-75`，见 `docs/driver-core.md` §2）；思维链不进 prompt（每次 query 重新思考，`src/driver-core/prompt.ts:98-100`）。
   - `redacted-thinking` 与未知内容块在 durable log 中不可恢复（`src/engine-claude/mapping.ts:100-102`）。
   - 无 SDK 会话持久化：每次 step 都是完整历史重放，长会话的 prompt 会线性增长——这是"session log 唯一事实源"设计的固有代价。
   - 引擎**按会话**选定：创建时由插件自己的每会话记录决定（该会话无记录时用它记录的 agent preset），之后可在会话打开且没有 turn 在飞时随时切到别的引擎（`src/router-loop.ts:281-314`、`:306-317`）；经 harness 的 preset 通道仍只有**空白**会话能换引擎，非空白会话只 warn 并保持原引擎（`src/router-loop.ts:577-602`）。插件装载期间 managed block 恒存在（不再有"in-process = 没有块"的形态）。**托管引擎之间的切换不需要重启、也不需要刷新**；**任一边是 in-process 时宿主会释放这条会话的 agent 并让页面自动重载一次**（重载后回到同一条会话，宿主按记录重建它——`dsh web` 进程不重启，`docs/per-session-engine.md` §5.2）。

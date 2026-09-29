@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { createAssistantMessage, createToolResultMessage, ToolCallId, type Message, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import { createAssistantMessage, createToolResultMessage, ToolCallId, type ContentBlock, type ImageAttachmentAccessResolver, type Message, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { engineSlashPrompt, OMITTED_IMAGE_TEXT, serializeHistory } from '../../src/driver-core/prompt.ts'
 // Loads the `skill-invocation` MessageSourceMap arm this driver injects.
@@ -21,6 +22,33 @@ function user(text: string): UserMessage {
 function assistant(text: string): Message {
   return createAssistantMessage({ content: [{ type: 'text', text }], source: { provider: 'kimi', model: 'default' } }) as Message
 }
+
+/**
+ * One durable image block, named and dimensioned as the log records it.
+ * @param name - the recorded display name; `null` records an image the log keeps unnamed.
+ * @returns the content block as a message in the log holds it.
+ */
+function imageBlock(name: string | null = 'shot.png'): ContentBlock {
+  return {
+    type: 'image',
+    attachment: {
+      attachmentId: AttachmentId('img-1'),
+      mediaType: 'image/png',
+      bytes: 1234,
+      width: 800,
+      height: 600,
+      ...(name === null ? {} : { name }),
+    },
+  }
+}
+
+/** A direct user message carrying `blocks`. */
+function userWith(blocks: ContentBlock[]): UserMessage {
+  return createUserMessage({ content: blocks, source: { kind: 'user' } })
+}
+
+/** A resolver that answers one fixed read-only path for every reference. */
+const resolving = (readonlyPath: string): ImageAttachmentAccessResolver => () => ({ readonlyPath })
 
 describe('engineSlashPrompt', () => {
   it('returns undefined for an empty history', () => {
@@ -95,6 +123,61 @@ describe('serializeHistory', () => {
     ].join('\n\n'))
   })
 
+  // The transcript cannot hand an engine image bytes, so an image block renders
+  // as a placeholder naming the image the log carries. With the attachment
+  // service composed, that placeholder also names the read-only path of the
+  // normalized file, which is the only way the model can look at it.
+  it('names the image and the read-only path the attachment service resolved', () => {
+    const prompt = serializeHistory([userWith([imageBlock()])], resolving('/tmp/attachments/x.png'))
+    expect(prompt).toBe(
+      `<user>\n[image "shot.png" (image/png, 800x600px, 1234 bytes) omitted: ${OMITTED_IMAGE_TEXT}; read "/tmp/attachments/x.png" to view it]\n</user>`,
+    )
+  })
+
+  it('falls back to the name "image" when the reference records none', () => {
+    const prompt = serializeHistory(
+      [userWith([imageBlock(null)])],
+      resolving('/tmp/attachments/x.png'),
+    )
+    expect(prompt).toContain('image "image" (image/png, 800x600px, 1234 bytes)')
+  })
+
+  it('asks the user to attach the image again when no resolver was supplied', () => {
+    const prompt = serializeHistory([userWith([imageBlock()])])
+    expect(prompt).toBe(
+      `<user>\n[image "shot.png" (image/png, 800x600px, 1234 bytes) omitted: ${OMITTED_IMAGE_TEXT}; no readable path is available — ask the user to attach the image again if it is needed]\n</user>`,
+    )
+  })
+
+  it('renders the no-path form when the resolver answers undefined', () => {
+    const prompt = serializeHistory([userWith([imageBlock()])], () => undefined)
+    expect(prompt).toContain(OMITTED_IMAGE_TEXT)
+    expect(prompt).toContain('no readable path is available')
+    expect(prompt).not.toContain('to view it')
+  })
+
+  it('renders an assistant image block through the same placeholder', () => {
+    const message = createAssistantMessage({
+      content: [imageBlock(), { type: 'text', text: 'visible text' }],
+      source: { provider: 'kimi', model: 'default' },
+    }) as Message
+    const prompt = serializeHistory([message], resolving('/tmp/attachments/x.png'))
+    expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
+    expect(prompt).toContain('visible text')
+  })
+
+  it('renders an image inside a 0.1.7 tool result through the same placeholder', () => {
+    const result = createToolResultMessage({
+      callId: ToolCallId('call-image'),
+      content: [imageBlock()],
+      isError: false,
+    })
+    const prompt = serializeHistory([result], resolving('/tmp/attachments/x.png'))
+    expect(prompt).toBe(
+      `<tool-result>\n[image "shot.png" (image/png, 800x600px, 1234 bytes) omitted: ${OMITTED_IMAGE_TEXT}; read "/tmp/attachments/x.png" to view it]\n</tool-result>`,
+    )
+  })
+
   // The 0.1.5 line carries a tool result on a user-role message whose single
   // `tool-result` block nests the result blocks; the introspector reads that
   // shape structurally, so these cases hold under either generation's message
@@ -114,9 +197,11 @@ describe('serializeHistory', () => {
       id: 'legacy-2',
       role: 'user',
       source: { kind: 'tool', callId: 'call-2' },
-      content: [{ type: 'tool-result', toolCallId: 'call-2', content: [{ type: 'image', mediaType: 'image/png', data: 'AAAA' }], isError: true }],
+      content: [{ type: 'tool-result', toolCallId: 'call-2', content: [imageBlock()], isError: true }],
     } as unknown as Message
-    expect(serializeHistory([legacyResult])).toBe(`<tool-result-error>\n${OMITTED_IMAGE_TEXT}\n</tool-result-error>`)
+    expect(serializeHistory([legacyResult])).toBe(
+      `<tool-result-error>\n[image "shot.png" (image/png, 800x600px, 1234 bytes) omitted: ${OMITTED_IMAGE_TEXT}; no readable path is available — ask the user to attach the image again if it is needed]\n</tool-result-error>`,
+    )
   })
 
   it('renders an empty 0.1.5 tool result as (no content)', () => {

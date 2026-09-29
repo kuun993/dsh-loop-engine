@@ -8,7 +8,7 @@ Kimi 引擎把每个 dsh 会话挂到一个**常驻 `kimi acp` 子进程**上，
 
 核心模型：
 
-- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:563,554`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:150`），保证 "Model-visible ⟺ logged"；唯一例外是本步的最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:122`，见 §7.1）。
+- **每步无状态**：每个 dsh step 都是一次独立的 `session/new` + `session/prompt`（`src/engine-kimi/agent.ts:642,616`）。Kimi 侧不保留跨步上下文——dsh 会话日志是模型上下文的唯一来源，prompt 是持久历史的纯序列化（`serializeHistory`，`src/driver-core/prompt.ts:246`），保证 "Model-visible ⟺ logged"；唯一例外是本步的最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:216`，见 §7.1）。
 - **子进程模型**：整个 `kimi acp` 子进程通过 dsh subprocess 接缝（`ctx.subprocess.spawn`）拉起——这是唯一可用的权限边界，沙箱姿态由 subprocess provider 按会话的持久权限旋钮解析（默认 read-only）（`src/engine-kimi/loop.ts:8-13`、`:80-87`）。`subprocess` 服务是构造时用 `ctx.get` **惰性**解析的（引擎是普通类，没有 `static inject` 可声明）：取不到就抛错让选中它的那个会话大声失败（`loop.ts:80-86`）。Kimi 没有 host 审批回调，ACP 反向 RPC `session/request_permission` 由会话的 dsh approval 旋钮回答（见第 6 节）。
 - **方向辨析**：主仓自带 `@deepseek-ai/dsh-acp`（`../deepseek-harness/packages/acp/acp`）是 **ACP server**（把 dsh agent 暴露给外部 ACP 客户端）；本驱动是 **ACP client**（dsh 作客户端驱动 kimi CLI 这个 agent）。两者方向相反，不要混淆。
 - **kimiBin 解析**：`kimiBinResolver`（`src/engine-kimi/process.ts:59-64`）三级回退——① 配置钉死的路径（`kimiBin` 配置项，空字符串视为未配置）；② 探测标准安装位 `<kimi home>/bin/kimi[.exe]`，其中 kimi home = `KIMI_CODE_HOME` 环境变量或 `~/.kimi-code`（`kimiHomeDir`，`process.ts:47-50`）；③ 回退裸命令 `'kimi'`，由 spawner 经 PATH 解析。
@@ -133,7 +133,7 @@ Kimi 没有 host 审批回调，ACP 的 `session/request_permission` 由会话�
 
 dsh `commands` 运行时本地执行注册命令，命令行不会到达模型；真实处理在 Kimi 引擎内的命令必须**转发原文行**给 agent：`forwardKimiCommand` 把 `/<name><rawInput>` 作为普通 user 消息 `followup` 给接收 agent（commands.ts:44-52）。
 
-转发只是把行送回给自己——**真正让它生效的是驱动侧的斜杠命令步**：该 user 消息成为本步最后一条消息时，`engineSlashPrompt` 让它以裸行形式发出（`src/driver-core/prompt.ts:122`、`src/engine-kimi/agent.ts:550`）。若仍走 `<user>...</user>` 框架，ACP 适配器的 `detectLeadingSlashIntent` 只看首个 block 的首字符，`/status` 会被当散文交给模型（实测：模型开始猜"用户是不是打了斜杠命令"）。所以"注册"负责菜单可见与本地消费，"裸行"负责引擎真正展开，两者缺一不可。
+转发只是把行送回给自己——**真正让它生效的是驱动侧的斜杠命令步**：该 user 消息成为本步最后一条消息时，`engineSlashPrompt` 让它以裸行形式发出（`src/driver-core/prompt.ts:216`、`src/engine-kimi/agent.ts:598`）。若仍走 `<user>...</user>` 框架，ACP 适配器的 `detectLeadingSlashIntent` 只看首个 block 的首字符，`/status` 会被当散文交给模型（实测：模型开始猜"用户是不是打了斜杠命令"）。所以"注册"负责菜单可见与本地消费，"裸行"负责引擎真正展开，两者缺一不可。
 
 `KIMI_COMMANDS`（commands.ts:60-67）注册的正是 **`kimi acp` 命令面实测实现的那 6 条**：`compact`、`status`、`usage`、`mcp`、`tasks`、`help`（实测方式：直连 `kimi acp` 逐条发 `session/prompt`，0.28.1；子进程自己发布的 `available_commands_update` 也给出同一份内建列表 + Kimi 自己的技能）。其余 TUI 控制类命令（`/login`、`/provider`、`/settings`、`/sessions`、`/clear`、`/plan`、`/auto`、`/version`、`/goal`）ACP 面一律回 `Unknown ACP command: /name. Use /help to see available commands.`，因此都不注册——注册一条不存在的命令只会让菜单骗人。`skill:` 类命令已由 dsh 技能注入接缝承载（用户打 `/skill:xxx` 时手势扫描不命中，裸行会落到 ACP 的技能解析），不重复注册。
 

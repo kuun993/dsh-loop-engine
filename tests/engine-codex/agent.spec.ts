@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -233,6 +234,49 @@ describe('CodexLoop factory registration', () => {
 })
 
 describe('CodexAgent turn mapping', () => {
+  it('names the read-only path of a user image block in the prompt', async () => {
+    const ctx = await harness()
+    try {
+      // The host's attachment service: codex receives the transcript as text,
+      // so the driver must ask it for the path behind the durable reference.
+      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      mock.runStreamed.mockImplementation(() => stream([
+        { kind: 'turn-started', turnId: 'turn-1' },
+        itemCompleted(agentMessage('seen')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('image-s'), meta: { cwd: process.cwd() } })
+      agent.followup(createUserMessage({
+        content: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: AttachmentId('img-1'),
+              mediaType: 'image/png',
+              bytes: 1234,
+              width: 800,
+              height: 600,
+              name: 'shot.png',
+            },
+          },
+        ],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      const input = mock.runStreamed.mock.calls[0]![0]
+      const prompt = Array.isArray(input)
+        ? input.map((item: { text?: string }) => item.text ?? '').join('')
+        : String(input)
+      expect(prompt).toContain('look at this')
+      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('records turn, step, assistant message, usage, and completion in the session log', async () => {
     const ctx = await harness()
     try {

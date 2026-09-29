@@ -11,19 +11,30 @@
  * of the prompt. It is still derived from the log alone, so the guarantee
  * holds.
  *
+ * An image block cannot ride along as bytes, so it renders as placeholder text
+ * naming the image and the read-only path {@link createImageAccessResolver}
+ * resolves for it (see `driver-core/image-access.ts`). The reference is the
+ * log's own, so the placeholder keeps the replay guarantee too.
+ *
  * @module dsh-loop-engine/driver-core/prompt
  */
 
 import type {
   ContentBlock,
+  ImageAttachmentAccessResolver,
   Message,
   ToolResultMessage,
   UserMessage,
 } from '@deepseek-ai/dsh-llm'
 
-/** Model-facing stand-in for an image block that the hosted engines cannot consume as bytes. */
-export const OMITTED_IMAGE_TEXT
-  = '[image omitted: the driver does not transcribe images; read the file when a path is available]'
+/** The one fact every omitted image placeholder states: a hosted engine takes text, never image bytes. */
+export const OMITTED_IMAGE_TEXT = 'this engine receives text, not image bytes'
+
+/**
+ * The durable reference an image block carries, derived from the block union so
+ * this module needs no dependency on the attachment package that owns it.
+ */
+type ImageBlockRef = Extract<ContentBlock, { type: 'image' }>['attachment']
 
 /**
  * Frame a serialized message body with its visible role label.
@@ -36,14 +47,42 @@ function frame(tag: string, body: string): string {
 }
 
 /**
+ * Render one image block of the transcript. The placeholder names the image the
+ * log carries — its display name, media type, dimensions, and byte size — and
+ * how its bytes can be recovered: the read-only path when the attachment
+ * service resolved one, otherwise the fact that there is no readable path and
+ * the user can be asked to attach it again.
+ *
+ * The text and the path both come from the block's own durable reference, so
+ * the placeholder stays a pure function of the log.
+ * @param ref - the durable reference the image block carries.
+ * @param imageAccess - resolves the attachment service's read-only path, when the host composes one.
+ * @returns the bracketed placeholder text.
+ */
+function omittedImageText(
+  ref: ImageBlockRef,
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
+  const identity = `image ${JSON.stringify(ref.name ?? 'image')} (${ref.mediaType}, ${ref.width}x${ref.height}px, ${ref.bytes} bytes) omitted: ${OMITTED_IMAGE_TEXT}`
+  const access = imageAccess?.(ref)
+  return access === undefined
+    ? `[${identity}; no readable path is available — ask the user to attach the image again if it is needed]`
+    : `[${identity}; read ${JSON.stringify(access.readonlyPath)} to view it]`
+}
+
+/**
  * Render one assistant message's content blocks to transcript text. Text
  * blocks render verbatim; tool-call blocks render as a compact invocation
  * line; reasoning content is not transcribed (each engine re-derives its own
  * thinking in every fresh query).
  * @param blocks - the assistant message's content blocks.
+ * @param imageAccess - resolves an image block's read-only path, when the host composes the attachment service.
  * @returns the transcript text of the message body.
  */
-function renderAssistantBlocks(blocks: readonly ContentBlock[]): string {
+function renderAssistantBlocks(
+  blocks: readonly ContentBlock[],
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
   const sections: unknown[] = []
   for (const block of blocks) {
     switch (block.type) {
@@ -54,7 +93,7 @@ function renderAssistantBlocks(blocks: readonly ContentBlock[]): string {
         sections.push(`[tool call: ${block.name}(${block.arguments})]`)
         break
       case 'image':
-        sections.push(OMITTED_IMAGE_TEXT)
+        sections.push(omittedImageText(block.attachment, imageAccess))
         break
       default:
         // reasoning and unknown blocks stay out of the transcript.
@@ -68,15 +107,19 @@ function renderAssistantBlocks(blocks: readonly ContentBlock[]): string {
  * Render a block list as transcript text: text verbatim, images as the omitted
  * notice, everything else dropped. User and tool-result content share it.
  * @param blocks - the blocks to render.
+ * @param imageAccess - resolves an image block's read-only path, when the host composes the attachment service.
  * @returns the joined transcript text, empty when no block renders.
  */
-function renderTextBlocks(blocks: readonly ContentBlock[]): string {
+function renderTextBlocks(
+  blocks: readonly ContentBlock[],
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
   return blocks.map((block) => {
     switch (block.type) {
       case 'text':
         return block.text
       case 'image':
-        return OMITTED_IMAGE_TEXT
+        return omittedImageText(block.attachment, imageAccess)
       default:
         return ''
     }
@@ -89,10 +132,15 @@ function renderTextBlocks(blocks: readonly ContentBlock[]): string {
  * differ only in WHERE the blocks and the error flag live.
  * @param blocks - the result's content blocks.
  * @param isError - whether the tool invocation failed.
+ * @param imageAccess - resolves an image block's read-only path, when the host composes the attachment service.
  * @returns the framed transcript text of the tool result.
  */
-function renderToolResult(blocks: readonly ContentBlock[], isError: boolean | undefined): string {
-  const body = renderTextBlocks(blocks)
+function renderToolResult(
+  blocks: readonly ContentBlock[],
+  isError: boolean | undefined,
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
+  const body = renderTextBlocks(blocks, imageAccess)
   const tag = isError === true ? 'tool-result-error' : 'tool-result'
   return frame(tag, body || '(no content)')
 }
@@ -104,10 +152,14 @@ function renderToolResult(blocks: readonly ContentBlock[], isError: boolean | un
  * the introspector reads the shape structurally, so this is only the
  * convenience the `tool` arm of {@link serializeHistory} calls.
  * @param message - the durable tool-result message.
+ * @param imageAccess - resolves an image block's read-only path, when the host composes the attachment service.
  * @returns the transcript text of the tool result.
  */
-function renderModernToolResult(message: ToolResultMessage): string {
-  return renderToolResult(message.content, message.isError)
+function renderModernToolResult(
+  message: ToolResultMessage,
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
+  return renderToolResult(message.content, message.isError, imageAccess)
 }
 
 /**
@@ -116,13 +168,17 @@ function renderModernToolResult(message: ToolResultMessage): string {
  * structurally so the same source compiles and runs against either generation's
  * message union.
  * @param message - the `user`-role tool-result message.
+ * @param imageAccess - resolves an image block's read-only path, when the host composes the attachment service.
  * @returns the transcript text of the tool result.
  */
-function renderLegacyToolResult(message: Message): string {
+function renderLegacyToolResult(
+  message: Message,
+  imageAccess: ImageAttachmentAccessResolver | undefined,
+): string {
   const block = message.content[0] as
     | { content?: readonly ContentBlock[]; isError?: boolean }
     | undefined
-  return renderToolResult(block?.content ?? [], block?.isError)
+  return renderToolResult(block?.content ?? [], block?.isError, imageAccess)
 }
 
 /**
@@ -183,14 +239,19 @@ export function engineSlashPrompt(messages: readonly Message[]): string | undefi
  * function of the log prefix.
  * @param messages - derived history, oldest first, as returned by
  *   `Session.deriveMessages()` at step time.
+ * @param imageAccess - resolves the read-only path of an image block's
+ *   attachment; without one, an image renders as the no-path placeholder.
  * @returns the prompt text to pass to the engine.
  */
-export function serializeHistory(messages: readonly Message[]): string {
+export function serializeHistory(
+  messages: readonly Message[],
+  imageAccess?: ImageAttachmentAccessResolver,
+): string {
   const sections: string[] = []
   for (const message of messages) {
     switch (message.role) {
       case 'assistant': {
-        const body = renderAssistantBlocks(message.content)
+        const body = renderAssistantBlocks(message.content, imageAccess)
         if (body !== '') sections.push(frame('assistant', body))
         break
       }
@@ -200,15 +261,15 @@ export function serializeHistory(messages: readonly Message[]): string {
         // handled below. Discriminating structurally keeps one transcript for
         // both generations.
         if (message.source.kind === 'tool') {
-          sections.push(renderLegacyToolResult(message))
+          sections.push(renderLegacyToolResult(message, imageAccess))
         } else {
-          const body = renderTextBlocks(message.content)
+          const body = renderTextBlocks(message.content, imageAccess)
           sections.push(frame('user', body || '(no content)'))
         }
         break
       }
       case 'tool': {
-        sections.push(renderModernToolResult(message))
+        sections.push(renderModernToolResult(message, imageAccess))
         break
       }
       default:

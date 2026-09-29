@@ -388,10 +388,12 @@ describe('serializeHistory', () => {
       }),
     ])
     expect(prompt).toContain(OMITTED_IMAGE_TEXT)
+    expect(prompt).toContain('image "image" (image/png, 4x4px, 2 bytes)')
+    expect(prompt).toContain('no readable path is available')
     expect(prompt).toContain('<tool-result-error>')
   })
 
-  it('omits assistant image blocks from the transcript', () => {
+  it('replaces an assistant image block with the no-path placeholder', () => {
     const prompt = serializeHistory([
       {
         role: 'assistant' as const,
@@ -404,6 +406,8 @@ describe('serializeHistory', () => {
       },
     ])
     expect(prompt).toContain(OMITTED_IMAGE_TEXT)
+    expect(prompt).toContain('image "image" (image/png, 4x4px, 2 bytes)')
+    expect(prompt).toContain('ask the user to attach the image again')
     expect(prompt).toContain('visible text')
   })
 
@@ -416,7 +420,7 @@ describe('serializeHistory', () => {
       ],
       isError: false,
     })])
-    expect(prompt).toBe(`<tool-result>\n${OMITTED_IMAGE_TEXT}\n</tool-result>`)
+    expect(prompt).toBe(`<tool-result>\n[image "image" (image/png, 4x4px, 2 bytes) omitted: ${OMITTED_IMAGE_TEXT}; no readable path is available — ask the user to attach the image again if it is needed]\n</tool-result>`)
   })
 
   it('renders an empty tool-result body as a placeholder', () => {

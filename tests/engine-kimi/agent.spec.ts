@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent, type Session } from '@deepseek-ai/dsh-session'
 import AgentRegistry, { type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
@@ -227,6 +228,48 @@ describe('KimiAgent turn mapping (streamed)', () => {
       agent.followup(message('and now?'))
       await agent.whenIdle()
       expect(mock.client.prompt).toHaveBeenLastCalledWith('sess_1', expect.stringContaining('<user>\n/status\n</user>'))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('names the read-only path of a user image block in the prompt', async () => {
+    mock.updates.mockReturnValue([text('seen')])
+    const ctx = await harness()
+    try {
+      // The host's attachment service: the driver must ask it for the path of
+      // the durable reference the log carries, since Kimi receives text only.
+      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('image-s'), meta: { cwd: process.cwd() } })
+      agent.followup(createUserMessage({
+        content: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: AttachmentId('img-1'),
+              mediaType: 'image/png',
+              bytes: 1234,
+              width: 800,
+              height: 600,
+              name: 'shot.png',
+            },
+          },
+        ],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+      // The prompt handed to the engine names the image and where its bytes
+      // live, so the model can read the file instead of guessing at it.
+      expect(mock.client.prompt).toHaveBeenLastCalledWith('sess_1', expect.stringContaining('look at this'))
+      expect(mock.client.prompt).toHaveBeenLastCalledWith(
+        'sess_1',
+        expect.stringContaining('image "shot.png" (image/png, 800x600px, 1234 bytes)'),
+      )
+      expect(mock.client.prompt).toHaveBeenLastCalledWith(
+        'sess_1',
+        expect.stringContaining('read "/tmp/attachments/x.png" to view it'),
+      )
     } finally {
       await ctx.fiber.dispose()
     }
