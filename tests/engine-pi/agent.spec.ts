@@ -5,6 +5,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
@@ -214,13 +216,17 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
-  it('names the read-only path of a user image block in the prompt', async () => {
+  it('names the path of a user image block and hands Pi its bytes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-pi-image-'))
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+    const imagePath = join(dir, 'x.png')
+    await writeFile(imagePath, bytes)
     const ctx = await harness()
     try {
-      // The host's attachment service: Pi receives the transcript as text, so
-      // the driver must ask it for the path behind the durable reference the
-      // log carries.
-      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      // The host's attachment service: Pi still receives the transcript as
+      // text, so the driver must ask it for the path behind the durable
+      // reference the log carries — and read those bytes itself.
+      ctx.provide('attachments', { imageHostPath: () => imagePath })
       mock.eventsYield.mockReturnValue(okStream('seen'))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('image-s'),
@@ -245,12 +251,38 @@ describe('PiAgent turn mapping', () => {
       }))
       await agent.whenIdle()
 
+      // Pi is the one engine whose protocol takes image bytes, so this step's
+      // own image rides with the prompt, base64 under its own media type.
+      expect(mock.client.prompt.mock.calls[0]?.[1]).toEqual({
+        images: [{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' }],
+      })
+
       // The RPC prompt names the image and where its bytes live, so the model
       // can read the file instead of guessing at it.
       const prompt = String(mock.client.prompt.mock.calls[0]?.[0])
       expect(prompt).toContain('look at this')
       expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
-      expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
+      expect(prompt).toContain(`read ${JSON.stringify(imagePath)} to view it`)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('sends no attachments when the step carries no image', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('plain'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('no-image-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      // No image anywhere in the step: the prompt command is byte-for-byte what
+      // it was before the driver had an image channel.
+      expect(mock.client.prompt.mock.calls[0]?.[1]).toEqual({})
     } finally {
       await ctx.fiber.dispose()
     }

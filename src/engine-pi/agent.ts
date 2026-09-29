@@ -41,6 +41,7 @@ import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
 import { piAgentDir } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { stepImages } from '../driver-core/step-images.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import { resolveSessionPermission, toolsForSandbox, type PiPermission } from './permission.ts'
 import {
@@ -49,7 +50,7 @@ import {
   type PiSpawnSpec,
 } from './rpc/client.ts'
 import { mapToolResult, mapUsage } from './rpc/mapping.ts'
-import type { PiMessage, PiToolResult } from './rpc/types.ts'
+import type { PiImage, PiMessage, PiToolResult } from './rpc/types.ts'
 import {
   invokedSkillNames,
   isSkillName,
@@ -479,7 +480,7 @@ export class PiAgent implements Agent {
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
-          const stepEnd = await this.step()
+          const stepEnd = await this.step(decision.messages)
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
           // The driver rotates steps as the prompt's segments complete, so
@@ -602,8 +603,10 @@ export class PiAgent implements Agent {
    * natively, so the dsh system-prompt assembly (which pulls dsh tool schemas
    * and `agent.ctx.tools`) is deliberately not run — the durable session log is
    * the sole source of model context.
+   * @param messages - the messages this step delivers; only their images ride
+   *   with the prompt as bytes, and only they.
    */
-  private async step(): Promise<StepEndReason | null> {
+  private async step(messages: readonly UserMessage[]): Promise<StepEndReason | null> {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
@@ -620,12 +623,20 @@ export class PiAgent implements Agent {
     const history: Message[] = this.session.deriveMessages()
     // A live slash command is the engine's own control line: send it verbatim
     // (Pi expands commands/templates only when the prompt opens with `/`).
-    const prompt = engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)
+    const slash = engineSlashPrompt(history)
+    const prompt = slash ?? serializeHistory(history, this.imageAccess)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)
     }
     /* v8 ignore stop */
+    // Pi is the first engine whose protocol takes image bytes, so the images
+    // of THIS step's own messages are sent as attachments; older images stay
+    // path-bearing placeholders in the transcript. A slash command is a bare
+    // control line, so it carries none.
+    const images: PiImage[] = slash === undefined
+      ? (await stepImages(messages, this.imageAccess)).map(image => ({ type: 'image', ...image }))
+      : []
     this.assertRequestHeader()
     signal.throwIfAborted()
 
@@ -685,7 +696,7 @@ export class PiAgent implements Agent {
       signal.throwIfAborted()
       await client.newSession()
       client.clearEvents()
-      await client.prompt(prompt)
+      await client.prompt(prompt, images.length === 0 ? {} : { images })
 
       let finished = false
       /**

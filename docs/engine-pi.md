@@ -9,7 +9,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 两个核心设计动机：
 
 - **Pi 没有权限系统**（"runs with the permissions of the user"），驱动无法让它做沙箱或审批回调。唯一可用的边界是进程环境：要么让整个子进程以 dsh 用户身份裸跑（full access），要么收缩它的 `--tools` 白名单（`src/engine-pi/permission.ts:1-16`、`src/engine-pi/types.ts:4-8`）。子进程一律经由 dsh subprocess seam 启动（`src/engine-pi/loop.ts:164-170`），获得独立进程树、环境清洗和树级终止——但注意 subprocess seam **没有 OS 级沙箱**（见第 6 节与文末"不一致"）。
-- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:620-623`、`src/driver-core/prompt.ts:246`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:216`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:851-856`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
+- **无状态 step 模型**：dsh 会话日志是模型上下文的唯一来源（model-visible ⟺ logged）。每个 dsh step 发一个 `new_session` + 一条 `prompt`，prompt 是持久化历史的纯序列化（`src/engine-pi/agent.ts:623-627`、`src/driver-core/prompt.ts:246`）；**例外**是本步最后一条消息就是一条斜杠命令时改发裸行（`engineSlashPrompt`，`src/driver-core/prompt.ts:216`）——Pi 的输入展开只认以 `/` 开头的整条文本（extension command `text.startsWith("/")`、`/skill:name`、prompt template `^\/([^\s]+)(\s+[\s\S]*)?$`，见 `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js` 与 `prompt-templates.js`），带 `<user>` 框架的转录一条都不命中。Pi 也是四个引擎里**第一个真正把图片字节原生送进引擎**的：本步自己交付的消息里的图片块随 prompt 一起以 base64 送出（见 §4.3）。每个 step 都**重建一个 Pi RPC 子进程**：`pi --mode rpc` 的一个进程跑完一个 session（`agent_settled`）后不再接受/正确执行第二个 `new_session`+`prompt`（实测会挂起、随后退出——"pi RPC process exited unexpectedly"），所以驱动在每步结束 dispose 掉客户端、下一步用全新进程（`src/engine-pi/agent.ts:1012`、step 的 finally）。每个 step 的 Pi 进程与会话都是全新的。
 
 ## 2. 模块组成
 
@@ -24,7 +24,7 @@ pi 引擎把每个 dsh 会话驱动到 `@earendil-works/pi-coding-agent` CLI 上
 | `src/engine-pi/rpc/types.ts` | `pi --mode rpc` 协议的最小子集类型（纯类型） |
 | `src/engine-pi/rpc/mapping.ts` | usage / tool result / tool call → dsh 会话事件的映射函数 |
 
-共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`hosted-engine-runtime.ts`（`HostedEngineRuntime`：四个引擎共用的 create/resume 事务，§3.1/3.2）、`prompt.ts`（serializeHistory、engineSlashPrompt）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
+共享基础设施（`src/driver-core/`）：`ownership.ts`（FactoryOwnership、raceAbort）、`hosted-engine-runtime.ts`（`HostedEngineRuntime`：四个引擎共用的 create/resume 事务，§3.1/3.2）、`prompt.ts`（serializeHistory、engineSlashPrompt）、`step-images.ts`（step 自己交付的消息里的图片块 → 读文件 + base64，见 §4.3）、`permission-knobs.ts`（会话旋钮读取）、`context-files.ts`（上下文文件收集）、`skill-inject.ts`（`/name` 手势扫描与 `<skill_content>` 渲染）、`inbox.ts`（DriverInbox，会话收件箱投影）、`assistant-stream.ts`（DriverAssistantStream，live 帧与 compact stream）。
 
 ## 3. 引擎运行时与 Agent 生命周期
 
@@ -51,7 +51,7 @@ RPC 客户端**懒创建、按 step 重建**：`rpcClient(cwd)` 每次先算 `sp
 
 `turn()` 负责会话日志边界：`turn/start` → 循环 `preStep` + `step/start` + `step()` + `step/end` → `turn/end`（`agent.ts:374-451`）。`preStep` 走 `agent/pre-step` waterfall，之后追加技能注入（见第 7 节）。
 
-每 step 的查询在 `step()`（`agent.ts:561-858`）：要求会话带 cwd（否则抛错，`agent.ts:568-571`）→ `session.deriveMessages()` + `serializeHistory` 得到 prompt → 每生命周期补一次 `request/header`（`assertRequestHeader`，`agent.ts:459-470`）→ `newSession()` + `clearEvents()` + `prompt(prompt)`（`agent.ts:628-630`）→ 消费事件流直到 settle。
+每 step 的查询在 `step()`（`agent.ts:609-1015`）：要求会话带 cwd（否则抛错，`agent.ts:619-621`）→ `session.deriveMessages()` + `serializeHistory` 得到 prompt（`agent.ts:623-627`）→ 每生命周期补一次 `request/header`（`assertRequestHeader`，`agent.ts:640`）→ `newSession()` + `clearEvents()` + `prompt(prompt, images)`（`agent.ts:697-699`，图片见 §4.3）→ 消费事件流直到 settle。
 
 dsh 系统提示词装配**故意不跑**：Pi 原生拥有自己的系统提示词，dsh 那套装配会拉 dsh 工具 schema，对托管引擎无意义（`agent.ts:550-560` 注释）。
 
@@ -59,26 +59,34 @@ dsh 系统提示词装配**故意不跑**：Pi 原生拥有自己的系统提示
 
 ### 4.1 严格 LF 的原因
 
-协议是 strict LF JSONL：记录之间只用裸 `\n` 分隔，容忍行尾 `\r`，而 U+2028/U+2029 在 JSON 字符串里是普通字符——通用行读取器若把它们当换行就不合规（`src/engine-pi/rpc/types.ts:8-12`）。因此客户端自己实现分帧：`StringDecoder('utf8')` 做字节→文本解码（处理多字节字符跨 chunk），`indexOf('\n')` 切行、剥尾部 `\r`（`client.ts:212-226`）。非 JSON 行静默忽略（`client.ts:234-236`），空行跳过（`client.ts:230`）。
+协议是 strict LF JSONL：记录之间只用裸 `\n` 分隔，容忍行尾 `\r`，而 U+2028/U+2029 在 JSON 字符串里是普通字符——通用行读取器若把它们当换行就不合规（`src/engine-pi/rpc/types.ts:8-12`）。因此客户端自己实现分帧：`StringDecoder('utf8')` 做字节→文本解码（处理多字节字符跨 chunk），`indexOf('\n')` 切行、剥尾部 `\r`（`client.ts:215-229`）。非 JSON 行静默忽略（`client.ts:237-239`），空行跳过（`client.ts:233`）。
 
 ### 4.2 命令/响应与事件流
 
-- 命令写入 `JSON.stringify(command) + '\n'`；`request()` 在命令无 `id` 时分配自增 id，响应按 `id` 关联到 pending map，`success: false` 时 reject（`client.ts:164-181、237-246`）。
-- 非响应行一律进事件缓冲并唤醒 `events()` 生成器（`client.ts:248-251`）。`events()` 是无限生成器——缓冲空就挂起等唤醒，只有 `disposed` 才返回（`client.ts:188-198`）。**这就是 step 必须靠 settle 信号 break 的原因**（见第 5 节）。
-- stderr 只排空不记录，防止话多的子进程堵满管道（`client.ts:92-96、254-257`）。
-- 子进程退出：置 `disposed`，所有 pending 以 `'pi RPC process exited unexpectedly'` reject，唤醒事件流（`client.ts:107-113`）。`dispose()` 幂等，先置标志再 `terminate()` 进程树（`client.ts:201-209`）。
+- 命令写入 `JSON.stringify(command) + '\n'`；`request()` 在命令无 `id` 时分配自增 id，响应按 `id` 关联到 pending map，`success: false` 时 reject（`client.ts:176-184、240-249`）。
+- 非响应行一律进事件缓冲并唤醒 `events()` 生成器（`client.ts:251-254`）。`events()` 是无限生成器——缓冲空就挂起等唤醒，只有 `disposed` 才返回（`client.ts:191-201`）。**这就是 step 必须靠 settle 信号 break 的原因**（见第 5 节）。
+- stderr 只排空不记录，防止话多的子进程堵满管道（`client.ts:95-99、258-260`）。
+- 子进程退出：置 `disposed`，所有 pending 以 `'pi RPC process exited unexpectedly'` reject，唤醒事件流（`client.ts:110-116`）。`dispose()` 幂等，先置标志再 `terminate()` 进程树（`client.ts:204-212`）。
 
 ### 4.3 无状态 step 模型
 
-客户端提供的命令只有四个：`new_session` / `prompt` / `abort` / `get_session_stats`（`client.ts:140-161`）。驱动每 step 只用前两个半：
+客户端提供的命令只有四个：`new_session` / `prompt` / `abort` / `get_session_stats`（`client.ts:143-164`）。驱动每 step 只用前两个半：
 
 ```
 await client.newSession()   // 全新 Pi 会话（配合 --no-session 不落盘）
-client.clearEvents()        // 丢弃上一 step 残留事件（client.ts:135-137）
-await client.prompt(prompt) // 整条序列化历史作为一条 prompt
+client.clearEvents()        // 丢弃上一 step 残留事件（client.ts:138-140）
+await client.prompt(prompt, images) // 整条序列化历史作为一条 prompt，外加本步图片字节
 ```
 
 prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:246`）生成：`<user>` / `<assistant>` / `<tool-result>` 标签帧起来的转录文本；reasoning 块不进转录（每个引擎每次查询自己重新推导，`prompt.ts:98-100`）；图片块用占位文本 `OMITTED_IMAGE_TEXT`（`prompt.ts:31`）并在能拿到 attachment 只读路径时指名该路径（`prompt.ts:62-75`）。因为输出是日志前缀的纯函数，同一日志重放得到同一 prompt。
+
+**Pi 是四个引擎里第一个把图片字节原生送进引擎的驱动**。本步自己交付的消息批（`turn()` 里 `this.step(decision.messages)`，`agent.ts:483`）交给 `stepImages`（`src/driver-core/step-images.ts:39`）处理后随 prompt 送出（`agent.ts:637-639`，发送点 `agent.ts:699`）：
+
+- **字节从哪来**：每块用构造时建好的 `this.imageAccess`（`createImageAccessResolver`，`src/driver-core/image-access.ts:45`）向 attachment 服务要该引用的只读宿主路径，`readFile` 读该文件、按块自己的 `mediaType` 做 base64（`step-images.ts:44-56`）。**不走** `readImageRequest`——那是默认就拒绝（`ATTACHMENT_PROJECTION_UNSUPPORTED`）的缝。
+- **哪些图片**：只有**本步交付的消息**，不是整段历史——长会话不会每步重传所有图片。更早的图片仍以"身份 + 路径"的占位文本留在转录里，模型自己的文件工具照样能读（规则见 `docs/driver-core.md` §2）。
+- **没有图片时**：传 `{}`，RPC 命令与加这条通道之前逐字节相同。
+- **斜杠命令步**：`engineSlashPrompt` 命中时发的是裸控制行，**不带任何图片**（`agent.ts:637-639` 的 `slash === undefined` 判据）。
+- **路径拿不到 / 文件读不动**：该图片静默跳过（`step-images.ts:48`、`:52-53`）——转录里已经写着它的路径，模型仍有办法拿到它，一个坏掉的图片不该让整个 step 失败。
 
 `abort` 在取消路径上 fire-and-forget 发送（见第 9 节）；`get_session_stats` 已定义但驱动目前不调用。
 
@@ -172,28 +180,28 @@ prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:246`）生成：`<use
 
 ## 9. 错误处理与已知边界
 
-- **子进程意外退出**：所有 pending 命令 reject `'pi RPC process exited unexpectedly'`，事件流唤醒后结束（`client.ts:107-113`）；step 侧表现为 `PI_NO_RESULT` 或命令错误。
-- **取消**：phase signal 触发时向子进程发 `abort` 命令——fire-and-forget，rejection 被吞掉（子进程可能已在拆除，`PiRpcClient.dispose()` 会 reject 在途的 `abort`；不吞会以 "pi RPC client is disposed" 未处理拒绝打崩进程）（`agent.ts:582-604`）。
+- **子进程意外退出**：所有 pending 命令 reject `'pi RPC process exited unexpectedly'`，事件流唤醒后结束（`client.ts:110-116`）；step 侧表现为 `PI_NO_RESULT` 或命令错误。
+- **取消**：phase signal 触发时向子进程发 `abort` 命令——fire-and-forget，rejection 被吞掉（子进程可能已在拆除，`PiRpcClient.dispose()` 会 reject 在途的 `abort`；不吞会以 "pi RPC client is disposed" 未处理拒绝打崩进程）（`agent.ts:660-673`）。
 - **配置校验失败大声报错**：`Config` schema（`loop.ts:61-68`）在组合边界验证；`sandboxMode` 非法值直接组合失败。
-- **cwd 缺失**：会话无 cwd 元数据时 step 抛错，要求带 cwd 启动会话（`agent.ts:568-571`）。
+- **cwd 缺失**：会话无 cwd 元数据时 step 抛错，要求带 cwd 启动会话（`agent.ts:619-621`）。
 - **resume 依赖**：无 `sessionPersistence` 服务时 `resume` 抛错（`hosted-engine-runtime.ts:375-381`）。
-- **静默降级**：非 JSON 行忽略（`client.ts:234-236`）；技能加载失败静默跳过（`agent.ts:348-350`）；skills 目录不可读当空处理（`agents-md-skill-provider.ts:174-176`）。
+- **静默降级**：非 JSON 行忽略（`client.ts:237-239`）；技能加载失败静默跳过（`agent.ts:416-418`）；skills 目录不可读当空处理（`agents-md-skill-provider.ts:174-176`）。
 - **已知功能边界**：
-  - 图片不转写，统一替换为占位文本（`prompt.ts:31`、`:62-75`）；
-  - `extension_ui_request`（select/confirm/input 等交互请求）被忽略，没有应答路径——依赖交互扩展的 pi 配置在 dsh 下会卡住或无响应（`agent.ts:746`、`rpc/types.ts:153-162`）；
-  - `get_session_stats` 客户端方法已实现但驱动未调用，usage 完全依赖事件流携带（`client.ts:158-161`）；
+  - 图片不转写进转录正文，统一替换为"身份 + 路径"的占位文本（`prompt.ts:31`、`:62-75`）；但**本步自己交付的消息**里的图片字节会原生随 prompt 送出（见 §4.3），拿不到路径或读不动的才只留占位；
+  - `extension_ui_request`（select/confirm/input 等交互请求）被忽略，没有应答路径——依赖交互扩展的 pi 配置在 dsh 下会卡住或无响应（`agent.ts:882`、`rpc/types.ts:154-162`）；
+  - `get_session_stats` 客户端方法已实现但驱动未调用，usage 完全依赖事件流携带（`client.ts:161-164`）；
   - `rpc/mapping.ts` 的 `mapToolCall` 驱动未使用（agent 内联了 `emitToolCall`），仅测试引用——属冗余导出。
 
 ## 10. 测试覆盖要点
 
-`tests/engine-pi/` 下 9 个 spec、178 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`）：
+`tests/engine-pi/` 下 9 个 spec、180 个用例，本次运行全部通过（`pnpm vitest run tests/engine-pi`）：
 
 - `rpc/client.spec.ts`（24）：响应 id 关联、严格 LF 分帧（含 `\r` 容忍、多字节跨 chunk）、生命周期/dispose 幂等、send/缓冲、默认 spawn 与 `fromChildProcess`；
 - `rpc/mapping.spec.ts`（13）：`mapUsage` 缺省/零值规则、`mapToolResult` 错误标记与 `(no content)` 兜底、`resultText` 各 payload 形态、`mapToolCall` 序列化；
 - `permission.spec.ts`（5）：`resolveSessionPermission` 四种折叠路径 + `toolsForSandbox`；
 - `skills.spec.ts`（20）：`piAgentDir` 环境覆盖、上下文文件/技能目录列举（含 junction、两种布局）、`get` 的 locator 双分支；
 - `loop.spec.ts`（6）：spawn 投影（`process.execPath` 前缀、stdio、graceMs），以及**构造时 ctx 上没有 `subprocess` 服务就大声失败**（`/needs the dsh subprocess service/`）；
-- `agent.spec.ts`（58）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、**同一次执行被重复报告（第二条 `tool_execution_end` 与 `turn_end.toolResults`）时只落一条 `tool/result`**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
+- `agent.spec.ts`（60）：工厂注册、turn 事件映射、**一段一步的 step 轮转与段内顺序（`stepStructure` 辅助函数断言 `type@step` 序列；含无流式 assistant 消息时合成 owner 的路径）**、**同一次执行被重复报告（第二条 `tool_execution_end` 与 `turn_end.toolResults`）时只落一条 `tool/result`**、**图片步的原生字节（真临时文件 → 断言 RPC prompt 带 `images` 的 base64；无图片的步带 `{}`；占位文本照旧）**、取消与 pre-step 拦截、会话权限折叠、部署钉死、防御性守卫、技能注入、边缘映射；
 - `controls.spec.ts`（22）：steer/inject、maintenance、turn 中取消、commit veto、空 step 完成、turn 中输入链接、配置校验；
 - `index.spec.ts`（26）：经 `tests/helpers/agent-harness.ts:49` 的 `loopPluginFor` 挂载引擎（helper 做路由器在生产里做的事：构造引擎、交出 AgentFactory 槽位、发布三个 systemPrompt 变量）后的 HMR 安全拆除、createAgent 选项、resume；
 - `model-handover.spec.ts`（4）：`piAgentDir` 按端点哈希生成临时 agent 目录、`models.json` 的内容与权限位、目录清理。

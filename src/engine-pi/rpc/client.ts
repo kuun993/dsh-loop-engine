@@ -20,6 +20,7 @@ import type {
   PiCommand,
   PiEvent,
   PiGetSessionStatsCommand,
+  PiImage,
   PiNewSessionCommand,
   PiPromptCommand,
   PiResponse,
@@ -56,6 +57,8 @@ export type PiEventHandler = (event: PiEvent) => void
 /** Options for one `prompt` command. */
 export interface PiPromptOptions {
   readonly streamingBehavior?: 'steer' | 'followUp'
+  /** Images sent with this prompt, as the protocol takes them. */
+  readonly images?: readonly PiImage[]
 }
 
 /** Default spawn: launch the Pi CLI under the current node runtime. */
