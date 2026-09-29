@@ -7,10 +7,12 @@
  * `MutationObserver` whose records a test delivers by hand — a real one fires on
  * its own schedule, which would leave the row follower untestable.
  *
- * The fake answers the `tag[attr]` selector form only, and to the elements that
- * carry the attribute rather than to a parsed query: a selector the module
- * cannot reach through it is a selector this fake knows nothing about, and the
- * test that depends on it fails rather than silently passing.
+ * The fake answers the `tag[attr]` and bare `[attr]` selector forms only — the
+ * first for the 0.1.7 turn-process rows, the second for the 0.2.0
+ * `[data-chat-running]` node — and it answers the elements that carry the
+ * attribute rather than a parsed query: a selector the module cannot reach
+ * through it is a selector this fake knows nothing about, and the test that
+ * depends on it fails rather than silently passing.
  *
  * @module tests/helpers/fake-dom
  */
@@ -19,25 +21,35 @@
 type ObserverCallback = (records: MutationRecord[], observer: MutationObserver) => void
 
 /**
- * The one row selector the reflection looks rows up by — spelled here as the
- * harness markup spells it, so a fake that answered nothing would fail every
+ * The turn-process row selector the reflection looks rows up by — spelled here as
+ * the harness markup spells it, so a fake that answered nothing would fail every
  * test that depends on the lookup rather than pass them quietly.
  */
 const ROW_BUTTON = 'button[data-turn-process]'
+
+/**
+ * The 0.2.0 running row, likewise — the node that generation's live indicator
+ * carries, and the one the mark has to stand down for.
+ */
+const RUNNING_ROW = '[data-chat-running]'
 
 /** The observers built since the last install; `disconnect()` takes one out of the loop. */
 let observers: FakeMutationObserver[] = []
 
 /**
- * Match one `tag[attr]` selector — the only form this fake DOM understands.
+ * Match one `tag[attr]` or `[attr]` selector — the two forms this fake DOM
+ * understands. The bare form is what a `data-*`-only anchor needs (0.2.0's
+ * `[data-chat-running]` names no tag), and both forms answer the elements that
+ * carry the attribute rather than a parsed query.
  * @param element - the element to test.
  * @param selector - the selector text.
- * @returns whether the element carries the tag and the attribute.
+ * @returns whether the element carries the tag, when one is named, and the attribute.
  */
-function matchesTagAttr(element: FakeElement, selector: string): boolean {
-  const parsed = /^([a-z]+)\[([a-z-]+)\]$/.exec(selector)
+function matchesAttrSelector(element: FakeElement, selector: string): boolean {
+  const parsed = /^(?:([a-z]+))?\[([a-z-]+)\]$/.exec(selector)
   if (parsed === null) return false
-  return element.tagName === parsed[1] && element.attributes.has(parsed[2]!)
+  if (parsed[1] !== undefined && element.tagName !== parsed[1]) return false
+  return element.attributes.has(parsed[2]!)
 }
 
 /** One fake element: the handful of DOM members the turn-status reflection uses. */
@@ -93,21 +105,23 @@ export class FakeElement {
   }
 
   /**
-   * @param selector - a `tag[attr]` selector.
+   * @param selector - a `tag[attr]` or `[attr]` selector.
    * @returns whether this element matches it.
    */
-  matches(selector: string): boolean { return matchesTagAttr(this, selector) }
+  matches(selector: string): boolean { return matchesAttrSelector(this, selector) }
 
   /**
-   * @param selector - a `tag[attr]` selector.
-   * @returns the first matching descendant, or undefined.
+   * @param selector - a `tag[attr]` or `[attr]` selector.
+   * @returns the first matching descendant, or `null` when none — as a real
+   *   `Element.querySelector` answers, which the reflection's `!== null` tests
+   *   depend on.
    */
-  querySelector(selector: string): FakeElement | undefined {
-    return this.descendants().find(descendant => descendant.matches(selector))
+  querySelector(selector: string): FakeElement | null {
+    return this.descendants().find(descendant => descendant.matches(selector)) ?? null
   }
 
   /**
-   * @param selector - a `tag[attr]` selector.
+   * @param selector - a `tag[attr]` or `[attr]` selector.
    * @returns every matching descendant, in document order.
    */
   querySelectorAll(selector: string): FakeElement[] {
@@ -179,6 +193,12 @@ export interface FakeTurnStatusDom {
    */
   addRow(turn: number): FakeElement
   /**
+   * Mount the 0.2.0 running row (`data-chat-running`), the way `RunningStatus`
+   * does for a running session.
+   * @returns the running-row element.
+   */
+  addRunning(): FakeElement
+  /**
    * Take a row out of the document, the way React unmounts it.
    * @param row - the row to remove.
    */
@@ -215,6 +235,7 @@ export function installFakeTurnStatusDom(): FakeTurnStatusDom {
       created.push(tag)
       return tag
     },
+    querySelector: (selector: string) => body.querySelector(selector),
     querySelectorAll: (selector: string) => body.querySelectorAll(selector),
   }
   const globals = globalThis as { document?: unknown; MutationObserver?: unknown }
@@ -231,6 +252,11 @@ export function installFakeTurnStatusDom(): FakeTurnStatusDom {
     addRow: (turn) => {
       const row = body.append(new FakeElement('button'))
       row.setAttribute('data-turn-process', String(turn))
+      return row
+    },
+    addRunning: () => {
+      const row = body.append(new FakeElement('div'))
+      row.setAttribute('data-chat-running', '')
       return row
     },
     removeRow: (row) => { row.remove() },

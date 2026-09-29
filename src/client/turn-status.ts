@@ -49,7 +49,8 @@
  * paints by it, and a leftover attribute is inert on a page whose turn-status row
  * is not rendered.
  *
- * The paint is gated TWICE, and both gates are needed on the 0.1.7 line.
+ * The paint is gated TWICE, and both gates are needed on the 0.1.7 line — the
+ * 0.2.0 line needs neither of them, for the reason given below.
  *
  * First, on the session being MID-TURN, through a second document-level
  * attribute ({@link RUNNING_ATTR}, written from the same reflection). On the
@@ -73,30 +74,48 @@
  * for this session" and "is this row the one it belongs to" — and neither alone
  * is enough.
  *
+ * The 0.2.0 line needs NEITHER gate, because it moved the live row out of the
+ * turn-process button. There the running indicator is the harness's own node —
+ * `RunningStatus`, a `[data-chat-running]` div mounted only while the session
+ * runs — and `TurnProcessNodeView` renders nothing at all until its turn closes,
+ * so a turn-process button is now always a settled summary. The third sheet
+ * ({@link sheetForRunning}) is therefore gated on the engine attribute alone,
+ * and the per-row mark is not merely unnecessary there but WRONG:
+ * {@link markLiveRow} stamps nothing while such a node is on screen, because the
+ * last turn-process button on that page is a finished turn's summary — exactly
+ * the row the mark exists to leave alone.
+ *
  * Three facts about the harness markup make that safe and specific:
  *   - the row has one stable handle per harness generation — an
- *     `[hash]_turnStatus` class suffix on the 0.1.5 line, and, on the 0.1.7
- *     line, the `data-turn-process` button whose text is a `<span>` whose hashed
- *     class ends `_label` — so each generation gets its own copy of the sheet
- *     ({@link ROW_SELECTORS}) and the one the running app renders matches while
- *     the other stays inert;
- *   - its gradient paints through the `--dsw-static-deepseek-*` custom
- *     properties, so recoloring is a variable override rather than a fight
- *     over `background` and `background-clip`;
+ *     `[hash]_turnStatus` class suffix on the 0.1.5 line, the
+ *     `data-turn-process` button on the 0.1.7 line (whose text is a `<span>`
+ *     whose hashed class ends `_label`), and the harness's own
+ *     `data-chat-running` attribute on the 0.2.0 line — so each generation gets
+ *     its own copy of the sheet ({@link ROW_SELECTORS}, {@link RUNNING_ROW}) and
+ *     the one the running app renders matches while the others stay inert;
+ *   - its colours paint through custom properties — the 0.1.x rows through the
+ *     `--dsw-static-deepseek-*` gradient pair, 0.2.0's through the
+ *     `--dsw-alias-label-deep-diving*` pair it resolves its own text colour and
+ *     shimmer tint from — so recoloring is a variable override rather than a
+ *     fight over `background` and `background-clip` or over the harness's own
+ *     animation;
  *   - the glyph rides a `::before` pseudo-element, so the row's real text node
  *     — and the status it announces — is untouched.
  *
- * This sheet deliberately keeps the row animating even when the OS reports
- * `prefers-reduced-motion: reduce` (see the re-asserted sweep below): the
- * deployment's Windows images ship with client-area animation off, which
- * otherwise freezes every indicator here — the sweep and the glyph alike.
- * In-process sessions keep the stock reduced-motion behaviour.
+ * This sheet deliberately keeps the 0.1.x rows animating even when the OS
+ * reports `prefers-reduced-motion: reduce` (see the re-asserted sweep below):
+ * the deployment's Windows images ship with client-area animation off, which
+ * otherwise freezes every indicator here — the sweep and the glyph alike. On the
+ * 0.2.0 line the harness runs its own shimmer and honours that preference
+ * itself, so the plugin neither re-declares it nor overrides it there; only the
+ * glyph keeps animating. In-process sessions keep the stock reduced-motion
+ * behaviour on every line.
  *
  * @module dsh-loop-engine/client/turn-status
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { LoopEngineId } from '../agent-preset-ids.ts'
+import type { LoopEngineId, HostedEngineId } from '../agent-preset-ids.ts'
 
 /** Attribute on `<html>` naming the engine the session on screen runs; absent means stock. */
 const ENGINE_ATTR = 'data-loop-engine'
@@ -104,7 +123,10 @@ const ENGINE_ATTR = 'data-loop-engine'
 /**
  * Attribute on `<html>` marking that the session on screen is mid-turn; absent
  * means it is not. Session-level half of the gate: the 0.1.7 rows outlive the
- * turns they belong to, and the per-row half is {@link LIVE_ATTR}.
+ * turns they belong to, and the per-row half is {@link LIVE_ATTR}. The 0.2.0
+ * sheet is not gated on it — that generation's row only exists while the turn
+ * does (see {@link sheetForRunning}) — but the attribute is written either way,
+ * because which generation is running is not something the plugin can know.
  */
 const RUNNING_ATTR = 'data-loop-engine-running'
 
@@ -115,11 +137,22 @@ const RUNNING_ATTR = 'data-loop-engine-running'
 const ROW_BUTTON = 'button[data-turn-process]'
 
 /**
+ * The 0.2.0 running row: the harness's own indicator, the `[data-chat-running]`
+ * div `RunningStatus` mounts while the session on screen runs and unmounts when
+ * the turn settles. It is live by construction — which is why this line needs
+ * neither of the two gates the 0.1.x lines need (see the sheets below) and why
+ * {@link markLiveRow} leaves it and the turn-process buttons alone.
+ */
+const RUNNING_ROW = '[data-chat-running]'
+
+/**
  * Attribute this module stamps on the row of the turn in flight; absent means
  * no row is claimed. The per-ROW half of the gate — the session-level
  * {@link RUNNING_ATTR} says a turn is in flight for the session on screen, this
  * says which of the many rows still on screen is that turn's own. Written only
- * while the gate is on, and by {@link markLiveRow} only.
+ * while the gate is on, and by {@link markLiveRow} only — which also means it is
+ * never written on the 0.2.0 line, whose live row is the harness's own and is
+ * never a turn-process row.
  */
 const LIVE_ATTR = 'data-loop-engine-live'
 
@@ -127,12 +160,13 @@ const LIVE_ATTR = 'data-loop-engine-live'
 const PLUGIN_ID = 'dsh-loop-engine'
 
 /**
- * One harness markup row the sheet restyles — the sheet is emitted once per
- * generation's selector, and whichever the running app renders matches while
- * the other stays inert. The row moved between generations, so the selector is
- * data here rather than baked into the CSS.
+ * One harness markup row a sheet restyles. The sheet is emitted once per
+ * generation's anchor — these two for the 0.1.x lines and {@link RUNNING_ROW}
+ * for 0.2.0 — and whichever the running app renders matches while the others
+ * stay inert. The row moved between generations, so the selector is data here
+ * rather than baked into the CSS.
  *
- * The two generations need DIFFERENT precision, and that difference is the
+ * The two 0.1.x generations need DIFFERENT precision, and that difference is the
  * whole reason this is a list of selectors rather than one:
  *
  *   - the 0.1.5 row exists only while its turn runs, so "the row" and "the live
@@ -161,105 +195,96 @@ const ROW_SELECTORS = [
   `${ROW_BUTTON}[${LIVE_ATTR}] [class$="_label"]`,
 ] as const
 
-/** Emit the sheet once for one generation's row selector. */
-const sheetFor = (ROW: string): string => {
-  // Every rule is gated on the engine AND on the session being mid-turn, and on
-  // the 0.1.7 line the row selector carries the live-row mark as well, so the
-  // sheet is inert both for a stock row and for one that has finished.
-  const GATE = `html[${ENGINE_ATTR}][${RUNNING_ATTR}]`
-  return `
-${GATE} ${ROW}::before {
-  margin-right: 6px;
-  background: none;
-  -webkit-background-clip: border-box;
-  background-clip: border-box;
-}
-
-/*
- * The engine-colored sweep — and, on the 0.1.7 line, the sweep itself.
- *
- * The 0.1.5 row paints its own gradient (a \`linear-gradient\` over
- * --dsw-static-deepseek-*, clipped to the text) and only needs its animation
- * re-asserted; this rule declares that same gradient so the 0.1.7 row, whose
- * turn-process button is plain tertiary text, gets the sweep back. Either way
- * the per-engine override below recolors it by swapping the two custom
- * properties. ui-chat disables the animation under
- * \`prefers-reduced-motion: reduce\`, and a media query carries no specificity —
- * so this attribute-gated rule outranks it. That is deliberate here:
- * deployment images ship with Windows' client-area animation off
- * (SPI_GETCLIENTAREAANIMATION false), and with the guard in force EVERY
- * indicator on this row is frozen — the sweep and the glyph alike. Scoped to
- * hosted engines, so in-process sessions keep the stock reduced-motion
- * behaviour; delete this rule and restore the guard at the foot of the sheet to
- * hand the decision back to the OS.
+/**
+ * The two custom properties a sheet drives a row's colour through, base colour
+ * first and the lighter tint its sweep travels in second. The pair is written on
+ * the row itself, so overriding them recolours both the text and its sweep
+ * without touching either rule that paints them.
  */
-${GATE} ${ROW} {
-  background: linear-gradient(90deg,
-    var(--dsw-static-deepseek-500) 0%,
-    var(--dsw-static-deepseek-500) 40%,
-    var(--dsw-static-deepseek-200) 50%,
-    var(--dsw-static-deepseek-500) 60%,
-    var(--dsw-static-deepseek-500) 100%);
-  color: #0000;
-  -webkit-text-fill-color: transparent;
-  -webkit-background-clip: text;
-  background-clip: text;
-  background-position: 100% 0;
-  background-size: 250% 100%;
-  animation: le-shimmer 1.8s linear infinite;
+type ColourVars = readonly [string, string]
+
+/** The 0.1.x rows paint their DeepSeek gradient through these two. */
+const GRADIENT_VARS: ColourVars = ['--dsw-static-deepseek-500', '--dsw-static-deepseek-200']
+
+/** The 0.2.0 aliases `.running` resolves its text colour and overlay tint from. */
+const RUNNING_VARS: ColourVars = ['--dsw-alias-label-deep-diving', '--dsw-alias-label-deep-diving-shimmer']
+
+/** One engine's paint: the colours, the glyph and the animation that drives it. */
+interface EnginePaint {
+  /** The text's own colour — and the glyph's, where the glyph is not an emoji. */
+  readonly colour: string
+  /** The lighter tint the sweep (0.1.x gradient, 0.2.0 overlay) travels in. */
+  readonly tint: string
+  /** The glyph itself, unquoted; the glyph rule adds the `content` quoting. */
+  readonly glyph: string
+  /** Further declarations the glyph rule carries after `color`, in order. */
+  readonly extras: readonly string[]
+  /** The `animation` shorthand driving the glyph; its `@keyframes` is below. */
+  readonly animation: string
 }
 
-@keyframes le-shimmer {
-  to { background-position: 0 0; }
-}
+/**
+ * Every hosted engine's paint, in the order the sheets emit it.
+ *
+ * This is the one place an engine's identity on the row lives. The pair is the
+ * same on every generation — a base colour and the lighter tint its sweep
+ * travels in — and only the custom properties it is written to change, so a
+ * sheet is this table emitted through that generation's selectors and variables
+ * rather than a second copy of the four engines.
+ */
+const ENGINE_PAINT: ReadonlyArray<readonly [HostedEngineId, EnginePaint]> = [
+  ['claude-code', {
+    colour: '#d97757', tint: '#f5bda6', glyph: '✻', extras: [],
+    animation: 'le-bloom 1.6s ease-in-out infinite',
+  }],
+  ['codex', {
+    colour: '#a9b1c0', tint: '#e6eaf2', glyph: '•',
+    extras: ['text-shadow: 0 0 6px currentColor'],
+    animation: 'le-pulse 1.4s ease-in-out infinite',
+  }],
+  ['pi', {
+    colour: '#8e4ec6', tint: '#d6bff0', glyph: '⠋', extras: ['font-size: 1.1em'],
+    animation: 'le-braille 1s linear infinite',
+  }],
+  ['kimi', {
+    colour: '#e5484d', tint: '#f5b2b4', glyph: '🌗', extras: [],
+    animation: 'le-moon 2.5s linear infinite',
+  }],
+]
 
-html[${ENGINE_ATTR}="claude-code"][${RUNNING_ATTR}] ${ROW} {
-  --dsw-static-deepseek-500: #d97757;
-  --dsw-static-deepseek-200: #f5bda6;
+/**
+ * Emit every engine's two rules for one sheet, as a block.
+ *
+ * Both selectors are given as a function of the engine because they are not
+ * always the same element: the 0.1.x lines hang the glyph off the very element
+ * they set the variables on, while 0.2.0 sets them on the running row and hangs
+ * the glyph off the content row inside it (see {@link sheetForRunning}).
+ * @param properties - the selector the two custom properties go on, per engine.
+ * @param glyph - the selector the glyph hangs off, per engine; `::before` is appended.
+ * @param vars - the two custom properties {@link ColourVars}, base first.
+ * @returns the rules, one engine after another, blank-line separated.
+ */
+const engineRules = (
+  properties: (engine: HostedEngineId) => string,
+  glyph: (engine: HostedEngineId) => string,
+  vars: ColourVars,
+): string => ENGINE_PAINT.map(([engine, paint]) => `${properties(engine)} {
+  ${vars[0]}: ${paint.colour};
+  ${vars[1]}: ${paint.tint};
 }
-html[${ENGINE_ATTR}="claude-code"][${RUNNING_ATTR}] ${ROW}::before {
-  content: "✻";
-  color: #d97757;
-  -webkit-text-fill-color: #d97757;
-  animation: le-bloom 1.6s ease-in-out infinite;
-}
+${glyph(engine)}::before {
+  content: "${paint.glyph}";
+  color: ${paint.colour};
+  -webkit-text-fill-color: ${paint.colour};
+${paint.extras.map(extra => `  ${extra};\n`).join('')}  animation: ${paint.animation};
+}`).join('\n\n')
 
-html[${ENGINE_ATTR}="codex"][${RUNNING_ATTR}] ${ROW} {
-  --dsw-static-deepseek-500: #a9b1c0;
-  --dsw-static-deepseek-200: #e6eaf2;
-}
-html[${ENGINE_ATTR}="codex"][${RUNNING_ATTR}] ${ROW}::before {
-  content: "•";
-  color: #a9b1c0;
-  -webkit-text-fill-color: #a9b1c0;
-  text-shadow: 0 0 6px currentColor;
-  animation: le-pulse 1.4s ease-in-out infinite;
-}
-
-html[${ENGINE_ATTR}="pi"][${RUNNING_ATTR}] ${ROW} {
-  --dsw-static-deepseek-500: #8e4ec6;
-  --dsw-static-deepseek-200: #d6bff0;
-}
-html[${ENGINE_ATTR}="pi"][${RUNNING_ATTR}] ${ROW}::before {
-  content: "⠋";
-  color: #8e4ec6;
-  -webkit-text-fill-color: #8e4ec6;
-  font-size: 1.1em;
-  animation: le-braille 1s linear infinite;
-}
-
-html[${ENGINE_ATTR}="kimi"][${RUNNING_ATTR}] ${ROW} {
-  --dsw-static-deepseek-500: #e5484d;
-  --dsw-static-deepseek-200: #f5b2b4;
-}
-html[${ENGINE_ATTR}="kimi"][${RUNNING_ATTR}] ${ROW}::before {
-  content: "🌗";
-  color: #e5484d;
-  -webkit-text-fill-color: #e5484d;
-  animation: le-moon 2.5s linear infinite;
-}
-
-/* Grows from small to large each cycle — the opposite of a twinkle. The range
+/**
+ * The four glyph animations, emitted by every sheet so each generation's copy is
+ * self-contained. `@keyframes` are document-global and not scoped by a selector,
+ * so a duplicate name across the sheets is a duplicate of the same rule.
+ */
+const GLYPH_KEYFRAMES = `/* Grows from small to large each cycle — the opposite of a twinkle. The range
    is deliberately wide (3x) because a bare size change on a thin glyph reads
    weakly otherwise, and the large state is held briefly (50%-62%) so it blooms
    rather than throbs. 1.35x extends ~2.5px per side at the 14px glyph, inside
@@ -306,26 +331,125 @@ html[${ENGINE_ATTR}="kimi"][${RUNNING_ATTR}] ${ROW}::before {
   75% { content: "🌓"; }
   87.5% { content: "🌔"; }
   100% { content: "🌕"; }
+}`
+
+/**
+ * Emit the sheet once for one 0.1.x generation's row selector.
+ * @param ROW - the generation's row anchor, from {@link ROW_SELECTORS}.
+ */
+const sheetFor = (ROW: string): string => {
+  // Every rule is gated on the engine AND on the session being mid-turn, and on
+  // the 0.1.7 line the row selector carries the live-row mark as well, so the
+  // sheet is inert both for a stock row and for one that has finished.
+  const GATE = `html[${ENGINE_ATTR}][${RUNNING_ATTR}]`
+  // The 0.1.x rows set the variables and hang the glyph off the same element.
+  const PER_ENGINE = (engine: HostedEngineId): string => `html[${ENGINE_ATTR}="${engine}"][${RUNNING_ATTR}] ${ROW}`
+  return `
+${GATE} ${ROW}::before {
+  margin-right: 6px;
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
 }
+
+/*
+ * The engine-colored sweep — and, on the 0.1.7 line, the sweep itself.
+ *
+ * The 0.1.5 row paints its own gradient (a \`linear-gradient\` over
+ * --dsw-static-deepseek-*, clipped to the text) and only needs its animation
+ * re-asserted; this rule declares that same gradient so the 0.1.7 row, whose
+ * turn-process button is plain tertiary text, gets the sweep back. Either way
+ * the per-engine override below recolors it by swapping the two custom
+ * properties. ui-chat disables the animation under
+ * \`prefers-reduced-motion: reduce\`, and a media query carries no specificity —
+ * so this attribute-gated rule outranks it. That is deliberate here:
+ * deployment images ship with Windows' client-area animation off
+ * (SPI_GETCLIENTAREAANIMATION false), and with the guard in force EVERY
+ * indicator on this row is frozen — the sweep and the glyph alike. Scoped to
+ * hosted engines, so in-process sessions keep the stock reduced-motion
+ * behaviour; delete this rule and restore the guard at the foot of the sheet to
+ * hand the decision back to the OS.
+ */
+${GATE} ${ROW} {
+  background: linear-gradient(90deg,
+    var(--dsw-static-deepseek-500) 0%,
+    var(--dsw-static-deepseek-500) 40%,
+    var(--dsw-static-deepseek-200) 50%,
+    var(--dsw-static-deepseek-500) 60%,
+    var(--dsw-static-deepseek-500) 100%);
+  color: #0000;
+  -webkit-text-fill-color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  animation: le-shimmer 1.8s linear infinite;
+}
+
+@keyframes le-shimmer {
+  to { background-position: 0 0; }
+}
+
+${engineRules(PER_ENGINE, PER_ENGINE, GRADIENT_VARS)}
+
+${GLYPH_KEYFRAMES}
 
 `
 }
 
 /**
- * The engine-keyed stylesheet.
+ * Emit the 0.2.0 sheet: the harness's own running row, recoloured and given the
+ * engine's glyph.
+ *
+ * 0.2.0 MOVED the live row. `TurnProcessNodeView` now returns nothing until its
+ * turn closes — a turn-process button is a settled summary and nothing else — and
+ * the running indicator is `RunningStatus`, which mounts a `[data-chat-running]`
+ * div only while the session on screen runs. So that node is live by
+ * construction, and this sheet is gated on the engine attribute alone: the
+ * session-level mid-turn gate would be redundant, and the per-row mark would be
+ * wrong ({@link markLiveRow} deliberately stamps nothing on this line).
+ *
+ * What is left to paint is correspondingly small. The row already carries its
+ * own shimmer — 0.2.0's `TextShimmer` runs a decorative overlay it tints from
+ * `--dsw-alias-label-shimmer`, which `.running` points at
+ * `--dsw-alias-label-deep-diving-shimmer` — so rather than re-declaring a
+ * gradient (which would fight the harness's own) the sheet only swaps the two
+ * aliases the row resolves its colours from, and leaves the animation, and the
+ * `prefers-reduced-motion` decision that comes with it, to the harness.
+ *
+ * The glyph then rides a `::before` on the CONTENT row rather than on the row
+ * itself: that span is `display: inline-flex`, so the pseudo-element becomes its
+ * first flex item — one `gap` to the left of the whale — with nothing to reset
+ * and no margin to add. The variable block stays on the outer row, which is the
+ * element `.running` declares the colour on.
+ */
+const sheetForRunning = (): string => {
+  const PER_ENGINE = (engine: HostedEngineId): string => `html[${ENGINE_ATTR}="${engine}"] ${RUNNING_ROW}`
+  const GLYPH = (engine: HostedEngineId): string => `${PER_ENGINE(engine)} [class$="_runningContent"]`
+  return `
+${engineRules(PER_ENGINE, GLYPH, RUNNING_VARS)}
+
+${GLYPH_KEYFRAMES}
+
+`
+}
+
+/**
+ * The engine-keyed stylesheet: one copy per generation's row anchor
+ * ({@link ROW_SELECTORS} for the 0.1.x lines, {@link RUNNING_ROW} for 0.2.0).
  *
  * Every selector is gated on the root attribute, so the sheet is inert until
  * {@link reflectTurnStatusEngine} names a hosted engine — with no attribute, no
  * rule sets `content` and no pseudo-element box is ever generated.
  *
- * The glyph must re-declare `color` and `-webkit-text-fill-color`: the row
- * clips its own background to text and sets the fill transparent, and that
- * fill is inherited into the pseudo-element (which has no background of its
- * own to clip), so without the override the glyph would paint nothing.
- *
- * One copy per generation's row selector ({@link ROW_SELECTORS}).
+ * The glyph must re-declare `color` and `-webkit-text-fill-color` on the 0.1.x
+ * lines: those rows clip their own background to text and set the fill
+ * transparent, and that fill is inherited into the pseudo-element (which has no
+ * background of its own to clip), so without the override the glyph would paint
+ * nothing. 0.2.0's row does not clip, and the declaration is merely harmless
+ * there — the two sheets share one glyph rule (see {@link engineRules}).
  */
-const STYLESHEET = ROW_SELECTORS.map(sheetFor).join('\n')
+const STYLESHEET = [...ROW_SELECTORS.map(sheetFor), sheetForRunning()].join('\n')
 
 /**
  * The session whose surfaces are on screen: the row's one declared subject.
@@ -489,9 +613,18 @@ let liveRowObserver: MutationObserver | undefined
  * added, and a row that is already marked is left untouched — this module's own
  * writes must not re-enter the observer that called it
  * ({@link startLiveRowWatch}).
+ *
+ * On the 0.2.0 line NOTHING is stamped, and that is the mark's point scaled to
+ * that generation: a {@link RUNNING_ROW} node on screen means the live row is the
+ * harness's own, so every turn-process button on the page is a settled turn's
+ * summary — marking the last one would claim exactly the finished row this mark
+ * exists to leave alone. The follower still has to run there, because the
+ * running row appearing or going away is what re-derives the mark.
  */
 function markLiveRow(): void {
-  const live = Array.from(document.querySelectorAll(ROW_BUTTON)).at(-1)
+  const live = document.querySelector(RUNNING_ROW) !== null
+    ? undefined
+    : Array.from(document.querySelectorAll(ROW_BUTTON)).at(-1)
   if (live === liveRow) return
   liveRow?.removeAttribute(LIVE_ATTR)
   liveRow = live
@@ -499,17 +632,25 @@ function markLiveRow(): void {
 }
 
 /**
- * Whether a mutated node is a turn-process row, or contains one.
+ * Whether a mutated node is a row the mark is derived from, or contains one.
+ *
+ * Both anchors qualify on both sides of the 0.2.0 split. A turn-process row can
+ * be inserted or removed, which changes which row is the last one; a
+ * {@link RUNNING_ROW} node can be, which changes whether the mark belongs on any
+ * turn-process row at all — {@link markLiveRow} is re-derived on either, so the
+ * mark is dropped the moment the 0.2.0 running row appears and comes back when it
+ * goes.
  *
  * The observer filters on this so the chat's own streaming churn — text and
  * markup arriving inside messages — costs nothing: only an inserted or removed
- * row can change which row is the last one.
+ * row can change the mark.
  * @param node - one node of an observer record.
  */
 function bringsRow(node: Node): boolean {
   if (node.nodeType !== 1) return false
   const element = node as Element
-  return element.matches(ROW_BUTTON) || element.querySelector(ROW_BUTTON) !== null
+  return [ROW_BUTTON, RUNNING_ROW].some(selector =>
+    element.matches(selector) || element.querySelector(selector) !== null)
 }
 
 /**
@@ -520,7 +661,11 @@ function bringsRow(node: Node): boolean {
  * turn's summary) and it ends (the last row is unmounted with the session, or
  * the next turn's row replaces it). Both are DOM insertions and removals, and
  * both are all the observer listens for — no polling, and no work at all while
- * the gate is off, because the observer is disconnected with it.
+ * the gate is off, because the observer is disconnected with it. It keeps
+ * running on the 0.2.0 line too, where there is no mark to keep: the running
+ * node's own arrival and departure come through the same records, and
+ * {@link markLiveRow} is what turns them into a mark or its absence
+ * ({@link bringsRow}).
  *
  * Idempotent, because a running turn is reflected by every surface of the
  * session on screen (the chip and the composer both make one).

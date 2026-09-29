@@ -50,17 +50,20 @@ Boot `dsh web` once (the router retries for a bounded window while the base bund
 
 ## Version compatibility
 
-One release serves the **0.1.5 line** (`>=0.1.5-rc.1 <0.1.6-0`) and the **0.1.7 line** (`>=0.1.7-rc.1 <0.1.8-0`): the plugin detects the running generation at load and takes the matching code path. Those union ranges are what it declares in `peerDependencies`, and a harness outside them fails loudly at boot or session resume.
+One release serves the **0.1.5 line** (`>=0.1.5-rc.1 <0.1.6-0`), the **0.1.7 line** (`>=0.1.7-rc.1 <0.1.8-0`) and the **0.2.0 line** (`>=0.2.0-rc.1 <0.2.1-0`): the plugin detects the running generation at load and takes the matching code path. Those union ranges are what it declares in `peerDependencies`, and a harness outside them fails loudly at boot or session resume.
 
 Read the version as `<harness line>-rcN`, where **`rcN` is this plugin's own release counter for that line** — not the harness's `rc` number. Within a covered line a new harness `rc` needs no plugin release unless an API surface moved; [docs/compatibility.md](docs/compatibility.md) §1 lists those surfaces and the diff command that decides it.
 
 | Plugin | Harness |
 |---|---|
+| `0.2.0-rc1` | `0.2.0-rc.1`, `0.2.0-rc.2` |
 | `0.1.7-rc1` … `0.1.7-rc5` | `0.1.7-rc.1`, `0.1.7-rc.2` |
 | `0.1.5-rc3` … `0.1.5-rc5` | `0.1.5-rc.2` |
 | `0.1.5-rc1` / `0.1.5-rc2` | `0.1.5-rc.1` |
 | `1.0.0-rc8` … `1.0.0-rc15` | `0.1.2-rc.1` |
 | `1.0.0-rc7` and earlier | `0.1.1-rc.2` |
+
+`0.2.0-rc1` is the first release that serves three lines at once, and the first one published after the harness started enforcing a peer-range gate at boot: the plugin is still mounted alongside an incompatible one, but a harness outside the ranges above is now skipped by dsh itself rather than failing later.
 
 ## Known limitations
 

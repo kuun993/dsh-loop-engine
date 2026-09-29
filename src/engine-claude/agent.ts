@@ -31,7 +31,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
-import { query as officialQuery, type SDKResultError } from '@anthropic-ai/claude-agent-sdk'
+import { query as officialQuery, type SDKResultError, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
 import {
@@ -51,6 +51,7 @@ import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover } from '../driver-core/model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { stepImages, type StepImage } from '../driver-core/step-images.ts'
 import { normalizeHostedToolCall, planTodosOfHostedTool } from '../driver-core/hosted-tool-vocabulary.ts'
 import { approvalReason, resolveSessionPermission } from './permission.ts'
 import { DEFAULT_PERMISSION_MODE, claudeQueryOptions, type ClaudeCodeQuerySpec, type SpawnCapability } from './sdk.ts'
@@ -121,6 +122,43 @@ function failureCode(subtype: SDKResultError['subtype']): string {
     default:
       return 'CLAUDE_CODE_ERROR'
   }
+}
+
+/**
+ * The streaming-input form of one image-carrying step's prompt.
+ *
+ * Claude Code reaches images only through its streaming input channel: the
+ * one-shot `string` prompt carries text by definition. This yields exactly ONE
+ * user message — the serialized transcript first, then the step's own images
+ * base64-encoded in order — and then COMPLETES: the SDK drains the iterable and
+ * immediately closes the CLI's stdin (`Query.streamInput` in
+ * `@anthropic-ai/claude-agent-sdk/sdk.mjs`: "Calling transport.endInput() to
+ * close stdin to CLI process"), so the query still sees a single one-shot
+ * prompt and the step's lifecycle — the `result` message that ends the
+ * iterator, abort, and graceful child termination — is exactly what it is on
+ * the text path.
+ *
+ * The message body mirrors the object the SDK itself writes for a `string`
+ * prompt (`dO` in the same bundle: `type: 'user'`, `parent_tool_use_id: null`,
+ * `message: { role: 'user', content: [...] }`, `session_id: ''`), minus the
+ * `uuid` it omits there too. That shape is the one the CLI demonstrably accepts
+ * for a fresh one-shot query; the driver owns no session id of its own
+ * (`persistSession: false`), so `''` is the honest value, not a fabricated id.
+ * @param text - the serialized transcript, identical to the text path's prompt.
+ * @param images - this step's own images, read and base64-encoded.
+ * @returns a single-message iterable for `query()`'s streaming input form.
+ */
+function imagePromptStream(text: string, images: readonly StepImage[]): AsyncIterable<SDKUserMessage> {
+  const content: SDKUserMessage['message']['content'] = [
+    { type: 'text', text },
+    ...images.map(image => ({
+      type: 'image' as const,
+      source: { type: 'base64' as const, media_type: image.mimeType, data: image.data },
+    })),
+  ]
+  return (async function* generate(): AsyncGenerator<SDKUserMessage> {
+    yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: '' }
+  })()
 }
 
 /** Drives one session through turn and step boundaries on Claude Code. */
@@ -481,7 +519,7 @@ export class ClaudeCodeAgent implements Agent {
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
-          const stepEnd = await this.step()
+          const stepEnd = await this.step(decision.messages)
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
           // The driver rotates steps as the query's segments complete, so
@@ -571,8 +609,13 @@ export class ClaudeCodeAgent implements Agent {
     this.requestHeaderLogged = true
   }
 
-  /** Run one Claude Code query for the current step and map its transcript into the session log. */
-  private async step(): Promise<StepEndReason | null> {
+  /**
+   * Run one Claude Code query for the current step and map its transcript into
+   * the session log.
+   * @param messages - the messages this step delivers; only their images ride
+   *   with the prompt as bytes, and only they.
+   */
+  private async step(messages: readonly UserMessage[]): Promise<StepEndReason | null> {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
@@ -591,12 +634,18 @@ export class ClaudeCodeAgent implements Agent {
     // A live slash command is the engine's own control line: send it verbatim
     // (the transcript framing would hide it from Claude Code's local-command
     // dispatch, which only inspects the head of the prompt).
-    const prompt = engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)
+    const slash = engineSlashPrompt(history)
+    const prompt = slash ?? serializeHistory(history, this.imageAccess)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)
     }
     /* v8 ignore stop */
+    // Images ride only on a step that carries them, and only through the SDK's
+    // streaming input form: a text-only step keeps the one-shot string prompt,
+    // byte for byte as it was. A slash command is a bare control line, so it
+    // carries none (the line must stay at the head of the prompt).
+    const images = slash === undefined ? await stepImages(messages, this.imageAccess) : []
     this.assertRequestHeader()
     signal.throwIfAborted()
 
@@ -644,7 +693,10 @@ export class ClaudeCodeAgent implements Agent {
         spawn: this.spawn,
         onUnattended: (line) => { diagnostics.push(line) },
       }, controller)
-      const query = officialQuery({ prompt, options })
+      const query = officialQuery({
+        prompt: images.length === 0 ? prompt : imagePromptStream(prompt, images),
+        options,
+      })
       let finished = false
       const currentStream = (): DriverAssistantStream => {
         if (live === undefined) {

@@ -15,6 +15,14 @@
  * those zombie rows for as long as any later turn runs, which is the bug this
  * mark replaces.
  *
+ * The 0.2.0 line has no turn-process rows to mark at all: its live row is the
+ * harness's own `[data-chat-running]` node, present exactly while the turn runs,
+ * and every `button[data-turn-process]` on that page is a finished turn's
+ * summary. So the mark must stand down there — see the last two cases, which pin
+ * that nothing is ever stamped while such a node is on screen, and that a mark
+ * already in place is dropped the moment one arrives. The row the mark was
+ * carrying is the settled row the per-row sheet exists to leave alone.
+ *
  * The DOM is faked (`../helpers/fake-dom.ts`): a real `MutationObserver` fires on
  * its own schedule, so its records are delivered by hand here.
  * @module tests/client/turn-status-live-row
@@ -22,7 +30,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  blurTurnStatusSession, focusTurnStatusSession, reflectTurnStatusEngine,
+  blurTurnStatusSession, focusTurnStatusSession, installTurnStatusStyles, reflectTurnStatusEngine,
 } from '../../src/client/turn-status.ts'
 import { FakeElement, installFakeTurnStatusDom, type FakeTurnStatusDom } from '../helpers/fake-dom.ts'
 
@@ -32,6 +40,19 @@ import { FakeElement, installFakeTurnStatusDom, type FakeTurnStatusDom } from '.
  * selector the sheet emits, asserted in `tests/session-engine-cache.spec.ts`).
  */
 const LIVE_ATTR = 'data-loop-engine-live'
+
+/**
+ * The 0.2.0 sheet's per-engine content: the glyph, and the two custom properties
+ * the harness's own running row resolves its colours from. Spelled out here
+ * because the pair is what the sheet promises that generation, and the glyph is
+ * what a user sees.
+ */
+const RUNNING_PAINT = [
+  ['claude-code', '✻', '#d97757', '#f5bda6'],
+  ['codex', '•', '#a9b1c0', '#e6eaf2'],
+  ['pi', '⠋', '#8e4ec6', '#d6bff0'],
+  ['kimi', '🌗', '#e5484d', '#f5b2b4'],
+] as const
 
 describe('the live turn-status row', () => {
   let dom: FakeTurnStatusDom | undefined
@@ -187,5 +208,86 @@ describe('the live turn-status row', () => {
     expect(installed.observers[0]!.watched).toEqual([
       { target: installed.body, options: { childList: true, subtree: true } },
     ])
+  })
+
+  it('marks nothing on the 0.2.0 line, whose live row is the harness\'s own', () => {
+    const installed = install()
+    installed.addRow(1)
+    installed.addRunning()
+    installed.addRow(3)
+
+    reflect('pi', true)
+
+    // Engine named and gate on — and still no row claimed. On that line every
+    // turn-process button is a SETTLED turn's summary, so marking the last one
+    // would paint exactly the row the mark exists to leave alone; the live row
+    // is the running node, which needs no mark at all.
+    expect(marked()).toHaveLength(0)
+    expect(installed.dataset.loopEngine).toBe('pi')
+    expect(installed.dataset.loopEngineRunning).toBe('')
+
+    // A row arriving later cannot change that: the follower still runs (the
+    // running node's own arrival and departure are what it watches for), and it
+    // finds nothing to claim while that node is on screen.
+    const late = installed.addRow(5)
+    installed.mutate([late])
+    expect(marked()).toHaveLength(0)
+  })
+
+  it('drops the mark when the 0.2.0 running row appears, and takes it back when it goes', () => {
+    const installed = install()
+    const row = installed.addRow(1)
+    reflect('pi', true)
+    // The 0.1.7 shape: the newest turn-process row is the turn in flight.
+    expect(marked()).toEqual([row])
+
+    // The generational switch, seen as a DOM mutation: 0.2.0 renders its live row
+    // as its own node, and the mark must stand down rather than stay on the row
+    // that has just become a finished turn's summary.
+    const running = installed.addRunning()
+    installed.mutate([running])
+    expect(marked()).toHaveLength(0)
+
+    // And back: the running node goes away, so the last turn-process row is the
+    // live one again. The follower has to watch THAT node too, or the mark would
+    // never return.
+    const summary = installed.addRow(3)
+    running.remove()
+    installed.mutate([summary], [running])
+    expect(marked()).toEqual([summary])
+  })
+
+  it('emits a 0.2.0 sheet that restyles the harness\'s own running row', () => {
+    const installed = install()
+    installTurnStatusStyles({ effect: (body: () => () => void) => { body() } } as never)
+    const css = installed.created[0]!.textContent
+
+    // The anchor is the running node itself, with the glyph on the content row
+    // inside it (inline-flex, so the pseudo-element becomes its first flex item).
+    expect(css).toContain('[data-chat-running]')
+    expect(css).toContain('[class$="_runningContent"]::before')
+    // That node exists only while the turn runs, so this sheet is gated on the
+    // engine attribute ALONE — no session-level gate, and no per-row mark.
+    expect(css).not.toContain('html[data-loop-engine][data-loop-engine-running] [data-chat-running]')
+    expect(css).not.toContain('[data-chat-running][data-loop-engine-live]')
+
+    // Per engine: the glyph, and the two custom properties the row resolves its
+    // text colour and its shimmer tint from — and nothing else: the harness
+    // animates that row itself, so no gradient is re-declared over it.
+    for (const [engine, glyph, colour, tint] of RUNNING_PAINT) {
+      const row = `html[data-loop-engine="${engine}"] [data-chat-running]`
+      expect(css).toContain(`${row} {
+  --dsw-alias-label-deep-diving: ${colour};
+  --dsw-alias-label-deep-diving-shimmer: ${tint};
+}`)
+      expect(css).toContain(`${row} [class$="_runningContent"]::before {
+  content: "${glyph}";
+  color: ${colour};
+  -webkit-text-fill-color: ${colour};`)
+    }
+
+    // The two 0.1.x sheets are still emitted, unchanged, beside it.
+    expect(css).toContain('html[data-loop-engine][data-loop-engine-running] [class$="_turnStatus"]')
+    expect(css).toContain('button[data-turn-process][data-loop-engine-live] [class$="_label"]')
   })
 })

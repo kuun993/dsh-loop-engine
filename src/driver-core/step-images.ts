@@ -32,12 +32,20 @@ interface ResolvedImage {
   readonly path: string
 }
 
+/**
+ * The media types a durable image reference can carry, taken from the block
+ * union so this module names no attachment-package symbol. It is the exact set
+ * every byte-accepting engine protocol declares (Anthropic's base64 image
+ * source among them), so a caller may hand this value straight to one.
+ */
+type ImageMediaType = ImageBlock['attachment']['mediaType']
+
 /** One image of a step, as an engine that accepts image bytes takes it. */
 export interface StepImage {
   /** Base64-encoded normalized bytes. */
   readonly data: string
   /** The image's own media type, from the durable reference. */
-  readonly mimeType: string
+  readonly mimeType: ImageMediaType
 }
 
 /**

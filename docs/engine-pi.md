@@ -80,13 +80,13 @@ await client.prompt(prompt, images) // 整条序列化历史作为一条 prompt�
 
 prompt 由 `serializeHistory`（`src/driver-core/prompt.ts:246`）生成：`<user>` / `<assistant>` / `<tool-result>` 标签帧起来的转录文本；reasoning 块不进转录（每个引擎每次查询自己重新推导，`prompt.ts:98-100`）；图片块用占位文本 `OMITTED_IMAGE_TEXT`（`prompt.ts:31`）并在能拿到 attachment 只读路径时指名该路径（`prompt.ts:62-75`）。因为输出是日志前缀的纯函数，同一日志重放得到同一 prompt。
 
-**Pi 是四个引擎里第一个把图片字节原生送进引擎的驱动**。本步自己交付的消息批（`turn()` 里 `this.step(decision.messages)`，`agent.ts:483`）交给 `stepImages`（`src/driver-core/step-images.ts:82`）处理后随 prompt 送出（`agent.ts:637-639`，发送点 `agent.ts:699`）：
+**Pi 是四个引擎里第一个把图片字节原生送进引擎的驱动**。本步自己交付的消息批（`turn()` 里 `this.step(decision.messages)`，`agent.ts:483`）交给 `stepImages`（`src/driver-core/step-images.ts:90`）处理后随 prompt 送出（`agent.ts:637-639`，发送点 `agent.ts:699`）：
 
-- **字节从哪来**：每块用构造时建好的 `this.imageAccess`（`createImageAccessResolver`，`src/driver-core/image-access.ts:45`）向 attachment 服务要该引用的只读宿主路径，`readFile` 读该文件、按块自己的 `mediaType` 做 base64（解析行走 `step-images.ts:56-70`，读文件与 base64 在 `:82-96`）。**不走** `readImageRequest`——那是默认就拒绝（`ATTACHMENT_PROJECTION_UNSUPPORTED`）的缝。
+- **字节从哪来**：每块用构造时建好的 `this.imageAccess`（`createImageAccessResolver`，`src/driver-core/image-access.ts:45`）向 attachment 服务要该引用的只读宿主路径，`readFile` 读该文件、按块自己的 `mediaType` 做 base64（解析行走 `step-images.ts:64-78`，读文件与 base64 在 `:82-96`）。**不走** `readImageRequest`——那是默认就拒绝（`ATTACHMENT_PROJECTION_UNSUPPORTED`）的缝。
 - **哪些图片**：只有**本步交付的消息**，不是整段历史——长会话不会每步重传所有图片。更早的图片仍以"身份 + 路径"的占位文本留在转录里，模型自己的文件工具照样能读（规则见 `docs/driver-core.md` §2）。
 - **没有图片时**：传 `{}`，RPC 命令与加这条通道之前逐字节相同。
 - **斜杠命令步**：`engineSlashPrompt` 命中时发的是裸控制行，**不带任何图片**（`agent.ts:637-639` 的 `slash === undefined` 判据）。
-- **路径拿不到 / 文件读不动**：该图片静默跳过（`step-images.ts:63-65`、`:89-93`）——转录里已经写着它的路径，模型仍有办法拿到它，一个坏掉的图片不该让整个 step 失败。
+- **路径拿不到 / 文件读不动**：该图片静默跳过（`step-images.ts:71-73`、`:89-93`）——转录里已经写着它的路径，模型仍有办法拿到它，一个坏掉的图片不该让整个 step 失败。
 
 `abort` 在取消路径上 fire-and-forget 发送（见第 9 节）；`get_session_stats` 已定义但驱动目前不调用。
 

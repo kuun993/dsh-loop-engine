@@ -11,10 +11,12 @@
  * of the prompt. It is still derived from the log alone, so the guarantee
  * holds.
  *
- * An image block cannot ride along as bytes, so it renders as placeholder text
- * naming the image and the read-only path {@link createImageAccessResolver}
- * resolves for it (see `driver-core/image-access.ts`). The reference is the
- * log's own, so the placeholder keeps the replay guarantee too.
+ * An image block has no bytes in this output — the transcript is text — so it
+ * renders as placeholder text naming the image and the read-only path
+ * {@link createImageAccessResolver} resolves for it. The reference is the
+ * log's own, so the placeholder keeps the replay guarantee too, and it stays
+ * the invariant every engine keeps even when the engine's own protocol also
+ * receives the bytes ({@link stepImages}).
  *
  * @module dsh-loop-engine/driver-core/prompt
  */

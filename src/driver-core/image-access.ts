@@ -1,8 +1,9 @@
 /**
- * Image access for the hosted transcript. A hosted engine takes one text
- * prompt, so the image blocks of the durable log reach it only as placeholder
- * text — but the host's attachment service owns the normalized bytes and can
- * name the read-only path they live at. This module turns that service into the
+ * Image access for the hosted transcript. The transcript is text, so an image
+ * block of the durable log reaches an engine through it only as placeholder
+ * text — engines whose own protocol takes image bytes receive those bytes
+ * separately. The host's attachment service owns the normalized bytes and can
+ * name the read-only path they live at; this module turns that service into the
  * resolver the transcript renders placeholders with.
  *
  * @module dsh-loop-engine/driver-core/image-access

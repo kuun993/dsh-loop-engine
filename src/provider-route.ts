@@ -48,8 +48,10 @@ import type { HostedEngineId } from './settings.ts'
  *
  * Every hosted engine is handed the images of the step's own messages —
  * `pi`/`kimi` as bytes over their RPC/ACP channels, `codex` as a `localImage`
- * path the app-server opens itself, `claude-code` as the readable path in the
- * prompt's image placeholder (see `docs/driver-core.md` §2). The capability
+ * path the app-server opens itself, `claude-code` as base64 blocks appended to
+ * the prompt's streaming input message (the prompt's image placeholder still
+ * names the readable path; see `docs/driver-core.md` §2 and
+ * `docs/engine-claude.md` §9.1). The capability
  * therefore belongs to the route, which is what the host asks about; which
  * shape of handover an engine gets is that engine's business, not the session's.
  */

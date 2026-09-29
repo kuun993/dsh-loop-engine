@@ -4,11 +4,15 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type {
   Options,
   Query,
   SDKMessage,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -27,7 +31,7 @@ import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.
 
 const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 
-type QueryFactory = (params: { prompt: string; options: Options }) => Query
+type QueryFactory = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
 
 const queryMock = vi.hoisted(() => vi.fn<QueryFactory>())
 vi.mock('@anthropic-ai/claude-agent-sdk', async importOriginal => ({
@@ -44,6 +48,59 @@ function stream(messages: SDKMessage[]): Query {
     for (const message of messages) yield message
   }
   return Object.assign(inner(), { close: vi.fn() }) as unknown as Query
+}
+
+/**
+ * Drain the streaming-input prompt the driver hands the SDK: the messages it
+ * would receive, in order, and the proof that the stream completes by itself.
+ * @param prompt - the `prompt` a query mock was called with.
+ * @returns the yielded user messages.
+ */
+async function drainPrompt(prompt: string | AsyncIterable<SDKUserMessage>): Promise<SDKUserMessage[]> {
+  if (typeof prompt === 'string') throw new Error('expected the streaming input form, got a string prompt')
+  const messages: SDKUserMessage[] = []
+  for await (const message of prompt) messages.push(message)
+  return messages
+}
+
+/**
+ * One durable image reference, as a user message's image block carries it.
+ * @param id - opaque attachment id, also this spec's path key.
+ * @param name - display name.
+ * @param mediaType - the image's media type.
+ * @returns the reference.
+ */
+function imageRef(id: string, name: string, mediaType: 'image/png' | 'image/jpeg') {
+  return {
+    attachmentId: AttachmentId(id),
+    mediaType,
+    bytes: 1234,
+    width: 800,
+    height: 600,
+    name,
+  }
+}
+
+/**
+ * A user message carrying one image block, keyed by display name so a fake
+ * attachment service can resolve it to a real file.
+ * @param name - display name, also this spec's path key.
+ * @param mediaType - the image's media type.
+ * @param id - opaque attachment id.
+ * @returns the user message.
+ */
+function imageMessage(
+  name: string,
+  mediaType: 'image/png' | 'image/jpeg',
+  id: string,
+): UserMessage {
+  return createUserMessage({
+    content: [
+      { type: 'text', text: 'look at this' },
+      { type: 'image', attachment: imageRef(id, name, mediaType) },
+    ],
+    source: { kind: 'user' },
+  })
 }
 
 /** Step-scoped event types, in the order a reader sees them. */
@@ -293,6 +350,9 @@ describe('ClaudeCodeAgent turn mapping', () => {
 
       const params = queryMock.mock.calls[0]?.[0]
       expect(params).toBeDefined()
+      // A step that carries no image keeps the one-shot string prompt, so the
+      // streaming form cannot creep into ordinary steps.
+      expect(typeof params!.prompt).toBe('string')
       expect(params!.prompt).toContain('<user>')
       expect(params!.prompt).toContain('hi')
       expect(params!.options.persistSession).toBe(false)
@@ -303,13 +363,21 @@ describe('ClaudeCodeAgent turn mapping', () => {
     }
   })
 
-  it('names the read-only path of a user image block in the prompt', async () => {
+  it('hands an image-carrying step one streaming message: transcript text, then the step\'s own bytes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-claude-image-'))
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+    const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0])
+    const paths: Record<string, string> = {
+      'img-png': join(dir, 'shot.png'),
+      'img-jpeg': join(dir, 'other.jpg'),
+    }
+    await writeFile(paths['img-png']!, pngBytes)
+    await writeFile(paths['img-jpeg']!, jpegBytes)
     const ctx = await harness()
     try {
-      // The host's attachment service: Claude Code receives the transcript as
-      // text, so the driver must ask it for the path behind the durable
-      // reference the log carries.
-      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      // The host's attachment service: the driver asks it for the path behind
+      // the durable reference the log carries, and reads those bytes itself.
+      ctx.provide('attachments', { imageHostPath: (ref: { attachmentId: string }) => paths[ref.attachmentId] })
       queryMock.mockImplementation(() => stream([assistantText('seen'), successResult()]))
       const { agent } = await ctx.agents.create({
         sessionId: SessionId('image-s'),
@@ -318,30 +386,136 @@ describe('ClaudeCodeAgent turn mapping', () => {
       agent.followup(createUserMessage({
         content: [
           { type: 'text', text: 'look at this' },
-          {
-            type: 'image',
-            attachment: {
-              attachmentId: AttachmentId('img-1'),
-              mediaType: 'image/png',
-              bytes: 1234,
-              width: 800,
-              height: 600,
-              name: 'shot.png',
-            },
-          },
+          { type: 'image', attachment: imageRef('img-png', 'shot.png', 'image/png') },
+          { type: 'image', attachment: imageRef('img-jpeg', 'other.jpg', 'image/jpeg') },
         ],
         source: { kind: 'user' },
       }))
       await agent.whenIdle()
 
-      // The prompt handed to the SDK names the image and where its bytes live,
-      // so the model can read the file instead of guessing at it.
-      const prompt = queryMock.mock.calls[0]![0].prompt
-      expect(prompt).toContain('look at this')
-      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
-      expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
+      // Claude Code takes images only on its streaming input channel, so the
+      // prompt is the SDK's single-message streaming form — and it COMPLETES,
+      // which is what keeps the query's own lifecycle unchanged.
+      const messages = await drainPrompt(queryMock.mock.calls[0]![0].prompt)
+      expect(messages).toHaveLength(1)
+      expect(messages[0]).toMatchObject({
+        type: 'user',
+        parent_tool_use_id: null,
+        // The shape the SDK itself writes for a `string` prompt, `session_id: ''`
+        // included — a one-shot query owns no session id here.
+        session_id: '',
+        message: { role: 'user' },
+      })
+
+      // The transcript stays the first block, placeholder lines and all: the
+      // bytes are an addition to it, never a replacement for the path the
+      // engine's own file tool can still follow.
+      const content = messages[0]!.message.content
+      expect(Array.isArray(content)).toBe(true)
+      const [text, ...images] = content as Exclude<typeof content, string>
+      expect(text).toMatchObject({ type: 'text' })
+      const transcript = (text as { text: string }).text
+      expect(transcript).toContain('look at this')
+      expect(transcript).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(transcript).toContain(`read ${JSON.stringify(paths['img-png'])} to view it`)
+      expect(transcript).toContain(`read ${JSON.stringify(paths['img-jpeg'])} to view it`)
+
+      // One base64 block per image, in order, each under its own media type.
+      expect(images).toEqual([
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBytes.toString('base64') } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpegBytes.toString('base64') } },
+      ])
     } finally {
       await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('sends an image step\'s bytes for that step only, leaving an older image as a placeholder', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-claude-image-'))
+    const bytes = Buffer.from([1, 2, 3, 4])
+    const imagePath = join(dir, 'shot.png')
+    await writeFile(imagePath, bytes)
+    const ctx = await harness()
+    try {
+      ctx.provide('attachments', { imageHostPath: () => imagePath })
+      queryMock.mockImplementation(() => stream([assistantText('first'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('image-steps-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(imageMessage('shot.png', 'image/png', 'img-1'))
+      await agent.whenIdle()
+      // The image was this step's own, so step one carried its bytes.
+      const first = await drainPrompt(queryMock.mock.calls[0]![0].prompt)
+      expect(first[0]!.message.content).toHaveLength(2)
+
+      // A later text-only step replays the same history — the image is still in
+      // the transcript as a path-bearing placeholder, but its bytes are not
+      // re-uploaded.
+      queryMock.mockImplementation(() => stream([assistantText('second'), successResult()]))
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'and now?' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      const prompt = queryMock.mock.calls[1]![0].prompt
+      expect(typeof prompt).toBe('string')
+      expect(prompt).toContain(`read ${JSON.stringify(imagePath)} to view it`)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('sends no image block when the step\'s image has no resolvable host path', async () => {
+    const ctx = await harness()
+    try {
+      // No attachment service at all: the placeholder says so, the step still
+      // runs, and an image the driver cannot read must not switch the query to
+      // the streaming form.
+      queryMock.mockImplementation(() => stream([assistantText('seen'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('image-nopath-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(imageMessage('shot.png', 'image/png', 'img-1'))
+      await agent.whenIdle()
+
+      const prompt = queryMock.mock.calls[0]![0].prompt
+      expect(typeof prompt).toBe('string')
+      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(prompt).toContain('no readable path is available — ask the user to attach the image again if it is needed')
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends the bare slash line — never an image — when a slash command closes an image-bearing step', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-claude-image-'))
+    const imagePath = join(dir, 'shot.png')
+    await writeFile(imagePath, Buffer.from([7, 7, 7]))
+    const ctx = await harness()
+    try {
+      ctx.provide('attachments', { imageHostPath: () => imagePath })
+      queryMock.mockImplementation(() => stream([assistantText('seen'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('slash-image-s'),
+        meta: { cwd: process.cwd() },
+      })
+      // One step batch holding both: the image first, the command line last, so
+      // the step is a command step.
+      agent.inject(imageMessage('shot.png', 'image/png', 'img-1'))
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: '/help' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+
+      // The command line must stay at the head of the prompt for the CLI's
+      // local-command dispatch, so a slash step reads no images at all.
+      expect(queryMock.mock.calls[0]![0].prompt).toBe('/help')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
     }
   })
 
