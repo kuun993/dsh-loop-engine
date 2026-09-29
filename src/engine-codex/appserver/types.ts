@@ -102,10 +102,16 @@ export interface TurnStartParams {
   readonly [key: string]: unknown
 }
 
-export interface TurnInput {
-  readonly type: 'text'
-  readonly text: string
-}
+/**
+ * One item of a `turn/start` input array. Codex's `UserInput` is a union of
+ * text, image, local-image, audio, skill, and mention items; this driver sends
+ * the step's serialized prompt as a text item and then one `localImage` item
+ * per image the step carries. `localImage` names a host file rather than
+ * carrying bytes, so codex's app-server opens the image itself.
+ */
+export type TurnInput =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'localImage'; readonly path: string }
 
 export interface TurnInfo {
   readonly id: string

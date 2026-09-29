@@ -234,11 +234,12 @@ describe('CodexLoop factory registration', () => {
 })
 
 describe('CodexAgent turn mapping', () => {
-  it('names the read-only path of a user image block in the prompt', async () => {
+  it('names the read-only path of a user image block in the prompt and in the turn input', async () => {
     const ctx = await harness()
     try {
-      // The host's attachment service: codex receives the transcript as text,
-      // so the driver must ask it for the path behind the durable reference.
+      // The host's attachment service: codex takes an image as a path, so the
+      // driver asks it for the path behind the durable reference — once for the
+      // transcript placeholder and once for the `localImage` item.
       ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
       mock.runStreamed.mockImplementation(() => stream([
         { kind: 'turn-started', turnId: 'turn-1' },
@@ -266,12 +267,39 @@ describe('CodexAgent turn mapping', () => {
       await agent.whenIdle()
 
       const input = mock.runStreamed.mock.calls[0]![0]
-      const prompt = Array.isArray(input)
-        ? input.map((item: { text?: string }) => item.text ?? '').join('')
-        : String(input)
+      const items = Array.isArray(input) ? input : []
+      const prompt = items.map((item: { text?: string }) => item.text ?? '').join('')
       expect(prompt).toContain('look at this')
       expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
       expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
+      // The step's own image rides after the text item as the path item codex
+      // opens itself.
+      expect(items).toEqual([
+        { type: 'text', text: prompt },
+        { type: 'localImage', path: '/tmp/attachments/x.png' },
+      ])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('sends a lone text item when the step carries no image', async () => {
+    const ctx = await harness()
+    try {
+      mock.runStreamed.mockImplementation(() => stream([
+        { kind: 'turn-started', turnId: 'turn-1' },
+        itemCompleted(agentMessage('ok')),
+        turnCompleted(),
+      ]))
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('no-image-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+
+      const input = mock.runStreamed.mock.calls[0]![0]
+      const items = Array.isArray(input) ? input : []
+      expect(items).toHaveLength(1)
+      expect(items[0]).toMatchObject({ type: 'text' })
+      expect(items[0].text).toContain('hi')
     } finally {
       await ctx.fiber.dispose()
     }

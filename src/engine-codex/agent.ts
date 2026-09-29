@@ -2,7 +2,9 @@
  * Codex loop Agent: drives one session through turn and step boundaries by
  * spawning a `codex app-server` child process and speaking JSON-RPC over stdio.
  * Codex owns its prompt, tools, and sandbox; the durable session log remains
- * the source of truth and the thread input is a pure serialization of it.
+ * the source of truth and the thread input is a pure projection of it — the
+ * serialized history, plus one `localImage` path item per image the step
+ * delivers (codex opens those files itself, so no bytes cross the wire).
  * The app-server streams token-level deltas via `item/agentMessage/delta` and
  * `item/reasoning/summaryTextDelta`, so the visible partial paints
  * progressively as the model generates — not all at once at the end. Native
@@ -37,6 +39,7 @@ import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts
 import type { ResolvedConfig } from './types.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { createImageAccessResolver } from '../driver-core/image-access.ts'
+import { stepImagePaths } from '../driver-core/step-images.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
 import { createStepTools } from '../driver-core/step-tools.ts'
 import { closeStep, settleResult } from '../driver-core/step-close.ts'
@@ -613,7 +616,7 @@ export class CodexAgent implements Agent {
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
-          const stepEnd = await this.step()
+          const stepEnd = await this.step(decision.messages)
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
           // The driver rotates steps as the turn's segments complete, so
@@ -676,8 +679,12 @@ export class CodexAgent implements Agent {
     this.requestHeaderLogged = true
   }
 
-  /** Run one Codex thread for the current step and map its transcript into the session log. */
-  private async step(): Promise<StepEndReason | null> {
+  /**
+   * Run one Codex thread for the current step and map its transcript into the session log.
+   * @param messages - the messages this step delivers; each of its images rides
+   *   along as a `localImage` path item, and only they.
+   */
+  private async step(messages: readonly UserMessage[]): Promise<StepEndReason | null> {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
@@ -738,7 +745,14 @@ export class CodexAgent implements Agent {
           ...model === undefined ? {} : { model },
         }
         const thread = await AppServerThread.create(client, threadParams)
-        const input: TurnInput[] = [{ type: 'text', text: prompt }]
+        // Codex takes an image as a path, so this step's own images ride as
+        // `localImage` items and the app-server opens the files itself. Older
+        // images stay path-bearing placeholders in the transcript, which codex's
+        // own file tool can still read.
+        const input: TurnInput[] = [
+          { type: 'text', text: prompt },
+          ...stepImagePaths(messages, this.imageAccess).map((path): TurnInput => ({ type: 'localImage', path })),
+        ]
         const events = thread.turn(input, {
           signal: controller.signal,
           params: {

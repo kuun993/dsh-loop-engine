@@ -1,9 +1,11 @@
 /**
- * Unit tests for the step's image bytes: every image block of the messages a
- * step delivers is resolved through the attachment service's read-only path,
- * read from disk, and handed on base64-encoded under the block's own media
- * type. Everything that can go wrong for one image — no resolver, no path, an
- * unreadable file — drops that image alone rather than failing the step.
+ * Unit tests for the images a step hands to its engine: every image block of
+ * the messages a step delivers is resolved through the attachment service's
+ * read-only path, and then either read from disk and handed on base64-encoded
+ * under the block's own media type, or handed on as that path alone for an
+ * engine that opens the file itself. Everything that can go wrong for one
+ * image — no resolver, no path, an unreadable file — drops that image alone
+ * rather than failing the step.
  *
  * @module tests/driver-core/step-images
  */
@@ -14,7 +16,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
-import { stepImages } from '../../src/driver-core/step-images.ts'
+import { stepImagePaths, stepImages } from '../../src/driver-core/step-images.ts'
 
 /** Directories created by the case; removed after it. */
 const tempDirs: string[] = []
@@ -139,5 +141,44 @@ describe('stepImages', () => {
 
     expect(images).toHaveLength(1)
     expect(Buffer.from(images[0]?.data ?? '', 'base64')).toEqual(shipped)
+  })
+})
+
+describe('stepImagePaths', () => {
+  it('returns an empty list when no message carries an image', () => {
+    expect(stepImagePaths([TEXT_MESSAGE])).toEqual([])
+  })
+
+  it('returns an empty list when the host composes no resolver', () => {
+    expect(stepImagePaths([imageMessage(ref('a.png'))])).toEqual([])
+  })
+
+  it('names the path of every image of several messages, in order', () => {
+    const messages = [imageMessage(ref('a.png')), imageMessage(ref('b.jpg', 'image/jpeg'))]
+
+    expect(stepImagePaths(messages, r => ({ readonlyPath: `/tmp/${r.name}` }))).toEqual([
+      '/tmp/a.png',
+      '/tmp/b.jpg',
+    ])
+  })
+
+  it('collects several image blocks of one message', () => {
+    const paths = stepImagePaths([imageMessage(ref('a.png'), ref('b.png'))], r => ({ readonlyPath: `/tmp/${r.name}` }))
+
+    expect(paths).toEqual(['/tmp/a.png', '/tmp/b.png'])
+  })
+
+  it('skips an image whose path does not resolve while its siblings still ship', () => {
+    const shipped = stepImagePaths([imageMessage(ref('gone.png'), ref('keep.png'))], r =>
+      r.name === 'keep.png' ? { readonlyPath: '/tmp/keep.png' } : undefined)
+
+    expect(shipped).toEqual(['/tmp/keep.png'])
+  })
+
+  it('returns a path whether or not a file is there, because nothing is opened', async () => {
+    const absent = join(await tempDir(), 'never-written.png')
+
+    expect(stepImagePaths([imageMessage(ref('never-written.png'))], () => ({ readonlyPath: absent })))
+      .toEqual([absent])
   })
 })
