@@ -9,7 +9,8 @@
  * Tool-approval arrives as the reverse-RPC `session/request_permission`, which the
  * client must answer. Shapes below are the live-record deltas observed against the
  * 0.28.1 CLI; content blocks re-use a `{ type, text }` text shape (and tolerate
- * other block types by ignoring them).
+ * other block types by ignoring them). The image block is modelled for the
+ * OUTGOING side — the bytes a dsh step delivers as an ACP image block.
  *
  * @module dsh-loop-engine/engine-kimi/acp/types
  */
@@ -26,8 +27,17 @@ export interface AcpToolContentBlock {
   readonly content: AcpTextContent
 }
 
+/** An image content block, as ACP/MCP spells it (base64 bytes + media type). */
+export interface AcpImageContent {
+  readonly type: 'image'
+  /** Base64-encoded image bytes. */
+  readonly data: string
+  /** The image's own media type. */
+  readonly mimeType: string
+}
+
 /** A content block in a chunk/thought update; text is handled, others are ignored. */
-export type AcpContentBlock = AcpTextContent | { readonly type: 'image' | 'resource_link' | 'audio' | string; readonly [key: string]: unknown }
+export type AcpContentBlock = AcpTextContent | AcpImageContent | { readonly type: 'resource_link' | 'audio' | string; readonly [key: string]: unknown }
 
 /** One `session/update` notification (partial; the discriminator is `sessionUpdate`). */
 export interface AcpUpdate {

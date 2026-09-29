@@ -16,7 +16,7 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 | 模块 | 解决的问题 |
 |---|---|
 | `prompt.ts` | 把持久会话日志序列化成一次托管查询的 prompt 文本 |
-| `step-images.ts` | 把一次 step 自己交付的消息里的图片块读成 base64 字节，交给有原生图片通道的引擎（目前只有 pi，见 §2 与 `docs/engine-pi.md` §4.3） |
+| `step-images.ts` | 把一次 step 自己交付的消息里的图片块读成 base64 字节，交给有原生图片通道的引擎（pi 与 kimi，见 §2、`docs/engine-pi.md` §4.3、`docs/engine-kimi.md` §4.2） |
 | `permission-knobs.ts` | 从会话日志折叠出 dsh 的沙箱/审批旋钮 |
 | `ownership.ts` | 工厂所有权、活体 agent 跟踪、setup 与中止信号的竞速（**原语**） |
 | `hosted-engine-runtime.ts` | 把上面的原语编排成 create/resume 的 prepare→setup→publish **事务**（四个引擎共用一份；引擎差异只剩配置与 `buildAgent` 一个抽象方法），并给每个托管引擎一个进程内的**引擎运行时**对象——普通类，不是 cordis Service，不占 AgentFactory 槽位（槽位归路由器，见 §4、§10） |
@@ -61,9 +61,9 @@ dsh-loop-engine 的四个托管引擎驱动（`src/engine-claude`、`src/engine-
 
 身份取自引用：`name`（缺省回退字面量 `image`）、`mediaType`、`width`×`height`、`bytes`。**路径是每步现算的，不缓存**：同一个引用两次重放必须得到同一段文本，所以判据只能是日志里的引用本身，不能是"上一次拿到的路径"。每步实际能不能拿到路径取决于当步的宿主（`ctx.get('attachments')` 惰性读，见 `src/driver-core/image-access.ts`），缺服务时退化成"无路径"形态——这也正是全部单测 harness 的情形。
 
-**引擎有原生图片通道时，本步自己的消息还额外收到字节**。占位文本是每一行的底线（不管引擎是谁，转录里永远有身份与路径），但引擎协议真能吃图片字节时（目前只有 pi 这么送，见 `docs/engine-pi.md` §4.3），本步交付的消息里的图片块另经 `stepImages`（`src/driver-core/step-images.ts:39`）以 base64 送出：解析同一份 `imageAccess`、读同一个只读宿主路径。两条规则合起来就是——**占位带身份 + 路径；引擎有原生通道时，本步自己的消息再附上字节**。只有本步的消息（`decision.messages`），不是整段历史，所以长会话不会每步重传所有图片；更早的图片仍只以占位出现。路径解析不到、或文件读不动时该图片**静默跳过**（`src/driver-core/step-images.ts:48`、`:52-53`）——转录里的路径仍在，模型自己的文件工具还能读到它，一个坏掉的图片不该让整步失败。
+**引擎有原生图片通道时，本步自己的消息还额外收到字节**。占位文本是每一行的底线（不管引擎是谁，转录里永远有身份与路径），但引擎协议真能吃图片字节时（pi 与 kimi 都这么送，见 `docs/engine-pi.md` §4.3 与 `docs/engine-kimi.md` §4.2），本步交付的消息里的图片块另经 `stepImages`（`src/driver-core/step-images.ts:39`）以 base64 送出：解析同一份 `imageAccess`、读同一个只读宿主路径。两条规则合起来就是——**占位带身份 + 路径；引擎有原生通道时，本步自己的消息再附上字节**。只有本步的消息（`decision.messages`），不是整段历史，所以长会话不会每步重传所有图片；更早的图片仍只以占位出现。路径解析不到、或文件读不动时该图片**静默跳过**（`src/driver-core/step-images.ts:48`、`:52-53`）——转录里的路径仍在，模型自己的文件工具还能读到它，一个坏掉的图片不该让整步失败。
 
-`createImageAccessResolver(ctx)`（`src/driver-core/image-access.ts:45`）就是喂给 `serializeHistory` 的解析器：**结构式**读取 attachment 服务（只声明它调用的 `imageHostPath(ref)`，`src/driver-core/image-access.ts:25-32`），本插件不为此新增对 `@deepseek-ai/dsh-attachment` 的依赖；引用类型也从 `ImageAttachmentAccessResolver` 反推（`src/driver-core/image-access.ts:19`）。四个 agent 在构造时各建一个（`this.imageAccess`），步进时传给 `serializeHistory`；pi 另把它交给 `stepImages`。返回类型复用 harness 的 `ImageAttachmentAccessResolver`，但占位文本**不复用** `offloadedImageText`——那边的理由是"为满足请求图片上限而省略"，这边的理由是"本引擎只吃文本"。
+`createImageAccessResolver(ctx)`（`src/driver-core/image-access.ts:45`）就是喂给 `serializeHistory` 的解析器：**结构式**读取 attachment 服务（只声明它调用的 `imageHostPath(ref)`，`src/driver-core/image-access.ts:25-32`），本插件不为此新增对 `@deepseek-ai/dsh-attachment` 的依赖；引用类型也从 `ImageAttachmentAccessResolver` 反推（`src/driver-core/image-access.ts:19`）。四个 agent 在构造时各建一个（`this.imageAccess`），步进时传给 `serializeHistory`；pi 与 kimi 另把它交给 `stepImages`。返回类型复用 harness 的 `ImageAttachmentAccessResolver`，但占位文本**不复用** `offloadedImageText`——那边的理由是"为满足请求图片上限而省略"，这边的理由是"本引擎只吃文本"。
 
 ### 斜杠命令步：`engineSlashPrompt`
 
@@ -85,14 +85,14 @@ codex **不使用**这条路径：app-server 协议没有文本斜杠面（`turn
 
 ### 哪些引擎怎么用
 
-四个 agent 都先取 `this.session.deriveMessages()`，再组装 prompt（并把构造时建好的 `this.imageAccess` 传进去，见上一节），空 prompt 抛错（v8-ignore 的兜底分支）。claude/pi/kimi 走 `engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)`，codex 仍只用 `serializeHistory(history, this.imageAccess)`。**pi 还多做一步**：本步交付的消息批经 `stepImages` 折成 base64，随 prompt 一起交给 RPC（有原生图片通道，见上一节）：
+四个 agent 都先取 `this.session.deriveMessages()`，再组装 prompt（并把构造时建好的 `this.imageAccess` 传进去，见上一节），空 prompt 抛错（v8-ignore 的兜底分支）。claude/pi/kimi 走 `engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)`，codex 仍只用 `serializeHistory(history, this.imageAccess)`。**pi 与 kimi 还各多做一步**：本步交付的消息批经 `stepImages` 折成 base64，随 prompt 一起交给引擎（两者都有原生图片通道，见上一节；斜杠命令步一律不读图、不带图）：
 
 - `src/engine-claude/agent.ts:590-594`
 - `src/engine-codex/agent.ts:694-695`
 - `src/engine-pi/agent.ts:623-627`（prompt）与 `:637-639`（图片）
-- `src/engine-kimi/agent.ts:595-598`
+- `src/engine-kimi/agent.ts:603-604`（prompt）与 `:614-616`（图片）
 
-kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:642`），因为 ACP prompt 是一个需要等响应帧的 RPC。
+kimi 额外把 prompt 发送本身包进 `raceAbort`（`src/engine-kimi/agent.ts:655-658`），因为 ACP prompt 是一个需要等响应帧的 RPC。
 
 ### 改它会波及谁
 
@@ -508,7 +508,7 @@ Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` /
 | 改动点 | 直接受影响 | 必须跑的测试 |
 |---|---|---|
 | `prompt.ts` 序列化格式 / 斜杠命令步 | 四个引擎的全部 prompt；claude/pi/kimi 的命令步 | `tests/engine-claude/mapping.spec.ts` + `tests/driver-core/prompt.spec.ts` + 四个 `tests/engine-*/agent.spec.ts` |
-| `step-images.ts` 取图 / 读取 / base64 | pi 每步随 prompt 送出的图片字节（其他三个引擎不消费） | `tests/driver-core/step-images.spec.ts` + `tests/engine-pi/agent.spec.ts` |
+| `step-images.ts` 取图 / 读取 / base64 | pi 与 kimi 每步随 prompt 送出的图片字节（claude/codex 不消费） | `tests/driver-core/step-images.spec.ts` + `tests/engine-pi/agent.spec.ts` + `tests/engine-kimi/agent.spec.ts` |
 | `permission-knobs.ts` 读取/枚举 | 四个引擎每次查询的权限立场 | 四个 `tests/engine-*/permission.spec.ts`（claude 侧直接 import 读者，`tests/engine-claude/permission.spec.ts:8`） |
 | `ownership.ts` 生命周期/竞速 | 四个运行时的创建/卸载正确性 | kimi/pi 的 `tests/engine-*/loop.spec.ts` + claude/codex 的 `tests/engine-*/index.spec.ts` + `tests/router-loop.spec.ts` |
 | `hosted-engine-runtime.ts` 事务体 | 四个引擎的 create/resume 正确性（进程内唯一一份） | 同上四份 spec + `tests/router-loop.spec.ts` |
@@ -532,7 +532,7 @@ Codex 与 Kimi 各为自己的会话保留一个常驻子进程（`app-server` /
 ## 9. 测试覆盖要点
 
 - **driver-core 的直接 spec** 有七个。`tests/driver-core/context-files.spec.ts`：目录链行走（有/无 git root）、override 优先于 primary、每目录一个文件、四个正文助手的空/缺失/拼接语义——改 context-files 先改这里。`tests/driver-core/inbox.spec.ts`：两个列表的 append/prepend/replace/remove、`clear` 与 `claim` 的批次顺序、越界坐标的归一化、重复 id 的拒绝、构造时的重放折叠。`tests/driver-core/assistant-stream.spec.ts`：一次尝试从 `start` 到 `committed` 的帧序、durable 提交被拒与显式放弃两条 `abandoned` 收尾，以及 `takeStream()` 在内容边界切段而不打断 live 帧。`tests/driver-core/hosted-tool-vocabulary.spec.ts`：四个引擎的改名表、Pi 的参数重塑（含保留 `offset`/`limit`、多条 edit 与非对象条目回退）、Claude 计划抽取（含未知状态与畸形条目丢弃），以及非法 JSON 的透传。`tests/driver-core/prompt.spec.ts`：`engineSlashPrompt` 的每个拒绝臂（空历史、非 user 收尾、tool 结果、技能注入顶位、多块消息、非 text 块、多行、路径状开头）与命中臂，外加 `serializeHistory` 的框架拼接与图片占位（有路径 / 无解析器 / 解析器答 `undefined` / 无 `name` 回退 / assistant 与 tool-result 两个渲染入口）。`tests/driver-core/image-access.spec.ts`：attachment 服务缺席、只有别的方法、给出路径、该引用没有路径四种回答，外加"服务后来才挂上仍能被看见"（惰性读取）。`tests/driver-core/step-images.spec.ts`：无图片的批返回空、没有解析器、多条消息各一张图**按序**且各自带自己的 `mediaType`（真临时文件，解码后与写入字节相等）、一条消息里的多个图片块、路径答 `undefined` 与文件读不动的两种跳过都不影响兄弟图片。
-- `serializeHistory` 另由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；claude/pi/kimi 各有一条"命令行走裸行、下一步回到转录"的步进用例，新增分支时两边都要看。**四个 agent 把解析器接上 `serializeHistory` 这件事**由 `tests/engine-kimi/agent.spec.ts` 与 `tests/engine-codex/agent.spec.ts` 各一条端到端用例钉住（假 attachment 服务 → 带图片块的 user 消息 → 断言引擎实际收到的 prompt 含路径）；claude 的接线没有同等断言，靠同一条一行的调用形态与 typecheck 兜住。**pi 的图片接线另有端到端断言**：`tests/engine-pi/agent.spec.ts` 用真临时文件断言 RPC prompt 既带占位路径、又带 `images` 的 base64，无图片的步则带 `{}`。
+- `serializeHistory` 另由 `tests/engine-claude/mapping.spec.ts` 直接 import（`serializeHistory`、`OMITTED_IMAGE_TEXT`）；claude/pi/kimi 各有一条"命令行走裸行、下一步回到转录"的步进用例，新增分支时两边都要看。**四个 agent 把解析器接上 `serializeHistory` 这件事**由 `tests/engine-kimi/agent.spec.ts` 与 `tests/engine-codex/agent.spec.ts` 各一条端到端用例钉住（假 attachment 服务 → 带图片块的 user 消息 → 断言引擎实际收到的 prompt 含路径）；claude 的接线没有同等断言，靠同一条一行的调用形态与 typecheck 兜住。**pi 的图片接线另有端到端断言**：`tests/engine-pi/agent.spec.ts` 用真临时文件断言 RPC prompt 既带占位路径、又带 `images` 的 base64，无图片的步则带 `{}`。**kimi 的图片接线同样有端到端断言**：`tests/engine-kimi/agent.spec.ts` 用真临时文件断言 ACP `prompt` 既带占位路径、又把 base64 作为第三个参数（ACP image block）送出，无图片的步则保持原来的两参数调用；`tests/engine-kimi/acp/client.spec.ts` 另钉住 `session/prompt` 的 block 顺序（文本块在前、image block 在后）与无图时的纯文本形状。
 - `permission-knobs.ts` 没有独立 spec，靠四个 permission spec 的行为断言间接覆盖；改折叠逻辑时四个 spec 都要看。
 - `ownership.ts` 与它上面的事务体（`hosted-engine-runtime.ts`）由 kimi/pi 的 loop spec 与 claude/codex 的 index spec 的卸载/竞速场景覆盖——每个引擎的 create/resume 都会把共享体走一遍；源码里大量 `v8 ignore` 注释标出了理论上不可达的兜底分支，改动时不要用"删分支"来凑覆盖率，这些注释本身就是设计文档。
 - **`tests/engine-remote.spec.ts`（本次修复新增）** 是"显示与路由不可能不一致"的回归钉：真实 `SessionStore` + 真实 JSONL 持久化 + 会真正折叠 `agentPreset` 的投影，造一条 header 记 `loop-engine-claude-code`、日志随后 commit `agent-preset/selected = loop-engine-pi` 的**持久化**会话，然后同时问两个读者——Remote 答 `pi`，路由器对同一会话 resume 时构建的是 Pi（fake runtime 记录 build 的引擎）。它另外钉住三态的四条回答（无 preset → `unset`、旧 id → `legacy`、`standard` → `in-process`、库里没有的 id → `unset` 且不抛）、网关会读到的绑定与 `@Remote` 标记、以及"形参名 `request` 就是 wire 字段"这条 SRC 契约（读 `Function.prototype.toString` 断言，见 `docs/architecture.md` §7）。同一份 spec 的 `switching a session's engine` 一段把第二个端点 `loopEngine/select` 钉在真 `RouterLoop` 上：成功路径（托管引擎之间原地换手；**两个涉及 in-process 的方向都走"释放 agent + `reload: true`"，且回包时 `ctx.agents.get` 已经为空、随后一次 `resume` 由 harness loop 重建而不再建任何托管引擎**；冷会话的报告只有记录、没有第二个字段；请求的引擎就是活 agent 的引擎时只写记录不重建；另一个进程新建的 store 读到同一份记录文档）、全部拒绝臂（会话未打开、turn 在飞、subagent 会话、不在本路由器的账上、记录写不进去、请求畸形、路由器还没挂上——每条都断言没有被释放的 agent），以及记录文档坏掉时仍按 preset 回答。`tests/engine-of-session.spec.ts` 单独钉三态判定与那次读取本身（含"没有 `sessionQuery` 服务时答 `unset`"与"读取失败不吞、交给调用方"），客户端那一半（stash + 重载 + 列表就绪后 `sessions.open`）由 `tests/session-engine-cache.spec.ts` 钉住。

@@ -42,11 +42,12 @@ import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
 import { kimiModelEnv } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
+import { stepImages } from '../driver-core/step-images.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
 import type { KimiSpawnCapability, KimiSpawnSpec } from './process.ts'
 import { kimiAcpArgv } from './process.ts'
 import { AcpClient } from './acp/client.ts'
-import type { AcpUpdate } from './acp/types.ts'
+import type { AcpImageContent, AcpUpdate } from './acp/types.ts'
 import {
   chunkDelta,
   isTextChunk,
@@ -453,7 +454,7 @@ export class KimiAgent implements Agent {
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
-          const stepEnd = await this.step()
+          const stepEnd = await this.step(decision.messages)
           if (turnEnds === null) turnEnds = stepEnd
         } finally {
           // The driver rotates steps as kimi's internal segments complete, so
@@ -570,8 +571,12 @@ export class KimiAgent implements Agent {
     return env
   }
 
-  /** Run one `kimi acp` step for the current session history and map the streamed updates. */
-  private async step(): Promise<StepEndReason | null> {
+  /**
+   * Run one `kimi acp` step for the current session history and map the streamed updates.
+   * @param messages - the messages this step delivers; only their images ride
+   *   with the prompt as ACP image blocks, and only they.
+   */
+  private async step(messages: readonly UserMessage[]): Promise<StepEndReason | null> {
     /* v8 ignore start -- private callers establish the running phase before executing a step */
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)    /* v8 ignore stop */
@@ -595,12 +600,20 @@ export class KimiAgent implements Agent {
     const history: Message[] = this.session.deriveMessages()
     // A live slash command is the engine's own control line: send it verbatim
     // (the transcript framing would hide it from Kimi's ACP command surface).
-    const prompt = engineSlashPrompt(history) ?? serializeHistory(history, this.imageAccess)
+    const slash = engineSlashPrompt(history)
+    const prompt = slash ?? serializeHistory(history, this.imageAccess)
     /* v8 ignore start -- a step only runs after claiming and durably appending at least one user message */
     if (prompt.length === 0) {
       throw new Error(`agent "${this.id}": cannot derive a prompt from an empty session log`)
     }
     /* v8 ignore stop */
+    // Kimi's ACP prompt takes image bytes, so THIS step's own messages ride as
+    // image blocks after the text; older images stay path-bearing placeholders
+    // in the transcript. A slash command is a bare control line, so it carries
+    // none — and reads no file.
+    const images: AcpImageContent[] = slash === undefined
+      ? (await stepImages(messages, this.imageAccess)).map(image => ({ type: 'image', ...image }))
+      : []
     this.assertRequestHeader()
     signal.throwIfAborted()
 
@@ -639,7 +652,10 @@ export class KimiAgent implements Agent {
       const cancel = (): void => { client.cancel(acpSessionId) }
       signal.addEventListener('abort', cancel, { once: true })
       try {
-        await raceAbort(client.prompt(acpSessionId, prompt), signal, this.id)
+        const call = images.length === 0
+          ? client.prompt(acpSessionId, prompt)
+          : client.prompt(acpSessionId, prompt, images)
+        await raceAbort(call, signal, this.id)
       } finally {
         signal.removeEventListener('abort', cancel)
       }

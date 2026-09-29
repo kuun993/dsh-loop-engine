@@ -20,6 +20,7 @@ import {
   isPermissionRequestFrame,
   isUpdateFrame,
   type AcpFrame,
+  type AcpImageContent,
   type AcpPermissionOption,
   type AcpPermissionResponse,
   type AcpUpdate,
@@ -199,9 +200,16 @@ export class AcpClient {
     return this.request('session/set_model', { sessionId, modelId })
   }
 
-  /** Prompt the agent in a session and resolve when the turn completes. */
-  prompt(sessionId: string, text: string): Promise<unknown> {
-    return this.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] })
+  /**
+   * Prompt the agent in a session and resolve when the turn completes.
+   * @param sessionId - the ACP session to prompt.
+   * @param text - the serialized transcript, or a bare slash command.
+   * @param images - image blocks to carry after the text block; omitted or
+   *   empty leaves the request exactly the text-only shape.
+   * @returns the agent's response to `session/prompt`.
+   */
+  prompt(sessionId: string, text: string, images: readonly AcpImageContent[] = []): Promise<unknown> {
+    return this.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }, ...images] })
   }
 
   /** Cancel the active turn in a session (fire-and-forget). */

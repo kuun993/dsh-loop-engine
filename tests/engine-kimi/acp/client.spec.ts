@@ -150,6 +150,29 @@ describe('session lifecycle', () => {
     client.dispose()
   })
 
+  it('carries the step images as ACP image blocks after the text block', async () => {
+    const fake = fakeProcess()
+    const client = new AcpClient(fake.process)
+    const init = client.initialize()
+    fake.push(`{"jsonrpc":"2.0","id":${INIT_ID},"result":{}}`)
+    await init
+    const ns = client.newSession('/w')
+    fake.push(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s_1"}}`)
+    await ns
+    const prompt = client.prompt('s_1', 'look at this', [
+      { type: 'image', data: 'QUJD', mimeType: 'image/png' },
+    ])
+    fake.push('{"jsonrpc":"2.0","id":3,"result":{}}')
+    await expect(prompt).resolves.toEqual({})
+    const sent = JSON.parse(fake.writes[2]!) as { method: string; params: { prompt: Array<Record<string, unknown>> } }
+    expect(sent.method).toBe('session/prompt')
+    expect(sent.params.prompt).toEqual([
+      { type: 'text', text: 'look at this' },
+      { type: 'image', data: 'QUJD', mimeType: 'image/png' },
+    ])
+    client.dispose()
+  })
+
   it('cancel sends session/cancel and swallows a rejection', async () => {
     const fake = fakeProcess()
     const client = new AcpClient(fake.process)

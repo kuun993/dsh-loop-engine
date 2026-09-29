@@ -5,6 +5,9 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -233,13 +236,18 @@ describe('KimiAgent turn mapping (streamed)', () => {
     }
   })
 
-  it('names the read-only path of a user image block in the prompt', async () => {
+  it('names the read-only path of a user image block and hands the ACP prompt its bytes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-kimi-image-'))
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+    const imagePath = join(dir, 'x.png')
+    await writeFile(imagePath, bytes)
     mock.updates.mockReturnValue([text('seen')])
     const ctx = await harness()
     try {
       // The host's attachment service: the driver must ask it for the path of
-      // the durable reference the log carries, since Kimi receives text only.
-      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      // the durable reference the log carries, both to name it in the transcript
+      // and to read the bytes it sends natively.
+      ctx.provide('attachments', { imageHostPath: () => imagePath })
       const { agent } = await ctx.agents.create({ sessionId: SessionId('image-s'), meta: { cwd: process.cwd() } })
       agent.followup(createUserMessage({
         content: [
@@ -259,17 +267,35 @@ describe('KimiAgent turn mapping (streamed)', () => {
         source: { kind: 'user' },
       }))
       await agent.whenIdle()
-      // The prompt handed to the engine names the image and where its bytes
+      const call = mock.client.prompt.mock.calls[0]
+      expect(call?.[0]).toBe('sess_1')
+      // The transcript placeholder still names the image and where its bytes
       // live, so the model can read the file instead of guessing at it.
-      expect(mock.client.prompt).toHaveBeenLastCalledWith('sess_1', expect.stringContaining('look at this'))
-      expect(mock.client.prompt).toHaveBeenLastCalledWith(
-        'sess_1',
-        expect.stringContaining('image "shot.png" (image/png, 800x600px, 1234 bytes)'),
-      )
-      expect(mock.client.prompt).toHaveBeenLastCalledWith(
-        'sess_1',
-        expect.stringContaining('read "/tmp/attachments/x.png" to view it'),
-      )
+      const prompt = String(call?.[1])
+      expect(prompt).toContain('look at this')
+      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(prompt).toContain(`read ${JSON.stringify(imagePath)} to view it`)
+      // This step's own image also rides natively, base64 under its own media
+      // type, as an ACP image block after the text block.
+      expect(call?.[2]).toEqual([{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' }])
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('sends the prompt unchanged when the step carries no image', async () => {
+    mock.updates.mockReturnValue([text('plain')])
+    const ctx = await harness()
+    try {
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('no-image-s'), meta: { cwd: process.cwd() } })
+      agent.followup(message('hi'))
+      await agent.whenIdle()
+      // No image in the step: the ACP prompt call stays the two-argument call it
+      // was before the driver had an image channel — no third argument at all.
+      expect(mock.client.prompt).toHaveBeenCalledTimes(1)
+      expect(mock.client.prompt.mock.calls[0]).toHaveLength(2)
+      expect(mock.client.prompt).toHaveBeenCalledWith('sess_1', expect.stringContaining('<user>'))
     } finally {
       await ctx.fiber.dispose()
     }
