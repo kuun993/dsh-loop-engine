@@ -197,6 +197,18 @@ dsh 的 `commands` 服务会本地消费已注册命令——行不进模型。�
 
 ## 9. 错误处理与已知边界
 
+### 9.1 图片通道：协议可行，本轮保持占位路径（结论）
+
+四个托管引擎里只有 claude 没有接原生图片通道，结论与依据如下（对应 `docs/driver-core.md` §2 的"引擎有原生图片通道时附上图片"规则）：
+
+- **协议上可行**。SDK 的 `query()` 收 `string | AsyncIterable<SDKUserMessage>`（`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:7123`），`SDKUserMessage.message` 是 Anthropic 的 `MessageParam`（`sdk.d.ts:4585`），其 `content` 接受 `ImageBlockParam`（`node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts:494`，`source: { type: 'base64', media_type, data }`）。也就是说，图片可以像 pi/kimi 一样以 base64 进模型上下文。
+- **代价不在图片，在"查询模式"**。驱动现在把整段转录作为**一个字符串**交给 SDK（`src/engine-claude/agent.ts:594` 拼 prompt、`:647` `officialQuery({ prompt, options })`）。要带图，prompt 必须换成一个 **AsyncIterable 输入流**，即从"一次性输入"切到 SDK 的**流式输入模式**——那是另一种会话生命周期，不是局部改动：
+  - 现有 step 语义建立在"`query()` 的异步迭代器在 `result` 消息后自然结束"之上（`for await` 见 `src/engine-claude/agent.ts:677`，`finished` 置位与"没有 `result` 就报错"见 `:855`、`:868-873`）。流式输入模式下迭代器在**输入流结束前不会结束**，驱动得自己收尾输入流，并重新定义"一步 = 一次查询"的收尾时机（关流之后 `result` 还吐不吐、abort 与 `disposeGraceMs` 的相对顺序）；
+  - 这条路径改的是**每一个 step**，不只带图的 step，而本机没有可达的 Claude Code 端点（与 codex 同因），改完无法端到端验证——未经验证地改掉全部 claude 会话的查询生命周期，代价明显大于收益。
+- **因此本轮保持 A 的路径引用**：占位文本给出图片身份 + attachment 只读宿主路径（§9.2 第一条），Claude Code 自带文件读取工具、按上游文档能读图片文件（**本机未验证**，因为同一端点不可达）。真要做时，改动点是：把 `prompt` 从 `serializeHistory(...)` 的字符串换成一个只发一条消息就结束的 `AsyncIterable<SDKUserMessage>`，`content` = `[{ type: 'text', text: <转录> }, ...<本步图片的 base64 块>]`——图片素材直接复用 `stepImages`（`src/driver-core/step-images.ts`，与 pi/kimi 同一份读取与跳过规则）。
+
+### 9.2 其余已知边界
+
 - **配置边界**：`disposeGraceMs` 非法在构造时抛（`src/engine-claude/loop.ts:64-72`）；schemastery 对非法枚举/类型在 compose 时拒绝。原则是无头部署的误配必须响亮失败。
 - **query 失败**：SDK result 错误 → `LlmError`（`CLAUDE_CODE_*` 码）→ `turn/end` 记 `error` + `agent/error` 事件；空流 → `CLAUDE_CODE_NO_RESULT`；无 cwd → 普通 Error，错误码 `UNKNOWN`（`src/engine-claude/agent.ts:420-425`）。
 - **静默降级**：技能加载失败/不存在/不可调用跳过；无 `approval` 服务时 ask 策略落 deny；无 `skills` 服务时手势不注入；无 `commands` 服务时斜杠菜单不注册。这些都有意不 fail-loud，因为可选宿主服务可能缺席（`src/index.ts:82-89`）。

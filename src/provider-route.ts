@@ -38,10 +38,22 @@
  * @module dsh-loop-engine/provider-route
  */
 
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, ModelModality, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL, HOSTED_ROUTE_NAME } from './agent-preset-ids.ts'
 import type { HostedEngineId } from './settings.ts'
+
+/**
+ * The input modalities this route's single entry declares: text AND image.
+ *
+ * Every hosted engine is handed the images of the step's own messages —
+ * `pi`/`kimi` as bytes over their RPC/ACP channels, `codex` as a `localImage`
+ * path the app-server opens itself, `claude-code` as the readable path in the
+ * prompt's image placeholder (see `docs/driver-core.md` §2). The capability
+ * therefore belongs to the route, which is what the host asks about; which
+ * shape of handover an engine gets is that engine's business, not the session's.
+ */
+export const HOSTED_MODEL_MODALITIES: readonly ModelModality[] = ['text', 'image']
 
 /**
  * The provider route label ONE hosted engine logs into its sessions'
@@ -123,10 +135,24 @@ export class HostedEngineRouteAdapter extends LlmAdapter {
    * session's selection to this entry (and highlights its row) rather than
    * falling through to the raw composite string; the name is the same word,
    * rendered as-is.
+   *
+   * {@link HOSTED_MODEL_MODALITIES} is declared, not left absent, because the
+   * host reads it as a capability: `packages/api/session-controller/src/commands.ts`
+   * refuses a prompt carrying an image when the session's model declares
+   * modalities that exclude `image`, and `LlmModelInfo` documents an absent
+   * field as UNKNOWN. A hosted session's fate for an attached image therefore
+   * has to be something this plugin SAYS, not something a missing field happens
+   * to allow — while a field this plugin omits, or the harness stops treating
+   * as unknown, silently turns every hosted session image-blind.
    * @returns the one entry this route advertises.
    */
   override listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve([{ provider: HOSTED_ROUTE_LABEL, id: HOSTED_DEFAULT_MODEL, name: HOSTED_DEFAULT_MODEL }])
+    return Promise.resolve([{
+      provider: HOSTED_ROUTE_LABEL,
+      id: HOSTED_DEFAULT_MODEL,
+      name: HOSTED_DEFAULT_MODEL,
+      inputModalities: HOSTED_MODEL_MODALITIES,
+    }])
   }
 
   stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {

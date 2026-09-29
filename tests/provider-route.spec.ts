@@ -74,9 +74,16 @@ describe('HostedEngineRouteAdapter', () => {
     // model menu, named `external`, not four groups named after the engines.
     expect(llm.listProviders()).toEqual([{ id: HOSTED_ROUTE_LABEL, name: HOSTED_ROUTE_NAME }])
     // Exactly one entry: the group is what makes the route appear in the menu,
-    // and the id is what a hosted session's logged label resolves to.
+    // and the id is what a hosted session's logged label resolves to. The
+    // modalities are declared so the host's image gate is answered by this
+    // plugin, not by the field's absence (see `HOSTED_MODEL_MODALITIES`).
     await expect(llm.listModels(HOSTED_ROUTE_LABEL)).resolves.toEqual([
-      { provider: HOSTED_ROUTE_LABEL, id: HOSTED_DEFAULT_MODEL, name: HOSTED_DEFAULT_MODEL },
+      {
+        provider: HOSTED_ROUTE_LABEL,
+        id: HOSTED_DEFAULT_MODEL,
+        name: HOSTED_DEFAULT_MODEL,
+        inputModalities: ['text', 'image'],
+      },
     ])
 
     release()

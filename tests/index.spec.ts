@@ -999,7 +999,7 @@ describe('apply provider routes', () => {
     // a session's request/header — the pair the picker resolves
     // (`tests/provider-route.spec.ts`).
     await expect((ctx.get('llm') as LlmRuntime).listModels(HOSTED_ROUTE_LABEL)).resolves.toEqual([
-      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default' },
+      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default', inputModalities: ['text', 'image'] },
     ])
 
     await fiber.dispose()
@@ -1532,7 +1532,7 @@ describe('apply router mount', () => {
     expect(spawnSpy).not.toHaveBeenCalled()
     // The route still serves the shared label, with exactly its one entry.
     await expect((ctx.get('llm') as LlmRuntime).listModels(HOSTED_ROUTE_LABEL)).resolves.toEqual([
-      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default' },
+      { id: 'default', provider: HOSTED_ROUTE_LABEL, name: 'default', inputModalities: ['text', 'image'] },
     ])
 
     await handle.dispose()
