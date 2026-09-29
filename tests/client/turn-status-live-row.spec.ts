@@ -271,6 +271,13 @@ describe('the live turn-status row', () => {
     expect(css).not.toContain('html[data-loop-engine][data-loop-engine-running] [data-chat-running]')
     expect(css).not.toContain('[data-chat-running][data-loop-engine-live]')
 
+    // The harness's own whale — the APNG mask and its SVG fallback, both inside
+    // `[class$="_runningIcon"]` — is removed, so the glyph replaces that mark
+    // rather than queueing up beside it. Gated on the attribute's PRESENCE, not
+    // per engine: the rule is the same for all four, and "no attribute" is an
+    // in-process session, whose row is not this module's to repaint.
+    expect(css).toContain('html[data-loop-engine] [data-chat-running] [class$="_runningIcon"] { display: none; }')
+
     // Per engine: the glyph, and the two custom properties the row resolves its
     // text colour and its shimmer tint from — and nothing else: the harness
     // animates that row itself, so no gradient is re-declared over it.

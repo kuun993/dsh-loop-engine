@@ -7,7 +7,10 @@
  * plugin cannot change the text. What it CAN do is restyle the element, and
  * that is all this module does — it paints an engine-specific glyph and color
  * onto the row while the session on screen runs a hosted engine, and leaves the
- * stock look alone otherwise.
+ * stock look alone otherwise. On the 0.2.0 line it also takes the harness's own
+ * indicator out of that row ({@link RUNNING_ICON}): that generation draws a
+ * DeepSeek whale there, and a hosted engine turning under a DeepSeek mark is
+ * exactly what this row must not say.
  *
  * WHICH engine it paints is the SESSION ON SCREEN's, not the settings default.
  * {@link reflectTurnStatusEngine} is driven from the per-session engine cache
@@ -158,6 +161,24 @@ const LIVE_ATTR = 'data-loop-engine-live'
 
 /** Owning plugin id, stamped on the injected tag for identification. */
 const PLUGIN_ID = 'dsh-loop-engine'
+
+/**
+ * The harness's own indicator on the 0.2.0 running row.
+ *
+ * That row draws a DeepSeek whale tail — an animated APNG masked in the row's
+ * own colour, with an SVG fallback beside it — and 0.2.0 is the first
+ * generation to own an indicator the plugin could only sit next to. The whole
+ * point of this module is that the row says WHICH engine is running; a hosted
+ * engine turns under a DeepSeek mark is the one thing it must not leave
+ * standing, so on that line the mark is removed and the glyph takes its place.
+ *
+ * Gated on the engine attribute's presence rather than per engine, because the
+ * rule is the same for all four: `reflectTurnStatusEngine` only ever writes
+ * that attribute for a hosted engine and deletes it for everything else, so
+ * "absent" is exactly an in-process session, which keeps the stock indicator.
+ * In-process sessions are not this module's row to repaint.
+ */
+const RUNNING_ICON = `html[${ENGINE_ATTR}] ${RUNNING_ROW} [class$="_runningIcon"] { display: none; }`
 
 /**
  * One harness markup row a sheet restyles. The sheet is emitted once per
@@ -419,15 +440,18 @@ ${GLYPH_KEYFRAMES}
  *
  * The glyph then rides a `::before` on the CONTENT row rather than on the row
  * itself: that span is `display: inline-flex`, so the pseudo-element becomes its
- * first flex item — one `gap` to the left of the whale — with nothing to reset
- * and no margin to add. The variable block stays on the outer row, which is the
- * element `.running` declares the colour on.
+ * first flex item, with nothing to reset and no margin to add. The variable
+ * block stays on the outer row, which is the element `.running` declares the
+ * colour on. With the harness's own indicator removed ({@link RUNNING_ICON}) the
+ * glyph IS that row's icon rather than a second one beside it.
  */
 const sheetForRunning = (): string => {
   const PER_ENGINE = (engine: HostedEngineId): string => `html[${ENGINE_ATTR}="${engine}"] ${RUNNING_ROW}`
   const GLYPH = (engine: HostedEngineId): string => `${PER_ENGINE(engine)} [class$="_runningContent"]`
   return `
 ${engineRules(PER_ENGINE, GLYPH, RUNNING_VARS)}
+
+${RUNNING_ICON}
 
 ${GLYPH_KEYFRAMES}
 
