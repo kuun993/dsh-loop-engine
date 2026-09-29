@@ -10,6 +10,7 @@ import type {
   Query,
   SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -297,6 +298,48 @@ describe('ClaudeCodeAgent turn mapping', () => {
       expect(params!.options.persistSession).toBe(false)
       expect(params!.options.permissionMode).toBe('dontAsk')
       expect(params!.options.disallowedTools).toContain('AskUserQuestion')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('names the read-only path of a user image block in the prompt', async () => {
+    const ctx = await harness()
+    try {
+      // The host's attachment service: Claude Code receives the transcript as
+      // text, so the driver must ask it for the path behind the durable
+      // reference the log carries.
+      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      queryMock.mockImplementation(() => stream([assistantText('seen'), successResult()]))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('image-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({
+        content: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: AttachmentId('img-1'),
+              mediaType: 'image/png',
+              bytes: 1234,
+              width: 800,
+              height: 600,
+              name: 'shot.png',
+            },
+          },
+        ],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      // The prompt handed to the SDK names the image and where its bytes live,
+      // so the model can read the file instead of guessing at it.
+      const prompt = queryMock.mock.calls[0]![0].prompt
+      expect(prompt).toContain('look at this')
+      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
     } finally {
       await ctx.fiber.dispose()
     }

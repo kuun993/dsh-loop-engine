@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -208,6 +209,48 @@ describe('PiAgent turn mapping', () => {
       expect(promptText).not.toContain('You are the deployment.')
       expect(promptText).toContain('<user>')
       expect(promptText).toContain('hi')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('names the read-only path of a user image block in the prompt', async () => {
+    const ctx = await harness()
+    try {
+      // The host's attachment service: Pi receives the transcript as text, so
+      // the driver must ask it for the path behind the durable reference the
+      // log carries.
+      ctx.provide('attachments', { imageHostPath: () => '/tmp/attachments/x.png' })
+      mock.eventsYield.mockReturnValue(okStream('seen'))
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('image-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(createUserMessage({
+        content: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: AttachmentId('img-1'),
+              mediaType: 'image/png',
+              bytes: 1234,
+              width: 800,
+              height: 600,
+              name: 'shot.png',
+            },
+          },
+        ],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      // The RPC prompt names the image and where its bytes live, so the model
+      // can read the file instead of guessing at it.
+      const prompt = String(mock.client.prompt.mock.calls[0]?.[0])
+      expect(prompt).toContain('look at this')
+      expect(prompt).toContain('image "shot.png" (image/png, 800x600px, 1234 bytes)')
+      expect(prompt).toContain('read "/tmp/attachments/x.png" to view it')
     } finally {
       await ctx.fiber.dispose()
     }
