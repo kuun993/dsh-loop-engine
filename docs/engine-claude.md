@@ -224,7 +224,7 @@ SDK 类型依据（行号指本仓库已安装的 `node_modules/@anthropic-ai/cl
 - **已知边界**：
   - 图片不转录，以占位文本代替——文本是 `[image "<name>" (<mediaType>, WxHpx, N bytes) omitted: this engine receives text, not image bytes; …]`，尾部按能否拿到 attachment 只读路径分"read <path> to view it"与"no readable path … attach the image again"两种（`src/driver-core/prompt.ts:31`、`:62-75`，见 `docs/driver-core.md` §2）。**这行占位文本是四引擎共同的不变量**：claude 带图的 step 也照旧带着它，只是同一个 prompt 里额外多了本步图片的 base64 块（§9.1）。思维链不进 prompt（每次 query 重新思考，`src/driver-core/prompt.ts:98-100`）。
   - `redacted-thinking` 与未知内容块在 durable log 中不可恢复（`src/engine-claude/mapping.ts:100-102`）。
-  - 无 SDK 会话持久化：每次 step 都是完整历史重放，长会话的 prompt 会线性增长——这是"session log 唯一事实源"设计的固有代价。
+  - 无 SDK 会话持久化：每次 step 都是完整历史重放（"session log 唯一事实源"的固有代价）。**但重放体量不再无界**：托管 preset 保留了 `standard` 的 `compaction` 组（`src/preset.ts:89-117`），dsh 自己的自动压缩会把日志换成检查点（surface replacement），后续 step 组装的就是折叠后的消息。两件配套缺一不可：占位路由必须声明容量（`engineContextWindow`，默认 262144），摘要调用又必须有一个真 dsh 模型（组合条目字段 `summarizerProvider` / `summarizerModel`，成对设置；摘要是一次普通 llm 调用，落在占位路由上只会得到一句 warn 与"继续这一轮"）。见 `docs/architecture.md` §3.6 与 §3.5。改之前是真机上的严重问题：33 轮 kimi 会话每 step 重放 ~3.3 MB（tool results 2.0 MB + tool-call 行 1.19 MB），Kimi CLI 每轮开头自动压到 ~47k 再丢弃；claude/codex/pi 同属"每步新开引擎会话"，只是各自的量级不同。
   - 引擎**按会话**选定：创建时由插件自己的每会话记录决定（该会话无记录时用它记录的 agent preset），之后可在会话打开且没有 turn 在飞时随时切到别的引擎（`src/router-loop.ts:281-314`、`:306-317`）；经 harness 的 preset 通道仍只有**空白**会话能换引擎，非空白会话只 warn 并保持原引擎（`src/router-loop.ts:577-602`）。插件装载期间 managed block 恒存在（不再有"in-process = 没有块"的形态）。**托管引擎之间的切换不需要重启、也不需要刷新**；**任一边是 in-process 时宿主会释放这条会话的 agent 并让页面自动重载一次**（重载后回到同一条会话，宿主按记录重建它——`dsh web` 进程不重启，`docs/per-session-engine.md` §5.2）。
 
 ## 10. 测试覆盖要点

@@ -66,8 +66,9 @@ import {
   legacyBlockEngineOf,
 } from './patch-manager.ts'
 import { enginePresetId, ensureEnginePresetRows, ensureEnginePresets } from './preset.ts'
+import type { SummarizerTarget } from './preset.ts'
 import { HOSTED_ROUTE_LABEL } from './agent-preset-ids.ts'
-import { HostedEngineRouteAdapter } from './provider-route.ts'
+import { DEFAULT_ENGINE_CONTEXT_WINDOW, HostedEngineRouteAdapter } from './provider-route.ts'
 import { ROUTER_SERVICES, RouterLoop, type RouterEngine } from './router-loop.ts'
 import {
   resolveEngineRecordPath,
@@ -124,6 +125,44 @@ export interface Config extends ClaudeCodeConfig {
    * Claude Code drivers spawn per step, so the knob does not reach them.
    */
   childIdleMs?: number
+  /**
+   * Context window (in tokens) dsh assumes for the hosted provider route.
+   *
+   * A hosted engine reports no capacity to dsh — each owns its model inside its
+   * own child process — so this is the number dsh's auto-compaction sizes its
+   * pressure threshold from (default threshold ratio `0.8` of it, so compaction
+   * fires once a hosted session's replayed transcript crosses 80% of this). It
+   * is declared on the placeholder route (`src/provider-route.ts`
+   * `resolveModel`); without it the pressure path warns once and compaction
+   * never fires. A deployment running several engines should set it to the
+   * SMALLEST engine window in use, so the threshold that fires is safe for
+   * every engine. Defaults to
+   * {@link DEFAULT_ENGINE_CONTEXT_WINDOW} (262144).
+   */
+  engineContextWindow?: number
+  /**
+   * Dsh provider route a hosted session's compaction SUMMARIZES through; set
+   * together with {@link Config.summarizerModel}, or not at all.
+   *
+   * The pair is only needed because a hosted engine's own model cannot serve
+   * that call: compaction summarizes with an ordinary llm request, and a hosted
+   * session's routed model is this plugin's placeholder route
+   * (`external/default`), whose `stream()` fails loud. Without the pair the
+   * plugin leaves the composition it authors untouched, and every compaction
+   * attempt logs a warning and lets the turn continue — the safe degraded mode,
+   * in which the session log is never folded. The plugin writes the pair into
+   * its own hosted presets (`src/preset.ts` `applySummarizerTarget`) because a
+   * profile-patch row replaces its target's whole `config`, and the patch index
+   * does not descend into a preset's `config.plugins` — the nested
+   * `compaction-basic` row is reachable only from the composition the plugin
+   * authors, never from the deployment's profile patch.
+   */
+  summarizerProvider?: string
+  /**
+   * Dsh model id on {@link Config.summarizerProvider} that hosted sessions
+   * summarize through; must be set together with it.
+   */
+  summarizerModel?: string
   /**
    * Default engine NEW sessions are created on. A live, profile-backed field:
    * the settings shell edits it and the running plugin reads it through this
@@ -205,6 +244,17 @@ export const Config: z<ConfigInput, Config> = z.object({
   piThinking: z.string(),
   kimiBin: z.string(),
   childIdleMs: z.number(),
+  // A capacity of zero or a fraction is a misconfiguration that would silently
+  // disable compaction (the threshold would never be crossed), so it is
+  // rejected at compose time rather than clamped away.
+  engineContextWindow: z.number().step(1).min(1).default(DEFAULT_ENGINE_CONTEXT_WINDOW),
+  // Validated as a PAIR rather than field by field: schemastery has no
+  // cross-field check, and a transform wrapping this object would trip its own
+  // volatile-field walk (the live fields below ride an object path). So the two
+  // stay permissive here and `resolveSummarizerTarget` rejects a half-set pair
+  // when the plugin applies, which is the same compose-time failure.
+  summarizerProvider: z.string(),
+  summarizerModel: z.string(),
   // The live fields exist only on the 0.1.7 line; the 0.1.5 line carries the
   // selection in a settings section instead. The empty arm never runs when the
   // coverage job is on 0.1.7; the 0.1.5 dep set is exercised by
@@ -229,6 +279,37 @@ export function resolvePatchPath(config: Config): string {
 }
 
 /**
+ * Resolve the summarization model the plugin writes into every hosted preset,
+ * or `undefined` when the deployment names none.
+ *
+ * The two knobs are one decision — a provider route without a model (or the
+ * reverse) cannot be resolved to a call — so a half-set pair is a
+ * misconfiguration rather than a usable half, and it fails loud here instead of
+ * being dropped on the floor. This runs as the plugin applies, i.e. at compose
+ * time, and it runs before anything is written, so a bad profile never leaves a
+ * half-authored patch file behind.
+ *
+ * Schemastery has no cross-field check, so the schema keeps the two fields
+ * permissive and the rule is enforced here (the same compose-time posture the
+ * engine loops take for their own resolved config).
+ * @param config - the composition entry's static knobs.
+ * @returns the summarization target, or undefined when neither field is set.
+ * @throws when exactly one field is set, or either one is an empty string.
+ */
+export function resolveSummarizerTarget(config: Config): SummarizerTarget | undefined {
+  const provider = config.summarizerProvider
+  const model = config.summarizerModel
+  if (provider === undefined && model === undefined) return undefined
+  if (provider === undefined || model === undefined || provider === '' || model === '') {
+    throw new Error(
+      'loop-engine: summarizerProvider and summarizerModel must be set together, '
+      + 'each a non-empty string — they name the dsh model a hosted session\'s compaction summarizes through',
+    )
+  }
+  return { provider, model }
+}
+
+/**
  * Author the hosted engines' presets through the mechanism the RUNNING harness
  * actually reads, which is the one place the two generations diverge.
  *
@@ -244,14 +325,20 @@ export function resolvePatchPath(config: Config): string {
  * `dsh-agent-preset` row plugin, so the rows would fail to load.
  * @param patchPath - the profile's patch file, already resolved.
  * @param presets - the roster whose `standard` composition is the source.
+ * @param summarizer - the summarization model every copy names, or undefined
+ *   to leave the copies exactly as the strip left them.
  * @returns whether anything was written.
  * @throws when the source preset cannot be read or the write fails.
  */
-function authorHostedPresets(patchPath: string, presets: AgentPresetsService): Promise<boolean> {
+function authorHostedPresets(
+  patchPath: string,
+  presets: AgentPresetsService,
+  summarizer: SummarizerTarget | undefined,
+): Promise<boolean> {
   /* v8 ignore start -- legacy 0.1.5 mechanism (directory authoring); the coverage job runs on 0.1.7 and vitest.config.compat015.ts takes this branch */
-  if (LEGACY_HARNESS) return ensureEnginePresets(resolveDshHome(), presets)
+  if (LEGACY_HARNESS) return ensureEnginePresets(resolveDshHome(), presets, summarizer)
   /* v8 ignore stop */
-  return ensureEnginePresetRows(patchPath, presets)
+  return ensureEnginePresetRows(patchPath, presets, summarizer)
 }
 
 /** Whether a promise rejection was an ENOENT (file not found). */
@@ -372,6 +459,9 @@ function kimiConfig(config: Config): KimiConfig {
  * @param config - composition entry for the managed patch file and engine knobs.
  */
 export function apply(ctx: Context, config: Config): void {
+  // Resolved first: a half-set pair is a compose-time misconfiguration, and it
+  // must fail before anything is written.
+  const summarizer = resolveSummarizerTarget(config)
   const patchPath = resolvePatchPath(config)
   const patchText = readPatchFileSync(patchPath)
   // A block written by an older build names the ONE engine the profile used to
@@ -473,6 +563,12 @@ export function apply(ctx: Context, config: Config): void {
    * the engine's own `default` — so the model menu can name a hosted session's
    * selection instead of rendering the raw `provider/model` string.
    *
+   * The route also carries the deployment's declared context window
+   * (`config.engineContextWindow`), which is what dsh's auto-compaction sizes
+   * its pressure threshold from — a hosted engine reports no capacity of its
+   * own, so this is the only window the compaction path can read for a hosted
+   * session (`provider-route.ts` `resolveModel`).
+   *
    * Best-effort: a composition without the llm service cannot enforce the route
    * check either, so an absent registry only schedules a bounded retry against
    * the fiber start-order race.
@@ -488,7 +584,10 @@ export function apply(ctx: Context, config: Config): void {
     }
     const registered: (() => void)[] = []
     try {
-      registered.push(llm.registerAdapter([HOSTED_ROUTE_LABEL], new HostedEngineRouteAdapter()))
+      registered.push(llm.registerAdapter(
+        [HOSTED_ROUTE_LABEL],
+        new HostedEngineRouteAdapter(config.engineContextWindow),
+      ))
     } catch (error: unknown) {
       // A deployment whose own adapter already serves the label needs no
       // placeholder. The llm registry signals that structurally with an error
@@ -569,7 +668,7 @@ export function apply(ctx: Context, config: Config): void {
       // the authoring independent of the loader's callback order.
       for (let attempt = 0; attempt <= PRESET_SOURCE_ATTEMPTS; attempt += 1) {
         try {
-          return await authorHostedPresets(patchPath, presets)
+          return await authorHostedPresets(patchPath, presets, summarizer)
         } catch (error: unknown) {
           lastError = error
           if (attempt < PRESET_SOURCE_ATTEMPTS) {

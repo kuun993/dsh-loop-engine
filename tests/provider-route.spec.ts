@@ -23,7 +23,12 @@ import {
   HOSTED_ROUTE_LABEL,
   HOSTED_ROUTE_NAME,
 } from '../src/agent-preset-ids.ts'
-import { HostedEngineRouteAdapter, hostedRouteLabelOf, isHostedProviderRoute } from '../src/provider-route.ts'
+import {
+  DEFAULT_ENGINE_CONTEXT_WINDOW,
+  HostedEngineRouteAdapter,
+  hostedRouteLabelOf,
+  isHostedProviderRoute,
+} from '../src/provider-route.ts'
 
 describe('HOSTED_ROUTE_LABEL', () => {
   it('is the ASCII wire label every hosted engine logs', () => {
@@ -88,6 +93,63 @@ describe('HostedEngineRouteAdapter', () => {
 
     release()
     expect(llm.listProviders()).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('declares the configured context window and the route modalities on the resolved entry', async () => {
+    const adapter = new HostedEngineRouteAdapter(131072)
+    // The capacity is what dsh's compaction pressure path reads
+    // (`resolveModelInfo`), and it rides the resolved entry rather than the
+    // catalog entry because `LlmModelInfo` has no context field.
+    await expect(adapter.resolveModel(HOSTED_ROUTE_LABEL, HOSTED_DEFAULT_MODEL)).resolves.toEqual({
+      provider: HOSTED_ROUTE_LABEL,
+      id: HOSTED_DEFAULT_MODEL,
+      name: HOSTED_DEFAULT_MODEL,
+      inputModalities: ['text', 'image'],
+      context: { contextWindow: 131072 },
+    })
+  })
+
+  it('echoes the exact model label it was asked about, whatever a deployment pinned', async () => {
+    // The harness rejects a result whose `id` differs from the query, and a
+    // deployment may pin `config.model`, so the logged label is not always
+    // `default` — the entry has to answer for it.
+    const adapter = new HostedEngineRouteAdapter(200000)
+    await expect(adapter.resolveModel(HOSTED_ROUTE_LABEL, 'kimi-k2')).resolves.toEqual({
+      provider: HOSTED_ROUTE_LABEL,
+      id: 'kimi-k2',
+      name: 'kimi-k2',
+      inputModalities: ['text', 'image'],
+      context: { contextWindow: 200000 },
+    })
+  })
+
+  it('falls back to the documented default window for an absent or non-positive value', async () => {
+    for (const value of [undefined, 0, -1, 1.5, Number.NaN]) {
+      const adapter = new HostedEngineRouteAdapter(value)
+      await expect(adapter.resolveModel(HOSTED_ROUTE_LABEL, HOSTED_DEFAULT_MODEL))
+        .resolves.toMatchObject({ context: { contextWindow: DEFAULT_ENGINE_CONTEXT_WINDOW } })
+    }
+    expect(DEFAULT_ENGINE_CONTEXT_WINDOW).toBe(262144)
+  })
+
+  it('passes the registry’s own metadata validation with its declared window', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const llm = ctx.get('llm') as LlmRuntime
+    const release = llm.registerAdapter([HOSTED_ROUTE_LABEL], new HostedEngineRouteAdapter(200000))
+
+    // `normalizeModelInfo` is what the compaction path goes through, so the
+    // contract is pinned against the real registry rather than the adapter alone.
+    await expect(llm.resolveModelInfo(HOSTED_ROUTE_LABEL, HOSTED_DEFAULT_MODEL)).resolves.toEqual({
+      provider: HOSTED_ROUTE_LABEL,
+      id: HOSTED_DEFAULT_MODEL,
+      name: HOSTED_DEFAULT_MODEL,
+      inputModalities: ['text', 'image'],
+      context: { contextWindow: 200000 },
+    })
+
+    release()
     await ctx.fiber.dispose()
   })
 

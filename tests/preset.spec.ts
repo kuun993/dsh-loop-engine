@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   applyEnginePresetRows,
+  applySummarizerTarget,
   COMPOSITION_FILE,
   ENGINE_PRESET_ORDER,
   engineOfPreset,
@@ -27,7 +28,9 @@ import {
   SOURCE_PRESET_ID,
   STRIPPED_ROWS,
   stripPresetRows,
+  SUMMARIZER_ENTRY_ID,
   USER_PRESET_DIR,
+  type SummarizerTarget,
 } from '../src/preset.ts'
 import { applyManagedBlock, MANAGED_BLOCK_BEGIN, MANAGED_BLOCK_END } from '../src/patch-manager.ts'
 import { HOSTED_ENGINE_IDS } from '../src/settings.ts'
@@ -80,6 +83,8 @@ const STANDARD = `# The standard preset header.
   name: cordis:group
   group: true
   config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
 
@@ -95,8 +100,12 @@ describe('stripPresetRows', () => {
     expect(stripped).not.toContain('skill-filesystem')
     expect(stripped).not.toContain('tool-skill')
     expect(stripped).not.toContain('planning')
-    expect(stripped).not.toContain('compaction')
     expect(stripped).not.toContain('tool-goal')
+    // The compaction group is KEPT: it bounds the session log, which a hosted
+    // step replays in full — the engine's own per-step compaction cannot stand
+    // in for it.
+    expect(stripped).toContain('- id: compaction')
+    expect(stripped).toContain('- id: command-compact')
     // The dropped sections' headings went with them; the kept ones stayed.
     expect(stripped).not.toContain('── skills ──')
     expect(stripped).not.toContain('── plan mode ──')
@@ -145,6 +154,120 @@ describe('stripPresetRows', () => {
     const stripped = stripPresetRows(STANDARD, ['tool-bash'])
     expect(stripped).not.toContain('tool-bash')
     expect(stripped).toContain('skill-filesystem')
+  })
+})
+
+/** The dsh model every hosted session's compaction must summarize through. */
+const SUMMARIZER: SummarizerTarget = { provider: 'deepseek-official', model: 'deepseek-flash' }
+
+/** Lines of `text`, for positional assertions on the injected block. */
+function linesOf(text: string): string[] {
+  return text.split('\n')
+}
+
+/** The line index of an exact composition line, or -1. */
+function lineAt(text: string, line: string): number {
+  return linesOf(text).indexOf(line)
+}
+
+/** How many lines of `text` satisfy `match`. */
+function countLines(text: string, match: RegExp): number {
+  return linesOf(text).filter(line => match.test(line)).length
+}
+
+describe('applySummarizerTarget', () => {
+  it('appends a config block naming the summarizer to the compaction-basic entry', () => {
+    const lines = linesOf(applySummarizerTarget(STANDARD, SUMMARIZER))
+    const opener = lineAt(STANDARD, '    - id: compaction-basic')
+    expect(opener).toBeGreaterThan(-1)
+    // The pair lands inside the entry's own `config:`, one indentation level
+    // deeper than the entry's keys, and before the next sibling entry.
+    expect(lines[opener]).toBe('    - id: compaction-basic')
+    expect(lines[opener + 1]).toBe(`      name: '@deepseek-ai/dsh-compaction-basic'`)
+    expect(lines[opener + 2]).toBe('      config:')
+    expect(lines[opener + 3]).toBe(`        summarizationProvider: 'deepseek-official'`)
+    expect(lines[opener + 4]).toBe(`        summarizationModel: 'deepseek-flash'`)
+    expect(lines[opener + 5]).toBe('    - id: command-compact')
+  })
+
+  it('is a no-op without a target, and for a composition that lacks the entry', () => {
+    expect(applySummarizerTarget(STANDARD, undefined)).toBe(STANDARD)
+    expect(applySummarizerTarget('# nothing here\n', SUMMARIZER)).toBe('# nothing here\n')
+    // The custom id proves the entry is addressed by name, not by position:
+    // `persona` is top-level, so its config block is one level shallower.
+    expect(applySummarizerTarget(STANDARD, SUMMARIZER, 'persona')).toContain(
+      `- id: persona\n  name: '@deepseek-ai/dsh-persona'\n  config:\n`
+      + `    summarizationProvider: 'deepseek-official'\n    summarizationModel: 'deepseek-flash'\n`,
+    )
+    expect(applySummarizerTarget(STANDARD, SUMMARIZER, 'absent-row')).toBe(STANDARD)
+  })
+
+  it('merges into a config block the entry already owns instead of duplicating the key', () => {
+    const text = `- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    thresholdRatio: 0.8
+- id: command-compact
+  name: '@deepseek-ai/dsh-command-compact'
+`
+    const out = applySummarizerTarget(text, SUMMARIZER)
+    expect(countLines(out, /^\s*config:\s*$/)).toBe(1)
+    // The source's own key survived, and it is still ahead of the injected pair.
+    expect(lineAt(out, '    thresholdRatio: 0.8')).toBeLessThan(
+      lineAt(out, `    summarizationProvider: 'deepseek-official'`),
+    )
+    expect(out).toContain(`    summarizationModel: 'deepseek-flash'`)
+    // The sibling entry and its keys are untouched.
+    expect(out).toContain(`- id: command-compact\n  name: '@deepseek-ai/dsh-command-compact'`)
+  })
+
+  it('fills an empty config block without disturbing the sibling that follows', () => {
+    const text = `- id: compaction-basic\n  name: n\n  config:\n- id: command-compact\n  name: c\n`
+    expect(applySummarizerTarget(text, SUMMARIZER)).toBe(
+      `- id: compaction-basic\n  name: n\n  config:\n`
+      + `    summarizationProvider: 'deepseek-official'\n    summarizationModel: 'deepseek-flash'\n`
+      + `- id: command-compact\n  name: c\n`,
+    )
+  })
+
+  it('replaces a pair the source composition already ships rather than emitting a duplicate key', () => {
+    const text = `- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    summarizationProvider: 'stale-provider'
+    summarizationModel: 'stale-model'
+`
+    const out = applySummarizerTarget(text, SUMMARIZER)
+    expect(countLines(out, /summarizationProvider:/)).toBe(1)
+    expect(countLines(out, /summarizationModel:/)).toBe(1)
+    expect(out).not.toContain('stale-provider')
+    expect(out).not.toContain('stale-model')
+    expect(out).toContain(`    summarizationProvider: 'deepseek-official'`)
+  })
+
+  it('is idempotent over its own output', () => {
+    const once = applySummarizerTarget(STANDARD, SUMMARIZER)
+    expect(applySummarizerTarget(once, SUMMARIZER)).toBe(once)
+    const merged = `- id: compaction-basic\n  name: n\n`
+    expect(applySummarizerTarget(applySummarizerTarget(merged, SUMMARIZER), SUMMARIZER))
+      .toBe(applySummarizerTarget(merged, SUMMARIZER))
+  })
+
+  it('keeps the file’s trailing-newline shape', () => {
+    for (const source of ['- id: compaction-basic\n  name: n\n', '- id: compaction-basic\n  name: n']) {
+      const out = applySummarizerTarget(source, SUMMARIZER)
+      expect(out.endsWith('\n')).toBe(source.endsWith('\n'))
+    }
+  })
+
+  it('quotes a value that would otherwise break out of the scalar', () => {
+    const out = applySummarizerTarget(STANDARD, { provider: "it's: tricky", model: '# not-a-comment' })
+    expect(out).toContain(`        summarizationProvider: 'it''s: tricky'`)
+    expect(out).toContain(`        summarizationModel: '# not-a-comment'`)
+  })
+
+  it('names the entry id it targets', () => {
+    expect(SUMMARIZER_ENTRY_ID).toBe('compaction-basic')
   })
 })
 
@@ -255,6 +378,18 @@ describe('ensureEnginePresets', () => {
       for (const row of STRIPPED_ROWS) expect(composition).not.toContain(`- id: ${row}`)
       expect(composition).toContain('- id: persona')
       expect(composition).toContain('- id: tool-bash')
+    }
+  })
+
+  it('bakes the deployment’s summarizer into every authored copy', async () => {
+    const home = await tempDir()
+    await ensureEnginePresets(home, sourceOf(STANDARD), SUMMARIZER)
+    for (const engine of HOSTED_ENGINE_IDS) {
+      const { composition } = await presetOf(home, enginePresetId(engine))
+      // The directory carrier keeps the source composition's own indentation.
+      expect(composition).toContain('    - id: compaction-basic')
+      expect(composition).toContain(`        summarizationProvider: 'deepseek-official'`)
+      expect(composition).toContain(`        summarizationModel: 'deepseek-flash'`)
     }
   })
 
@@ -391,6 +526,24 @@ describe('renderPresetRows', () => {
       .toEqual([...HOSTED_PRESET_IDS])
   })
 
+  it('writes the deployment’s summarizer into every engine’s copy, at the entry’s own depth', () => {
+    const region = renderPresetRows(STANDARD, SUMMARIZER)
+    for (const engine of HOSTED_ENGINE_IDS) {
+      const row = rowOf(region, engine)
+      // The re-indent shifts the whole composition by ten columns: the entry
+      // lands at 14, its own keys and `config:` at 16, the injected pair at 18.
+      expect(row).toMatch(/\n {14}- id: compaction-basic\n/)
+      expect(row).toMatch(/\n {16}name: '@deepseek-ai\/dsh-compaction-basic'\n/)
+      expect(row).toMatch(/\n {16}config:\n/)
+      expect(row).toMatch(/\n {18}summarizationProvider: 'deepseek-official'\n/)
+      expect(row).toMatch(/\n {18}summarizationModel: 'deepseek-flash'\n/)
+    }
+  })
+
+  it('leaves the region byte-identical when no summarizer is named', () => {
+    expect(renderPresetRows(STANDARD)).toBe(renderPresetRows(STANDARD, undefined))
+  })
+
   it('declares each preset through the harness’s own row plugin, at one order past the shipped ones', () => {
     const region = renderPresetRows(STANDARD)
     expect([...region.matchAll(/^ +name: '@deepseek-ai\/dsh-agent-preset'$/gm)]).toHaveLength(HOSTED_ENGINE_IDS.length)
@@ -415,6 +568,19 @@ describe('renderPresetRows', () => {
     expect(row).toMatch(/\n {16}name: tool\n/)
     // Blank lines stay blank rather than becoming whitespace-only.
     expect(row.slice(row.indexOf('plugins:'))).not.toMatch(/[ \t]+\n/)
+  })
+
+  it('keeps the compaction group’s rows in the authored composition', () => {
+    // The preset a hosted session runs must carry the compaction group: the
+    // plugin's provider route declares the capacity it needs, and this group is
+    // what turns that into durable checkpoints that shrink the session log.
+    expect(STRIPPED_ROWS).not.toContain('compaction')
+    for (const engine of HOSTED_ENGINE_IDS) {
+      const row = rowOf(renderPresetRows(STANDARD), engine)
+      expect(row).toMatch(/\n {10}- id: compaction\n/)
+      expect(row).toMatch(/\n {12}name: cordis:group\n/)
+      expect(row).toMatch(/\n {14}- id: command-compact\n/)
+    }
   })
 
   it('carries the leading comments of the source composition as comments inside the list', () => {
@@ -489,6 +655,17 @@ describe('ensureEnginePresetRows', () => {
   async function patchPath(): Promise<string> {
     return join(await tempDir(), 'profiles', 'web', 'cordis.patch.yml')
   }
+
+  it('bakes the deployment’s summarizer into every authored row', async () => {
+    const path = await patchPath()
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD), SUMMARIZER)).toBe(true)
+    const text = await readFile(path, 'utf8')
+    expect(text).toBe(renderPresetRows(STANDARD, SUMMARIZER))
+    // One pair per engine, never more: a repeat run must not stack keys.
+    expect(countLines(text, /^ {18}summarizationProvider: 'deepseek-official'$/)).toBe(HOSTED_ENGINE_IDS.length)
+    expect(countLines(text, /^ {18}summarizationModel: 'deepseek-flash'$/)).toBe(HOSTED_ENGINE_IDS.length)
+    expect(await ensureEnginePresetRows(path, sourceOf(STANDARD), SUMMARIZER)).toBe(false)
+  })
 
   it('writes the region into a patch file that does not exist yet, creating its parent', async () => {
     const path = await patchPath()

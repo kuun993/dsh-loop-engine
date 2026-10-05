@@ -20,11 +20,12 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import {
   apply,
+  Config,
   resolvePatchPath,
+  resolveSummarizerTarget,
   syncManagedBlock,
   writePatchFile,
   writePatchFileSync,
-  type Config,
 } from '../src/index.ts'
 import {
   applyManagedBlock,
@@ -34,7 +35,7 @@ import {
   MANAGED_BLOCK_END,
 } from '../src/patch-manager.ts'
 import { HOSTED_ROUTE_LABEL, type LoopEngineId } from '../src/agent-preset-ids.ts'
-import { HostedEngineRouteAdapter } from '../src/provider-route.ts'
+import { DEFAULT_ENGINE_CONTEXT_WINDOW, HostedEngineRouteAdapter } from '../src/provider-route.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
 import {
   createLiveLoopConfig,
@@ -302,6 +303,63 @@ describe('resolvePatchPath', () => {
 
   it('treats an empty patchPath as absent', () => {
     expect(resolvePatchPath({ patchPath: '' })).toBe(join(resolveDshHome(), 'profiles', 'web', 'cordis.patch.yml'))
+  })
+})
+
+describe('summarizer configuration', () => {
+  it('resolves a fully set pair into the target the presets carry', () => {
+    expect(resolveSummarizerTarget({
+      summarizerProvider: 'deepseek-official',
+      summarizerModel: 'deepseek-flash',
+    } as Config))
+      .toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+  })
+
+  it('resolves to nothing when the deployment names neither', () => {
+    expect(resolveSummarizerTarget({} as Config)).toBeUndefined()
+  })
+
+  it('rejects a half-set pair, or an empty half, loudly', () => {
+    const broken: Array<Partial<Config>> = [
+      { summarizerProvider: 'deepseek-official' },
+      { summarizerModel: 'deepseek-flash' },
+      { summarizerProvider: '', summarizerModel: 'deepseek-flash' },
+      { summarizerProvider: 'deepseek-official', summarizerModel: '' },
+      { summarizerProvider: '', summarizerModel: '' },
+    ]
+    for (const config of broken) {
+      expect(() => resolveSummarizerTarget(config as Config)).toThrow('must be set together')
+    }
+  })
+
+  it('lets the composition schema carry the pair, and defaults the context window beside it', () => {
+    const composed = Config({
+      engine: 'in-process',
+      summarizerProvider: 'deepseek-official',
+      summarizerModel: 'deepseek-flash',
+    })
+    expect(composed.summarizerProvider).toBe('deepseek-official')
+    expect(composed.summarizerModel).toBe('deepseek-flash')
+    // The pair is permissive in the schema (its cross-field rule runs at apply
+    // time), so an absent pair composes too — and the sibling window knob still
+    // gets its documented default.
+    const bare = Config({ engine: 'in-process' })
+    expect(bare.summarizerProvider).toBeUndefined()
+    expect(bare.summarizerModel).toBeUndefined()
+    expect(bare.engineContextWindow).toBe(DEFAULT_ENGINE_CONTEXT_WINDOW)
+  })
+
+  it('fails the composition on a half-set pair before anything is written', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const { ctx } = await boot()
+    expect(() => apply(ctx, {
+      patchPath: path,
+      summarizerModel: 'deepseek-flash',
+      ...live.config,
+    })).toThrow('must be set together')
+    // The check runs before the managed block, so a bad profile leaves no file.
+    await expect(readFile(path, 'utf8')).rejects.toThrow()
   })
 })
 
@@ -634,6 +692,17 @@ const PRESET_FIXTURE = [
   '- id: tool-bash',
   `  name: '@deepseek-ai/dsh-tool-bash'`,
   '',
+  '# compaction',
+  '',
+  '- id: compaction',
+  '  name: cordis:group',
+  '  group: true',
+  '  config:',
+  '    - id: compaction-basic',
+  `      name: '@deepseek-ai/dsh-compaction-basic'`,
+  '    - id: command-compact',
+  `      name: '@deepseek-ai/dsh-command-compact'`,
+  '',
   '- id: delegation',
   '  name: cordis:group',
   '  group: true',
@@ -780,6 +849,40 @@ describe('apply engine presets', () => {
       .toEqual({ showInComposer: false, showEngineBadge: false })
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(rosterDefault(settings!)).toBe(enginePresetId('kimi'))
+  })
+
+  it('bakes the composed summarizer into the authored presets, on whichever mechanism runs', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const home = await tempDir()
+    vi.stubEnv('DSH_HOME', home)
+    const { ctx, settings } = await boot()
+    registerRosterNamespace(settings!)
+    ctx.provide('agentPresets', fakeRoster(settings))
+    await mountPlugin(ctx, {
+      patchPath: path,
+      summarizerProvider: 'deepseek-official',
+      summarizerModel: 'deepseek-flash',
+    })
+
+    await waitForEnginePresets(home, path)
+    if (LEGACY_HARNESS) {
+      const composition = await readFile(join(presetDir(home, enginePresetId('kimi')), COMPOSITION_FILE), 'utf8')
+      // The directory carrier keeps the source composition's own indentation.
+      expect(composition).toContain(`        summarizationProvider: 'deepseek-official'`)
+      expect(composition).toContain(`        summarizationModel: 'deepseek-flash'`)
+      return
+    }
+    const rows = presetRowsOf(await readFile(path, 'utf8'))
+    for (const preset of HOSTED_PRESET_IDS) {
+      const row = rows.get(preset)
+      expect(row).toBeDefined()
+      // Re-indented with the rest of the composition: the entry's own `config:`
+      // lands at 16, so the pair sits at 18 — one level deeper, exactly where
+      // compaction-basic reads its `summarizationProvider` / `summarizationModel`.
+      expect(row).toContain(`${' '.repeat(18)}summarizationProvider: 'deepseek-official'`)
+      expect(row).toContain(`${' '.repeat(18)}summarizationModel: 'deepseek-flash'`)
+    }
   })
 
   it('does not author the presets again when a later switch steers the roster', async () => {
@@ -1004,6 +1107,26 @@ describe('apply provider routes', () => {
 
     await fiber.dispose()
     expect(providerIds(ctx)).toEqual([])
+  })
+
+  it('declares the configured context window on the route, and the default when the knob is absent', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+
+    const configured = await boot({ [NS]: { engine: 'in-process' } })
+    const fiber = await mountPlugin(configured.ctx, { patchPath: path, engineContextWindow: 131072 })
+    // The window is what a hosted session's auto-compaction sizes its pressure
+    // threshold from; the route is the only place dsh can read one.
+    await expect((configured.ctx.get('llm') as LlmRuntime).resolveModelInfo(HOSTED_ROUTE_LABEL, 'default'))
+      .resolves.toMatchObject({ context: { contextWindow: 131072 } })
+    await fiber.dispose()
+
+    // A deployment that composes no window gets the documented default.
+    const unset = await boot({ [NS]: { engine: 'in-process' } })
+    const defaultFiber = await mountPlugin(unset.ctx, { patchPath: path })
+    await expect((unset.ctx.get('llm') as LlmRuntime).resolveModelInfo(HOSTED_ROUTE_LABEL, 'default'))
+      .resolves.toMatchObject({ context: { contextWindow: DEFAULT_ENGINE_CONTEXT_WINDOW } })
+    await defaultFiber.dispose()
   })
 
   it('warns and leaves a deployment-owned route alone when the label is already served', async () => {

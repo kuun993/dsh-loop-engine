@@ -38,10 +38,33 @@
  * @module dsh-loop-engine/provider-route
  */
 
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, ModelModality, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmProviderInfo,
+  LlmResolvedModelInfo,
+  ModelModality,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL, HOSTED_ROUTE_NAME } from './agent-preset-ids.ts'
 import type { HostedEngineId } from './settings.ts'
+
+/**
+ * Context window this plugin declares for the hosted route when a deployment
+ * pins none: 262144 tokens (256 Ki).
+ *
+ * The number exists because dsh's own auto-compaction sizes its pressure
+ * threshold from the routed model's declared capacity
+ * (`packages/compaction/compaction-basic/src/config.ts` `resolveCompactSpec` —
+ * `contextWindow * thresholdRatio`, ratio defaulting to `0.8`). A hosted engine
+ * reports no capacity at all: its model lives inside its own child process, so
+ * the placeholder route is the only place dsh can read one. 256 Ki is the round
+ * window the hosted CLIs in use expose; a deployment whose engine window is
+ * smaller, or whose engines differ, should set `engineContextWindow` to the
+ * smallest window in use (see `src/index.ts`).
+ */
+export const DEFAULT_ENGINE_CONTEXT_WINDOW = 262144
 
 /**
  * The input modalities this route's single entry declares: text AND image.
@@ -115,8 +138,35 @@ export function isHostedProviderRoute(provider: string): boolean {
  * `external`, and {@link stream} fails loud: a call reaching it means a real model
  * query was routed to an engine that owns its model natively — a wiring bug, not
  * a request to serve.
+ *
+ * It also DECLARES a context window for the route ({@link resolveModel}): the
+ * window is what dsh's auto-compaction measures its pressure threshold against,
+ * and a hosted engine reports no capacity of its own, so without one the hosted
+ * session never compacts.
  */
 export class HostedEngineRouteAdapter extends LlmAdapter {
+  /**
+   * Capacity this route declares, normalized at construction.
+   *
+   * A deployment knob rather than a constant because the engines' real windows
+   * differ; the adapter only guarantees the value the registry's validation
+   * accepts (a positive integer), so a non-positive or non-integer wire value
+   * cannot reach the compaction path as a nonsense window.
+   */
+  private readonly contextWindow: number
+
+  /**
+   * @param contextWindow - declared context capacity in tokens. A value that is
+   *   not a positive integer (absent included) falls back to
+   *   {@link DEFAULT_ENGINE_CONTEXT_WINDOW}.
+   */
+  constructor(contextWindow?: number) {
+    super()
+    this.contextWindow = contextWindow !== undefined && Number.isInteger(contextWindow) && contextWindow > 0
+      ? contextWindow
+      : DEFAULT_ENGINE_CONTEXT_WINDOW
+  }
+
   /**
    * Name the route's one entry.
    *
@@ -146,6 +196,10 @@ export class HostedEngineRouteAdapter extends LlmAdapter {
    * has to be something this plugin SAYS, not something a missing field happens
    * to allow — while a field this plugin omits, or the harness stops treating
    * as unknown, silently turns every hosted session image-blind.
+   *
+   * No capacity is declared here, because `LlmModelInfo` (the catalog shape this
+   * method returns) has no context field at all; the window rides
+   * {@link resolveModel}, the shape the harness asks about capacity through.
    * @returns the one entry this route advertises.
    */
   override listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -155,6 +209,43 @@ export class HostedEngineRouteAdapter extends LlmAdapter {
       name: HOSTED_DEFAULT_MODEL,
       inputModalities: HOSTED_MODEL_MODALITIES,
     }])
+  }
+
+  /**
+   * Resolve the route's one entry for the exact model label asked about, with
+   * the context window dsh needs to size auto-compaction.
+   *
+   * The capacity rides HERE rather than on {@link listModels}' entry because the
+   * two are different harness concepts: `LlmModelInfo` — what the catalog and
+   * the model menu read — has no capacity field, while `LlmResolvedModelInfo` —
+   * what `ctx.llm.resolveModelInfo` returns — carries the optional
+   * `context: { contextWindow }`. dsh's compaction pressure path calls the
+   * latter for the session's latest routed model
+   * (`packages/compaction/compaction-basic/src/index.ts` `compactIfNeeded`) and
+   * throws `TargetPressureConfigError` — swallowed into a one-time warning, so
+   * compaction simply never fires — when it comes back without a window. A
+   * hosted session's log therefore only stays bounded because this method
+   * answers with one.
+   *
+   * `provider` and `id` are echoed exactly as asked: `normalizeModelInfo`
+   * (`packages/llm/llm/src/index.ts`) rejects a result whose identity does not
+   * match the query, and the model label a hosted session logged is the engine's
+   * own word (`default`, or whatever a deployment pinned in `config.model`), not
+   * always {@link HOSTED_DEFAULT_MODEL}. `name` is the same string, matching the
+   * advertised entry, since `LlmModelInfo.name` is rendered verbatim.
+   * @param provider - the route this adapter is registered for.
+   * @param model - the exact model label the session's `request/header` logged.
+   * @param _signal - unused; resolution is synchronous.
+   * @returns the route's entry with its declared context window.
+   */
+  override resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      inputModalities: HOSTED_MODEL_MODALITIES,
+      context: { contextWindow: this.contextWindow },
+    })
   }
 
   stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {

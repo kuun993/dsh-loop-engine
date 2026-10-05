@@ -7,11 +7,22 @@
  * and skill surface: the plugin bridges the engine's own slash commands and
  * skill providers into the session (see `engine-surface.ts`), and the
  * dsh-native equivalents would only duplicate or mislead — dsh `/plan` is
- * advisory prompt text an external engine never assembles, dsh `/compact`
- * cannot shrink a context the engine's child process holds, and dsh skills
+ * advisory prompt text an external engine never assembles, and dsh skills
  * would sit next to the engine's own catalog. Those rows live inside the
  * agent-preset composition, which a profile patch cannot otherwise reach, so
- * the plugin authors a stripped copy of that composition per engine.
+ * the plugin authors a stripped copy of that composition per engine. The
+ * compaction group is deliberately NOT stripped: it is what keeps the SESSION
+ * LOG bounded, and a hosted engine's own per-turn compaction cannot stand in
+ * for it (see {@link STRIPPED_ROWS}).
+ *
+ * The copy is also where the deployment's summarization model is written
+ * ({@link applySummarizerTarget}): compaction summarizes through an ordinary
+ * llm call, and a hosted session's routed model is this plugin's placeholder
+ * route, so without a real dsh model named at
+ * `compaction-basic.config.summarizationProvider` / `summarizationModel` the
+ * group can never shrink anything. A profile patch cannot reach that nested
+ * row (a row's `config` is replaced whole), which leaves the composition the
+ * plugin authors as the one carrier.
  *
  * WHICH mechanism carries that copy is the running harness generation's
  * business, and the two share everything but the carrier:
@@ -87,11 +98,24 @@ export const HOSTED_PRESET_IDS: readonly string[] =
  *   the human command is registered; disabling the host-plane row from the
  *   profile patch does not reach it (`standard` carries its own row);
  * - `planning`: dsh plan mode — its only model-visible effect is a system
- *   prompt section an external engine never assembles;
- * - `compaction`: dsh `/compact` and auto-compaction — a hosted engine owns
- *   its context and its own `/compact` (Claude, Kimi).
+ *   prompt section an external engine never assembles.
+ *
+ * The `compaction` group is KEPT, and must stay kept: it is what bounds the
+ * SESSION LOG, which every hosted step replays in full as its engine prompt
+ * (`src/driver-core/prompt.ts`). A hosted engine's own compaction cannot stand
+ * in for it — the engine's context is thrown away, because the driver opens a
+ * fresh engine session per step (`session/new` for Kimi, a new thread / query
+ * for the others), so its shrink lasts one step while the log keeps growing and
+ * each later step replays everything again. Measured on a real 33-turn Kimi
+ * session: ~3.3 MB replayed per step (tool results 2.0 MB + tool-call lines
+ * 1.19 MB), which the Kimi CLI auto-compacted from ~918k tokens down to ~47k at
+ * the start of every turn — and discarded. Keeping this group is what lets dsh
+ * write its own durable checkpoints instead. The route needs a declared
+ * capacity for that to fire: see `DEFAULT_ENGINE_CONTEXT_WINDOW`
+ * (`src/provider-route.ts`) and the `engineContextWindow` Config field
+ * (`src/index.ts`).
  */
-export const STRIPPED_ROWS = ['skill-filesystem', 'tool-skill', 'tool-goal', 'command-goal', 'planning', 'compaction'] as const
+export const STRIPPED_ROWS = ['skill-filesystem', 'tool-skill', 'tool-goal', 'command-goal', 'planning'] as const
 
 /** Header comment marking the managed compositions; also makes rewrites idempotent. */
 const MANAGED_HEADER = `# Managed by dsh-loop-engine: the deployment's "${SOURCE_PRESET_ID}" preset minus
@@ -122,6 +146,32 @@ export const PRESET_ROWS_END = '# -- /dsh-loop-engine presets --'
  * order they are listed in (selection order) is readable.
  */
 export const ENGINE_PRESET_ORDER = 100
+
+/**
+ * Entry id of the harness plugin whose `config` names the dsh model a hosted
+ * session's compaction summarizes through
+ * (`@deepseek-ai/dsh-compaction-basic`, a child of the `compaction` group).
+ * See {@link applySummarizerTarget} for why the plugin writes it.
+ */
+export const SUMMARIZER_ENTRY_ID = 'compaction-basic'
+
+/**
+ * The dsh model a hosted session's compaction summarizes through: a real dsh
+ * provider route and an exact model id on it, never this plugin's placeholder
+ * route.
+ *
+ * The pair exists because compaction summarizes by making an ordinary llm call
+ * (`packages/compaction/compaction-basic/src/summarizer.ts` `resolveTarget`),
+ * and a hosted session's routed model is this plugin's own placeholder
+ * (`external/default`), whose `stream()` fails loud
+ * (`src/provider-route.ts`). See {@link applySummarizerTarget}.
+ */
+export interface SummarizerTarget {
+  /** Dsh provider route the summarization request is sent to. */
+  readonly provider: string
+  /** Exact model id on that route. */
+  readonly model: string
+}
 
 /**
  * Indentation that puts an entry list directly under `config.plugins:` of an
@@ -161,7 +211,11 @@ function pluginListLines(composition: string): string[] {
  * @param composition - the source `standard` composition.
  * @returns the row's text.
  */
-function renderEnginePresetRow(engine: HostedEngineId, composition: string): string {
+function renderEnginePresetRow(
+  engine: HostedEngineId,
+  composition: string,
+  target: SummarizerTarget | undefined,
+): string {
   const id = enginePresetId(engine)
   return [
     '- insert:',
@@ -170,7 +224,7 @@ function renderEnginePresetRow(engine: HostedEngineId, composition: string): str
     '      config:',
     `        id: ${id}`,
     `        order: ${ENGINE_PRESET_ORDER}`,
-    ...pluginListLines(stripPresetRows(composition)),
+    ...pluginListLines(applySummarizerTarget(stripPresetRows(composition), target)),
   ].join('\n')
 }
 
@@ -178,16 +232,18 @@ function renderEnginePresetRow(engine: HostedEngineId, composition: string): str
  * The managed preset-rows region: one preset row per hosted engine, bracketed
  * by the markers that make it locatable and rewritable.
  * @param composition - the source `standard` composition.
+ * @param target - the summarization model to write into every copy, or
+ *   undefined to leave the copies exactly as the strip left them.
  * @returns the region's text, ending in a newline.
  */
-export function renderPresetRows(composition: string): string {
+export function renderPresetRows(composition: string, target?: SummarizerTarget): string {
   return [
     PRESET_ROWS_BEGIN,
     '# One `@deepseek-ai/dsh-agent-preset` declaration per hosted engine: the',
     `# deployment's "${SOURCE_PRESET_ID}" preset minus the dsh-native command/skill rows a`,
     `# hosted loop engine replaces. Regenerated from "${SOURCE_PRESET_ID}" on boot — hand`,
     '# edits are overwritten. The preset id names the engine a session runs.',
-    ...HOSTED_ENGINE_IDS.map(engine => renderEnginePresetRow(engine, composition)),
+    ...HOSTED_ENGINE_IDS.map(engine => renderEnginePresetRow(engine, composition, target)),
     `${PRESET_ROWS_END}\n`,
   ].join('\n')
 }
@@ -223,10 +279,16 @@ function presetRowsSpan(
  * the harness rejects, and the profile would stop booting.
  * @param text - current patch-file text.
  * @param composition - the source `standard` composition.
+ * @param target - the summarization model to write into every copy, or
+ *   undefined to leave the copies exactly as the strip left them.
  * @returns the rewritten patch-file text.
  */
-export function applyEnginePresetRows(text: string, composition: string): string {
-  const region = renderPresetRows(composition)
+export function applyEnginePresetRows(
+  text: string,
+  composition: string,
+  target?: SummarizerTarget,
+): string {
+  const region = renderPresetRows(composition, target)
   const span = presetRowsSpan(text)
   if (!span.present) {
     // An empty or absent layer gains the region alone, with no leading filler.
@@ -319,6 +381,133 @@ export function stripPresetRows(text: string, ids: readonly string[] = STRIPPED_
   return out.join('\n')
 }
 
+/** The id of the entry an opener line starts, at whatever indentation. */
+function anyEntryId(line: string): string | undefined {
+  return /^\s*- id:\s*(\S+)\s*$/.exec(line)?.[1]
+}
+
+/** Count of a line's leading spaces (a composition file is space-indented). */
+function leadingSpaces(line: string): number {
+  return /^ */.exec(line)![0].length
+}
+
+/** Whether a line carries no entry content (blank, or a comment-only line). */
+function isFiller(line: string): boolean {
+  return line.trim() === '' || line.trimStart().startsWith('#')
+}
+
+/** Index of the last content line in `[from, to)`, or -1 when that range is filler only. */
+function lastContentLine(lines: readonly string[], from: number, to: number): number {
+  for (let index = to - 1; index >= from; index -= 1) {
+    if (!isFiller(lines[index]!)) return index
+  }
+  return -1
+}
+
+/**
+ * End of the block that starts at `from`: the first content line indented no
+ * deeper than `indent` (a sibling of what `from` belongs to), or `to`.
+ * @param lines - the whole text's lines.
+ * @param from - first line of the block's body.
+ * @param to - upper bound (exclusive).
+ * @param indent - indentation the block owns.
+ * @returns the exclusive end of the block.
+ */
+function blockEnd(lines: readonly string[], from: number, to: number, indent: number): number {
+  for (let index = from; index < to; index += 1) {
+    const line = lines[index]!
+    if (isFiller(line)) continue
+    if (leadingSpaces(line) <= indent) return index
+  }
+  return to
+}
+
+/** Index of the `config:` key line an entry owns in `[from, to)`, or -1. */
+function configLine(lines: readonly string[], from: number, to: number, indent: number): number {
+  for (let index = from; index < to; index += 1) {
+    const line = lines[index]!
+    if (leadingSpaces(line) === indent && line.trim() === 'config:') return index
+  }
+  return -1
+}
+
+/** Whether a line is one of the two keys this transform writes. */
+function isSummarizerKey(line: string): boolean {
+  return /^(summarizationProvider|summarizationModel)\s*:/.test(line.trimStart())
+}
+
+/** One injected value as a single-quoted YAML scalar (always a valid plain string). */
+function yamlScalar(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/**
+ * Name the dsh model a hosted session's compaction summarizes through, inside
+ * the composition this plugin authors.
+ *
+ * Compaction summarizes by making an ordinary llm call, and it resolves that
+ * call's target from `config.summarizationProvider` / `config.summarizationModel`
+ * when both are set — otherwise from the agent's routed model
+ * (`packages/compaction/compaction-basic/src/summarizer.ts` `resolveTarget`).
+ * For a hosted session the routed model IS this plugin's placeholder route
+ * (`external/default`), whose `stream()` fails loud by design, so without this
+ * pair every compaction attempt there dies with `HOSTED_ENGINE_ROUTE` — caught
+ * by the `agent/pre-step` listener as a warning, so the turn continues but the
+ * session log never shrinks.
+ *
+ * The plugin writes the pair HERE because there is nowhere else to write it: a
+ * profile-patch row replaces the whole `config` of the row it names, and the
+ * patch index only descends into a `group: true` row's `config` array — a
+ * preset's entries live in `config.plugins`, a plain field, so naming the pair
+ * from the profile means re-declaring the entire `standard` composition. The
+ * composition the plugin authors itself is therefore the one place a
+ * deployment-side value can reach a nested row.
+ *
+ * The two keys land in `entryId`'s own `config:` mapping: an existing `config:`
+ * block is merged into (never duplicated, and without emitting a key the entry
+ * already carries), and a missing one is appended after the entry's last key at
+ * the entry's own indentation. Text without the entry, and any call with an
+ * undefined target, comes back byte for byte unchanged.
+ * @param text - the composition text (typically the stripped `standard`).
+ * @param target - the summarization model to write, or undefined to do nothing.
+ * @param entryId - id of the entry whose `config` receives the pair.
+ * @returns the composition text carrying the pair under `entryId`.
+ */
+export function applySummarizerTarget(
+  text: string,
+  target: SummarizerTarget | undefined,
+  entryId: string = SUMMARIZER_ENTRY_ID,
+): string {
+  if (target === undefined) return text
+  const lines = text.split('\n')
+  const opener = lines.findIndex(line => anyEntryId(line) === entryId)
+  if (opener === -1) return text
+  const keyIndent = leadingSpaces(lines[opener]!) + 2
+  const entryEnd = blockEnd(lines, opener + 1, lines.length, leadingSpaces(lines[opener]!))
+  const keys = [
+    `${' '.repeat(keyIndent + 2)}summarizationProvider: ${yamlScalar(target.provider)}`,
+    `${' '.repeat(keyIndent + 2)}summarizationModel: ${yamlScalar(target.model)}`,
+  ]
+  const existing = configLine(lines, opener + 1, entryEnd, keyIndent)
+  if (existing === -1) {
+    // No `config:` yet: append the block after the entry's last own key, which
+    // keeps any blank/comment run that heads the next entry where it is.
+    const last = lastContentLine(lines, opener, entryEnd)
+    lines.splice(last + 1, 0, `${' '.repeat(keyIndent)}config:`, ...keys)
+    return lines.join('\n')
+  }
+  // Merge into the mapping the entry already owns. Same-named keys are dropped
+  // first so the transform stays idempotent and a source that ships the pair
+  // cannot produce a duplicate key.
+  const bodyStart = existing + 1
+  const bodyLimit = blockEnd(lines, bodyStart, entryEnd, keyIndent)
+  const lastBody = lastContentLine(lines, bodyStart, bodyLimit)
+  const bodyEnd = lastBody === -1 ? bodyStart : lastBody + 1
+  const kept = lines.slice(bodyStart, bodyEnd).filter(line => !isSummarizerKey(line))
+  lines.splice(bodyStart, bodyEnd - bodyStart, ...kept, ...keys)
+  return lines.join('\n')
+}
+
 /** Write `text` to `path` atomically (same-directory temp + rename) when it differs. */
 async function writeIfDifferent(path: string, text: string): Promise<boolean> {
   try {
@@ -363,12 +552,18 @@ async function readComposition(source: PresetCompositionSource, id: string): Pro
  * untouched, so no standing mount sees a spurious file-stamp change.
  * @param dshHome - the resolved harness home.
  * @param source - the roster's composition reader.
+ * @param target - the summarization model to write into every copy, or
+ *   undefined to leave the copies exactly as the strip left them.
  * @returns whether any file was written.
  * @throws when the source preset cannot be read or the writes fail.
  */
-export async function ensureEnginePresets(dshHome: string, source: PresetCompositionSource): Promise<boolean> {
+export async function ensureEnginePresets(
+  dshHome: string,
+  source: PresetCompositionSource,
+  target?: SummarizerTarget,
+): Promise<boolean> {
   const composition = await readComposition(source, SOURCE_PRESET_ID)
-  const stripped = `${MANAGED_HEADER}\n${stripPresetRows(composition)}`
+  const stripped = `${MANAGED_HEADER}\n${applySummarizerTarget(stripPresetRows(composition), target)}`
   let changed = false
   for (const engine of HOSTED_ENGINE_IDS) {
     const dir = join(dshHome, USER_PRESET_DIR, enginePresetId(engine))
@@ -407,14 +602,17 @@ async function readTextOrEmpty(path: string): Promise<string> {
  * that changes nothing does not touch the file's stamp.
  * @param patchPath - absolute path of the profile's patch file.
  * @param source - the roster's composition reader.
+ * @param target - the summarization model to write into every copy, or
+ *   undefined to leave the copies exactly as the strip left them.
  * @returns whether the patch file was written.
  * @throws when the source preset cannot be read or the write fails.
  */
 export async function ensureEnginePresetRows(
   patchPath: string,
   source: PresetCompositionSource,
+  target?: SummarizerTarget,
 ): Promise<boolean> {
   const composition = await readComposition(source, SOURCE_PRESET_ID)
   const current = await readTextOrEmpty(patchPath)
-  return writeIfDifferent(patchPath, applyEnginePresetRows(current, composition))
+  return writeIfDifferent(patchPath, applyEnginePresetRows(current, composition, target))
 }

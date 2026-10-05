@@ -21,16 +21,16 @@
 
 > **`rcN` 的读法**：**核心版本**（`0.2.0`）对齐的是 harness 的**线**，不是 harness 的某个 `rc`——并集范围 `>=0.2.0-rc.1 <0.2.1-0` 本来就覆盖整条线，所以 `0.2.0-rc1`、`0.2.0-rc2`… 全都服务 `0.2.0-rc.1` 与 `0.2.0-rc.2`。**`rcN` 是本插件对这条线的第 N 次发布号**，与 harness 自己的 `rc.N`（如 `0.2.0-rc.2`）**没有编号对应关系**：它们撞名只是历史写法，别把它读成"这个插件只对 harness `rc2` 有效"。
 
-**支持一条线 = 一份隔离依赖集 + 一条 vitest 配置**（`§4.4`）：本仓 devDependencies 跟最新线（0.2.0），另外两条线各占一个 `.compat-0xx/`。加一代的成本主要在这里。
+**支持一条线 = 一份隔离依赖集 + 一条 vitest 配置**（`§4.4`）：本仓 devDependencies 跟最新线（0.2.0），另外两条线各占一个 `.compat/0xx/`。加一代的成本主要在这里。
 
 **已逐个核对过的 harness 小版本**（"支持"= 跑过 `typecheck` + 全部线的测试，**且启动过一次 `dsh web` 看启动日志**）：
 
 | harness | 状态 | 依据 / 未决项 |
 |---|---|---|
-| `0.1.5-rc.1` … `0.1.5-rc.3` | 支持（单代） | `.compat-015/` 兼容作业；0.1.5 上托管引擎的**老会话恢复**仍会撞 `$.prefix`（见 §9） |
-| `0.1.7-rc.1` | 支持 | `.compat-017/` 兼容作业；启动日志无插件报错 |
+| `0.1.5-rc.1` … `0.1.5-rc.3` | 支持（单代） | `.compat/015/` 兼容作业；0.1.5 上托管引擎的**老会话恢复**仍会撞 `$.prefix`（见 §9） |
+| `0.1.7-rc.1` | 支持 | `.compat/017/` 兼容作业；启动日志无插件报错 |
 | `0.1.7-rc.2` | 支持 | 同上。曾有「preset 载体写错代际」的缺陷（见下面那段），已修 |
-| `0.2.0-rc.1` / `0.2.0-rc.2` | 支持（当前工作区所对） | 本仓 devDependencies + `.compat-020/` 兼容作业；启动日志无插件报错。**这一代唯一的形状漂移是 turn-status 行**（见 §4.3 与 §5），其余节点半差异都是增量 |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | 支持（当前工作区所对） | 本仓 devDependencies + `.compat/020/` 兼容作业；启动日志无插件报错。**这一代唯一的形状漂移是 turn-status 行**（见 §4.3 与 §5），其余节点半差异都是增量 |
 
 > **`0.1.7-rc.2` 上修掉的缺陷：preset 的载体写错了代际（2026-09-25 定位）**。插件把四个托管 preset 写成
 > **目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`——那是 **0.1.5 的
@@ -133,10 +133,10 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | `tests/helpers/harness-generation.ts` | 测试侧代际探测 + `toolResultView()` / `toolResultRole()`，把两代的 tool-result 读成**同一份事实**，让同一份 spec 两代都过 |
 | `tests/helpers/fake-settings.ts` | 假 settings 服务同时实现两代接口（`installSection` 与 `configure`/`mutate`/`describe`），按代际把"提交默认引擎"写进正确通道 |
 | `tests/helpers/fake-dom.ts` | node 里能跑 turn-status 反射的最小 DOM（`querySelector(All)`、元素属性、以及**手工投递记录**的假 `MutationObserver`——真的那个什么时候触发由浏览器定，逐行标记就没法测）。选择器只认 `tag[attr]` 与裸 `[attr]` 两种形式（后者给 0.2.0 的 `[data-chat-running]`），查不到时像真 DOM 一样回 `null` |
-| `.compat-015/` | **隔离的 0.1.5 依赖集**（`package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml`；`node_modules` 不进仓库）。只装 0.1.5 那一套，与本仓自己的 `node_modules` 互不干扰 |
-| `.compat-017/` | 同上，装 **0.1.7 线**（`0.1.7-rc.2`）那一套 |
-| `.compat-020/` | 同上，装 **0.2.0 线**（`0.2.0-rc.2`）那一套 |
-| `vitest.config.compat0NN.ts` | 把每个 `@deepseek-ai/*` 别名到 `.compat-0NN/node_modules/@deepseek-ai/`，跑**同一批 spec**（**不跑覆盖率**，是功能性验证）：`npx vitest run --config vitest.config.compat017.ts` 等。只别名该集合里**存在**的包，所以嵌套传递依赖仍走 pnpm 自己的布局 |
+| `.compat/015/` | **隔离的 0.1.5 依赖集**（`package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml`；`node_modules` 不进仓库）。只装 0.1.5 那一套，与本仓自己的 `node_modules` 互不干扰 |
+| `.compat/017/` | 同上，装 **0.1.7 线**（`0.1.7-rc.2`）那一套 |
+| `.compat/020/` | 同上，装 **0.2.0 线**（`0.2.0-rc.2`）那一套 |
+| `vitest.config.compat0NN.ts` | 把每个 `@deepseek-ai/*` 别名到 `.compat/0NN/node_modules/@deepseek-ai/`，跑**同一批 spec**（**不跑覆盖率**，是功能性验证）：`npx vitest run --config vitest.config.compat017.ts` 等。只别名该集合里**存在**的包，所以嵌套传递依赖仍走 pnpm 自己的布局 |
 | `package.json` `peerDependencies` | 联合范围 `">=0.1.5-rc.1 <0.1.6-0 \|\| >=0.1.7-rc.1 <0.1.8-0 \|\| >=0.2.0-rc.1 <0.2.1-0"`；`@deepseek-ai/cordis` 放宽到 `^4.0.1`（`Volatile` 只在**构建期**用）；`schemastery` 钉 `3.18.4` |
 | `pnpm-workspace.yaml` `minimumReleaseAgeExclude` | pnpm "最小发布年龄"供应链护栏的豁免名单。本仓库**没有开启** `minimumReleaseAge`（`pnpm config get minimumReleaseAge` = `undefined`），所以这项目前是前瞻性的；但 `pnpm install` 会**自动**把刚装上的版本追加进去，因此每次提版后这个文件都会自己变长——跟着提交即可，不要手删。 |
 | `pnpm-workspace.yaml` 的 profile shim 版本 | 源码启动的 harness 用 `file:` shim 指回源码（`docs/source-checkout.md`），**每个 shim 声明的 `version` 必须落在上面的并集范围内**——写成占位值会让 pnpm 再装一份 harness 包，于是同一个包出现两份实例。换线时跟着改这里 |
@@ -196,7 +196,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
    落在清单外的改动（`client/ui-schedule` 之类）不用看。**这只是"要不要动代码"的第一道筛子**；最终必须**真启动一次 `dsh web` 并读启动日志**（§1 的记录就是这么来的——rc.2 正是过了这道筛子却在启动日志里报错）。
 
    **跨 minor（如 `0.1.7` → `0.1.8`）**才需要走完整流程：不要凭 CHANGELOG 猜，直接对新 checkout 的 `packages/**/lib/types/**/*.d.ts`（或 `src/`）做结构化 diff。重点仍是 §5 表里那几类：服务类/方法、事件名、codec/typert 形状、`SessionEventMap`、插槽 props（`SessionStandardProps`）、preset roster、CSS Modules 命名。
-2. **先跑一次兼容作业**，让差异自己冒出来：把新 harness 装进一个新的隔离依赖集（照 `.compat-020/` 复制一份 `.compat-030/`），`vitest.config` 别名过去，跑同一批 spec。**这一步是探针，比读代码快**。跨 minor 的这一步本身就够强：0.1.7 → 0.2.0 时 1260 条 spec 一次全绿，差异只剩浏览器半那一处。
+2. **先跑一次兼容作业**，让差异自己冒出来：把新 harness 装进一个新的隔离依赖集（照 `.compat/020/` 复制一份 `.compat/030/`），`vitest.config` 别名过去，跑同一批 spec。**这一步是探针，比读代码快**。跨 minor 的这一步本身就够强：0.1.7 → 0.2.0 时 1260 条 spec 一次全绿，差异只剩浏览器半那一处。
 3. **逐个改**，按 §3 的优先级选手法：能用 B 就不用 A；纯数据用 C；匹配物用 D。**不要**把 `LEGACY_HARNESS` 从 bool 改成枚举——那会让每次升级都动到所有分支。要么再加一个独立的能力探测（如 `HAS_XXX`），要么优先改写成 B。**跨 minor 的实测顺序**：先读"节点半差异清单"（服务/事件/codec/SessionEventMap），再用兼容作业探针；两代都绿之后**单独**核对浏览器半——它不跑在覆盖率作业里，兼容作业也照不到（0.2.0 的 turn-status 行就是这么发现的：spec 用的假 DOM 还画着旧标记，真机才暴露）。
 4. **补 `v8 ignore` 与兼容用例**：新代的专属分支在覆盖率作业（跑最新代）里会被标 `v8 ignore`，注释里必须写明"由哪套 compat 作业接管"。
 5. **所有线的命令都跑绿**：
@@ -230,7 +230,7 @@ grep -n "dsh-" package.json
 grep -rn "minimumReleaseAgeExclude" -A3 pnpm-workspace.yaml | head
 
 # 5) 兼容作业
-ls .compat-0*/ && cat vitest.config.compat0*.ts
+ls .compat/0*/ && cat vitest.config.compat0*.ts
 ```
 
 > 自检：`1)` 的输出若多出 `src/compat.ts` 与 `tests/helpers/harness-generation.ts` 两处定义，其余应全部落在 §4.1 的 6 处落点（5 个文件）里。数量对不上，说明有新的分叉没记进本篇。
@@ -251,26 +251,35 @@ stored session "<id>" is corrupt: stored log is corrupt:
 SessionFormatError: tool/call <id> does not match one advertised tool call
 ```
 
-（同族还有 `tool/result <id> has no advertised tool lifecycle`、`system/message requires a protected first surface head`、`step/end leaves unresolved tool call`。）第一条来自 **V3→V4 迁移**（只影响 `session.v3.jsonl.zstd`），第二条来自 **V4 加载路径**（影响 `session.v4.jsonl.zstd`）——两代产物、两条报错路径，工具都覆盖。
+```
+stored session "<id>" is corrupt: SessionFormatError: step/end does not match an open turn and step
+```
 
-**成因**：托管引擎的会话是由**插件的驱动**写 durable 日志的，历史上有两族缺陷：
+（同族还有 `tool/result <id> has no advertised tool lifecycle`、`system/message requires a protected first surface head`、`step/end leaves unresolved tool call`、`turn/start does not open the expected turn`、`step/start does not match the open turn and next step`、`turn/end does not match the open turn with no open step`。）第一条来自 **V3→V4 迁移**（只影响 `session.v3.jsonl.zstd`），第二条来自 **V4 加载路径**（影响 `session.v4.jsonl.zstd`），第三条来自 **V4 关系校验**——V4 加载路径与 V3→V4 迁移的产物校验走的是**同一份**规则，所以两代产物都会撞。三条各是一条报错路径，工具都覆盖。
+
+**成因**：托管引擎的会话是由**插件的驱动**写 durable 日志的，历史上有三族缺陷：
 
 - **结构族**（2026-09-19 之前的驱动构建，`71ccdea` / `c293e25` / `5de4b91` / `1c94078` 这几个修复之前）：写出的 transcript **v3 读得下去、v4 的生命周期规则不接受**。v4 的规则在 `packages/session/session-format-v3-to-v4/src/relationships.ts`：一个 `tool/call` 必须**先**被某条 `assistant/message` 的 `tool-call` 内容块广告过（`id` 相同，且 `name`/`arguments` 与 `tool/call` 的数据一致），`tool/result` 同理。当前构建已按这个顺序写（`src/engine-kimi/agent.ts` 的 `flushSegment` → `flushAssistant`）。
 - **投影族**（`005ab3a` 之前的驱动构建）：广告块与 `tool/call` **都在**，但内容不一致——驱动把引擎的**原始**调用名写进广告块（`Bash`、`Read`），而 `tool/call` 事件写的是**投影后的 dsh 拼写**（`bash`、`read`）；`arguments` 也可能不一致（原始 `path` vs 投影 `file_path`）。v4 报 `tool/call <id> does not match one advertised tool call`。**方向是已裁决的**：以 `tool/call` 事件为准，改写广告块——事件里的 dsh 投影拼写才是 Web 工具行、dsh 工具词表和后续 in-process 重放所依赖的，广告块才是**欠投影**的一侧。所以工具**只改块的 `name`/`arguments`，绝不反向、绝不动事件**。
+- **框架族**（turn/step 框写错）：托管驱动在**中止（aborted）或排队消息（queued message）边界**把回合写早了——它写了 `turn/end` 却继续往下步进（于是出现重复的 `step/end`、在已关闭回合里的 `step/start`），然后在**上一步还没收尾**的情况下开了下一轮 `turn/start`。判据同样在 `relationships.ts`：`requireStep`（`relationships.ts:85`，报错文案在 `:87`）要求带 `(turn, step)` 的事件必须等于当前打开的步，`step/end` 走的就是它（`:292`）；`turn/start` 要求此刻没有打开的回合、且回合号正好是下一个（`:276`）；`step/start` 要求有打开的回合、没有打开的步、步号正好是下一个（`:288`）；`turn/end` 要求有打开的回合且没有打开的步（`:282`）。一条真实日志里有一处典型的 `seq` 序列：`step/end {28,37}`（合法）→ `turn/end {28, reason:aborted/user}`（写早）→ `step/end {28,37}`（重复，第一处不合规）→ `step/start {28,38}`（回合已关）→ …steps 38..41… → `agent/inbox/spliced`（排队的那条消息）→ `turn/start {29}`（而 28.41 还开着）。**方向同样是已裁决的**：回合边界以驱动**实际步进的范围**为准——turn 28 覆盖 step 1..41、只关一次、且正好关在 `turn/start 29` 之前。
 
 **工具**：`scripts/repair-session-logs.mjs`（仓库根下，旧名 `repair-v3-tool-calls.mjs`）。它不参与运行时、不发布，纯修复路径只用 Node 标准库，接受 `session.v3.jsonl.zstd` **和** `session.v4.jsonl.zstd`：
 
 ```sh
-node scripts/repair-session-logs.mjs --check          # 只报告（扫 $DSH_SESSIONS_ROOT 或 ~/.dsh/sessions，按代际分类统计两族）
+node scripts/repair-session-logs.mjs --check          # 只报告（扫 $DSH_SESSIONS_ROOT 或 ~/.dsh/sessions，按代际分类统计三族）
 node scripts/repair-session-logs.mjs <file...>        # 原地修复（先写 <file>.bak，与代际无关）
 node --import tsx/esm scripts/repair-session-logs.mjs --verify <file...>   # 修完再用 harness 真oracle验证
 ```
 
 `--verify` 会调兄弟仓 `deepseek-harness` 里**真实的** oracle 跑一遍结果与备份（这是唯一需要 harness checkout 的路径；默认 `../deepseek-harness`，可用 `--harness <dir>` 覆盖），**按代际选 oracle**：V3 走真实的 v3→v4 迁移 + V4 关系校验，V4 直接走加载路径最后那道 `assertReleasedV4Relationships`。修不动就落空：不改动时文件字节不变，写入走同目录临时文件 + rename；只有**被改动的**文件在 oracle 下失败才会以非零退出（本来就坏、工具没动的文件如实打印 verdict，但不判失败）。
 
-它修的是**两族**缺陷。结构族（1–5）不止广告缺失：广告迟到（消息排在它自己的 `tool/call` 之后）、`tool/result` 重复写入、结果落在错误的 step（v4 在 `step/end` 清空该 step 的开放调用）、无结果的未完成调用（用 harness 自己的 `@deepseek-ai/dsh-session/repair` 收尾：`TOOL_OUTCOME_UNKNOWN` / `TOOL_NOT_STARTED`）、system 头错位（补一条空 `system/message` 头，与运行时 `src/driver-core/system-head.ts` 同一手法）。结构修完后 `seq` 重排密集、payload 里对 seq 的引用一并重映射。投影族（6）只改块 payload 字节，不增删挪事件，因此**不需要** seq 重排——这一点对两代产物都做过实测（投影修复后事件的 `seq` 数组逐位不变、仍密集），而非假设。
+它修的是**三族**缺陷。结构族（1–5）不止广告缺失：广告迟到（消息排在它自己的 `tool/call` 之后）、`tool/result` 重复写入、结果落在错误的 step（v4 在 `step/end` 清空该 step 的开放调用）、无结果的未完成调用（用 harness 自己的 `@deepseek-ai/dsh-session/repair` 收尾：`TOOL_OUTCOME_UNKNOWN` / `TOOL_NOT_STARTED`）、system 头错位（补一条空 `system/message` 头，与运行时 `src/driver-core/system-head.ts` 同一手法）。结构修完后 `seq` 重排密集、payload 里对 seq 的引用一并重映射。投影族（6）只改块 payload 字节，不增删挪事件，因此**不需要** seq 重排——这一点对两代产物都做过实测（投影修复后事件的 `seq` 数组逐位不变、仍密集），而非假设。
 
-**仍有一族没修**：极少数 `format v3 inherited cut disagrees with its source marker`（继承切点与源标记不一致）。它需要判断"哪条 `session/end-seed` 才是真的继承边界"，信息不足以裁决，工具遇到这类文件不会改动，`--verify` 如实报 FAIL。除此之外，工具只处理上面两族；其它形态的日志损坏不在范围内。
+框架族（7）按上面那条已裁决的方向三步走：**①** 收尾位置不对的 `step/end`（`(turn, step)` 不是当前打开的步）直接丢弃；**②** 没有打开回合时出现的 `step/start` 说明它前面那条 `turn/end` 写早了——把那条 `turn/end` 丢掉（回合重开），让这个 step 归它自己写明的回合；**只**在被丢的 `turn/end` 恰好是同一回合号、且紧邻在前的收尾时才这么做，否则**不臆造边界**，如实报告该文件不可修、原样不动；**③** 在 `turn/start`（或日志末尾）还有打开的步时补一条 `step/end`，在 `turn/start` 处还要在它之前补一条该回合的 `turn/end`——reason **复用第 ② 步丢掉的那条早收尾的 reason**（那正是这个回合真实的结束原因，本例就是 `{kind:'aborted', reason:{kind:'user'}}`），没有可复用的时候才用 harness 自己那条事后收尾标记 `{kind:'interrupted'}`。日志末尾只补 `step/end`，回合保持打开，与 harness 自己的未完成尾部策略一致。这一族增删事件，所以同样要过 `seq` 密集重排与引用重映射；`--check` 把它按 `dropped-step-ends` / `reopened-turns` / `synthesised-step-ends` / `synthesised-turn-ends` 四项单独报（不可修的文件标 `UNREPAIRABLE`），摘要在 `family-7 turn-framing` 里计数。
+
+> 收尾 id 的边界：`stampCloserIds` 只给**本次修复合成**的收尾（仍带 `seq: -1` 占位）盖 `interrupted-tool-result-<callId>-<seq>` 规范 id，**绝不改写日志里原本就有的收尾事件**——驱动自己写下的 id（哪怕是个随机 uuid）V4 关系校验照收，修复不应顺手改它。
+
+**仍有一族没修**：极少数 `format v3 inherited cut disagrees with its source marker`（继承切点与源标记不一致）。它需要判断"哪条 `session/end-seed` 才是真的继承边界"，信息不足以裁决，工具遇到这类文件不会改动，`--verify` 如实报 FAIL。除此之外，工具只处理上面三族；其它形态的日志损坏不在范围内。
 
 ---
 
