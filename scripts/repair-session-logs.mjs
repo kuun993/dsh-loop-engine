@@ -38,8 +38,9 @@
  *      the same repair the plugin's runtime `driver-core/system-head.ts` applies
  *      to new sessions.
  *
- * After the structural repairs, event `seq` coordinates are renumbered densely
- * from zero and every payload reference to them is remapped.
+ * After the structural repairs (1–5) and the turn-framing repair (7), which also
+ * adds and drops events, event `seq` coordinates are renumbered densely from
+ * zero and every payload reference to them is remapped.
  *
  *   6. projection mismatch. An `assistant/message` `tool-call` block must agree
  *      with its `tool/call` event on `id` AND byte-identical `name` and
@@ -53,6 +54,18 @@
  *      tool vocabulary, and any later in-process replay rely on. This family
  *      changes no event, only block payload bytes, so it never requires `seq`
  *      renumbering — verified for both generations rather than assumed.
+ *
+ *   7. turn framing. The driver closed a turn while it kept stepping (an abort or
+ *      the queued-message boundary), so the log carries a second `step/end` for
+ *      the already-closed step, a step opened inside the closed turn, and the
+ *      next `turn/start` while a step is still open. `relationships.ts` refuses
+ *      the first of those with `step/end does not match an open turn and step`.
+ *      The premature `turn/end` is dropped (reopening the turn it closed) and the
+ *      duplicate `step/end` with it, and the open step's `step/end` plus the open
+ *      turn's `turn/end` are synthesised immediately before the new `turn/start`,
+ *      so a turn spans every step it drove and closes exactly once. This family
+ *      adds and drops events, so it is covered by the dense `seq` renumbering
+ *      above too.
  *
  * This is a one-off repair tool, not part of the plugin runtime: nothing under
  * `lib/` imports it and it is not published. The pure repair path uses only the
@@ -76,9 +89,10 @@
  *
  * `--check` reports, per file, the structural defect counts (family 1, including
  * `unresolved-at-step-end` — the count of advertised calls that a `step/end`
- * still owed a result, which is what v4 load refuses) and the
- * projection-mismatch count (family 6), then a summary broken down by
- * generation. With `--check` and no file arguments it scans the session root
+ * still owed a result, which is what v4 load refuses), the
+ * projection-mismatch count (family 6), and the turn-framing counts (family 7),
+ * then a summary broken down by generation. With `--check` and no file arguments
+ * it scans the session root
  * (`$DSH_SESSIONS_ROOT`, else `~/.dsh/sessions`). A repair that changes nothing
  * leaves the file byte-for-byte untouched; every write goes to a temp file in
  * the same directory and is renamed into place, so a failure never leaves a
@@ -670,6 +684,135 @@ function repairProjections(events) {
 }
 
 /**
+ * The `step/end` that closes one open step, synthesised where a driver left the
+ * step open across a `turn/start` or the end of the log.
+ * @param {number} turn - the open turn.
+ * @param {number} step - the open step.
+ * @param {number|undefined} time - the timestamp to reuse.
+ * @returns {object} a synthetic `step/end`.
+ */
+function syntheticStepEnd(turn, step, time) {
+  return { type: 'step/end', seq: -1, time, data: { turn, step } }
+}
+
+/**
+ * The `turn/end` that closes one open turn, synthesised where a driver opened
+ * the next turn with a step still open.
+ * @param {number} turn - the open turn.
+ * @param {object|undefined} reason - the premature closer's reason, when one was dropped.
+ * @param {number|undefined} time - the timestamp to reuse.
+ * @returns {object} a synthetic `turn/end`.
+ */
+function syntheticTurnEnd(turn, reason, time) {
+  return { type: 'turn/end', seq: -1, time, data: { turn, reason: reason ?? { kind: 'interrupted' } } }
+}
+
+/**
+ * Repair the turn-framing family: a `turn/end` written while the driver kept
+ * stepping, the duplicate `step/end` it left behind, a step opened inside the
+ * closed turn, and then a `turn/start` while a step is still open. The harness
+ * refuses the first of those at the `step/end` case of
+ * `session-format-v3-to-v4/src/relationships.ts` with
+ * `step/end does not match an open turn and step`, and would refuse each of the
+ * others the same way. Three rules, applied in one pass:
+ *
+ *   1. a `step/end` whose coordinates are not the open step's is dropped;
+ *   2. a `step/start` with no open turn reopens the turn it names, dropping the
+ *      `turn/end` that immediately precedes it — but only when that preceding
+ *      event is the closer of that same turn number. Any other preceding event
+ *      means the log is unrepairable: reopening it would invent a boundary, so
+ *      nothing is changed and the caller reports the file untouched;
+ *   3. a `turn/start` with a step still open first synthesises that step's
+ *      `step/end` and then the open turn's `turn/end` — an open turn is always
+ *      closed before the next one, with or without an open step; the end of the
+ *      log synthesises the `step/end` alone, leaving the tail turn open like the
+ *      harness's own unfinished-tail policy. The synthesised `turn/end` reuses
+ *      the reason of the premature closer dropped in rule 2 (the turn really was
+ *      aborted there), else the harness's after-the-fact `{ kind: 'interrupted' }`
+ *      marker. Timestamps reuse the last event already logged.
+ *
+ * @param {object[]} events - source events.
+ * @returns {{ events: object[], droppedStepEnds: number, reopenedTurns: number, synthesisedStepEnds: number, synthesisedTurnEnds: number, unrepairable: boolean }} repaired events — the input unchanged when unrepairable or already framed — and counts.
+ */
+function repairTurnFraming(events) {
+  const output = []
+  const premature = new Map()
+  let openTurn
+  let openStep
+  let droppedStepEnds = 0
+  let reopenedTurns = 0
+  let synthesisedStepEnds = 0
+  let synthesisedTurnEnds = 0
+  const lastTime = () => output.length === 0 ? undefined : output[output.length - 1].time
+  for (const event of events) {
+    if (event.type === 'step/end') {
+      const data = event.data ?? {}
+      if (openTurn === undefined || openStep === undefined || data.turn !== openTurn || data.step !== openStep) {
+        droppedStepEnds += 1
+        continue
+      }
+      openStep = undefined
+      output.push(event)
+      continue
+    }
+    if (event.type === 'step/start') {
+      const data = event.data ?? {}
+      if (openTurn === undefined) {
+        const closer = output[output.length - 1]
+        if (closer === undefined || closer.type !== 'turn/end' || closer.data?.turn !== data.turn) {
+          return {
+            events, droppedStepEnds, reopenedTurns, synthesisedStepEnds, synthesisedTurnEnds, unrepairable: true,
+          }
+        }
+        output.pop()
+        premature.set(data.turn, closer)
+        reopenedTurns += 1
+        openTurn = data.turn
+      }
+      openStep = data.step
+      output.push(event)
+      continue
+    }
+    if (event.type === 'turn/start') {
+      if (openTurn !== undefined) {
+        const time = lastTime()
+        if (openStep !== undefined) {
+          output.push(syntheticStepEnd(openTurn, openStep, time))
+          synthesisedStepEnds += 1
+          openStep = undefined
+        }
+        output.push(syntheticTurnEnd(openTurn, premature.get(openTurn)?.data?.reason, time))
+        synthesisedTurnEnds += 1
+      }
+      openTurn = event.data.turn
+      openStep = undefined
+      output.push(event)
+      continue
+    }
+    if (event.type === 'turn/end') {
+      openTurn = undefined
+      openStep = undefined
+      output.push(event)
+      continue
+    }
+    output.push(event)
+  }
+  if (openStep !== undefined) {
+    output.push(syntheticStepEnd(openTurn, openStep, lastTime()))
+    synthesisedStepEnds += 1
+  }
+  const changed = droppedStepEnds + reopenedTurns + synthesisedStepEnds + synthesisedTurnEnds > 0
+  return {
+    events: changed ? output : events,
+    droppedStepEnds,
+    reopenedTurns,
+    synthesisedStepEnds,
+    synthesisedTurnEnds,
+    unrepairable: false,
+  }
+}
+
+/**
  * Renumber events densely from zero and remap every payload reference to a
  * source event coordinate.
  * @param {object[]} events - events with placeholder `seq` values, in order.
@@ -719,16 +862,21 @@ function renumberAndRemap(events) {
 /**
  * Stamp each synthetic interrupted-call closer with an id naming its own final
  * coordinate, matching the harness's `interrupted-tool-result-<callId>-<seq>`
- * convention (its seq is only known after renumbering).
- * @param {object[]} events - densely renumbered events.
- * @returns {object[]} the same events with canonical closer ids.
+ * convention (its seq is only known after renumbering). Only closers this run
+ * synthesised are stamped — they still carry the `seq: -1` placeholder, and the
+ * dense renumbering that follows gives each one the array index it is stamped
+ * with. An interrupted-call closer already in the log is a driver's own record
+ * and is never rewritten: the V4 oracle accepts its id as written.
+ * @param {object[]} events - events before dense renumbering.
+ * @returns {object[]} the same events with canonical synthetic closer ids.
  */
 function stampCloserIds(events) {
-  return events.map(event => {
+  return events.map((event, index) => {
     const code = event.data?.error?.code
     if (code !== 'TOOL_OUTCOME_UNKNOWN' && code !== 'TOOL_NOT_STARTED') return event
+    if (event.seq !== -1) return event
     const callId = event.data.message.toolCallId
-    return { ...event, data: { ...event.data, message: { ...event.data.message, id: `interrupted-tool-result-${callId}-${event.seq}` } } }
+    return { ...event, data: { ...event.data, message: { ...event.data.message, id: `interrupted-tool-result-${callId}-${index}` } } }
   })
 }
 
@@ -738,11 +886,17 @@ function stampCloserIds(events) {
  * and is applied afterwards so it also covers synthetic advertisements (which
  * already agree, cheaply detected as unchanged).
  * @param {{ headerLine: string, eventLines: string[], trailingNewline: boolean }} log - decoded log.
- * @returns {{ log: object, delta: number, before: number, after: number, changed: boolean }} repaired log and counts.
+ * @returns {{ log: object, delta: number, before: number, after: number, changed: boolean, framing: object, unrepairable: boolean }} repaired log and counts.
  */
 function repairLog(log) {
   const events = log.eventLines.map(line => JSON.parse(line))
-  let repaired = orderAdvertisements(events)
+  // The framing repair runs before the boundary-based structural passes, which
+  // read `step/end` / `turn/end` positions to decide where a step closes: a log
+  // whose frame is broken would otherwise place their synthetic closers wrong.
+  const framing = repairTurnFraming(events)
+  const empty = { log, delta: 0, before: events.length, after: events.length, changed: false, framing }
+  if (framing.unrepairable) return { ...empty, unrepairable: true }
+  let repaired = orderAdvertisements(framing.events)
   repaired = relocateResults(repaired)
   repaired = dropDuplicateResults(repaired)
   repaired = settleUnresolved(repaired)
@@ -750,7 +904,7 @@ function repairLog(log) {
   repaired = insertSystemHead(repaired)
   const structural = repaired !== events
   repaired = repairProjections(repaired)
-  if (repaired === events) return { log, delta: 0, before: events.length, after: events.length, changed: false }
+  if (repaired === events) return { ...empty, unrepairable: false }
   if (!structural) {
     return {
       log: { ...log, eventLines: repaired.map(event => JSON.stringify(event)) },
@@ -758,15 +912,19 @@ function repairLog(log) {
       before: events.length,
       after: events.length,
       changed: true,
+      framing,
+      unrepairable: false,
     }
   }
-  const final = stampCloserIds(renumberAndRemap(repaired))
+  const final = renumberAndRemap(stampCloserIds(repaired))
   return {
     log: { ...log, eventLines: final.map(event => JSON.stringify(event)) },
     delta: final.length - events.length,
     before: events.length,
     after: final.length,
     changed: true,
+    framing,
+    unrepairable: false,
   }
 }
 
@@ -791,12 +949,13 @@ function countProjectionMismatches(events) {
 /**
  * Count the repairs one artifact needs without writing anything.
  * @param {string} path - artifact path.
- * @returns {{ generation: number, unadvertised: number, lateAdvertisement: number, duplicateResults: number, unresolved: number, systemHead: boolean, projectionMismatch: number }} finding counts.
+ * @returns {{ generation: number, unadvertised: number, lateAdvertisement: number, duplicateResults: number, unresolved: number, systemHead: boolean, projectionMismatch: number, framing: object, framingUnrepairable: boolean }} finding counts.
  */
 function inspectArtifact(path) {
   const { headerLine, eventLines } = readArtifact(path)
   const generation = generationOf(headerLine)
   const events = eventLines.map(line => JSON.parse(line))
+  const framing = repairTurnFraming(events)
   const advertised = new Map()
   const unadvertised = new Map()
   let lateAdvertisement = 0
@@ -872,6 +1031,8 @@ function inspectArtifact(path) {
     unresolvedAtStepEnd,
     systemHead: needsSystemHead(events),
     projectionMismatch: countProjectionMismatches(events),
+    framing,
+    framingUnrepairable: framing.unrepairable,
   }
 }
 
@@ -1075,24 +1236,32 @@ async function main() {
       const finding = inspectArtifact(path)
       const structural = finding.unadvertised + finding.lateAdvertisement + finding.duplicateResults
         + finding.unresolved + finding.unresolvedAtStepEnd + (finding.systemHead ? 1 : 0)
-      const totals = stats.get(finding.generation) ?? { files: 0, structural: 0, projection: 0 }
+      const framing = finding.framing.droppedStepEnds + finding.framing.reopenedTurns
+        + finding.framing.synthesisedStepEnds + finding.framing.synthesisedTurnEnds
+      const totals = stats.get(finding.generation) ?? { files: 0, structural: 0, projection: 0, framing: 0 }
       totals.files += 1
       stats.set(finding.generation, totals)
-      if (structural === 0 && finding.projectionMismatch === 0) continue
+      if (structural === 0 && finding.projectionMismatch === 0 && framing === 0 && !finding.framingUnrepairable) continue
       affected += 1
       if (structural > 0) totals.structural += 1
       if (finding.projectionMismatch > 0) totals.projection += 1
+      if (framing > 0 || finding.framingUnrepairable) totals.framing += 1
       console.log(`v${finding.generation} ${path}`)
       console.log(`  family-1 structural: unadvertised ${finding.unadvertised}, late ${finding.lateAdvertisement},`
         + ` duplicate-results ${finding.duplicateResults}, unresolved ${finding.unresolved},`
         + ` unresolved-at-step-end ${finding.unresolvedAtStepEnd},`
         + ` system-head ${finding.systemHead ? 'yes' : 'no'}`)
       console.log(`  family-6 projection-mismatch: ${finding.projectionMismatch} tool/call(s)`)
+      console.log(`  family-7 turn-framing: dropped-step-ends ${finding.framing.droppedStepEnds},`
+        + ` reopened-turns ${finding.framing.reopenedTurns},`
+        + ` synthesised-step-ends ${finding.framing.synthesisedStepEnds},`
+        + ` synthesised-turn-ends ${finding.framing.synthesisedTurnEnds}`
+        + `${finding.framingUnrepairable ? ', UNREPAIRABLE' : ''}`)
     }
     console.log(`scanned: ${scanned.length} affected: ${affected}`)
     for (const [generation, totals] of [...stats.entries()].sort((a, b) => a[0] - b[0])) {
       console.log(`v${generation}: files ${totals.files}, family-1 structural ${totals.structural},`
-        + ` family-6 projection ${totals.projection}`)
+        + ` family-6 projection ${totals.projection}, family-7 turn-framing ${totals.framing}`)
     }
     return
   }
@@ -1115,6 +1284,15 @@ async function main() {
     if (result.changed) changed += 1
     console.log(`${result.changed ? 'repaired' : 'unchanged'} ${path}  event delta: ${result.delta >= 0 ? '+' : ''}${result.delta} (${result.before} -> ${result.after})`)
     if (result.changed) console.log(`  backup: ${path}.bak`)
+    const framing = result.framing
+    if (framing !== undefined && (framing.unrepairable
+      || framing.droppedStepEnds + framing.reopenedTurns + framing.synthesisedStepEnds + framing.synthesisedTurnEnds > 0)) {
+      console.log(`  family-7 turn-framing: dropped-step-ends ${framing.droppedStepEnds},`
+        + ` reopened-turns ${framing.reopenedTurns},`
+        + ` synthesised-step-ends ${framing.synthesisedStepEnds},`
+        + ` synthesised-turn-ends ${framing.synthesisedTurnEnds}`
+        + `${framing.unrepairable ? '  UNREPAIRABLE: the premature turn/end is not the preceding event, file left untouched' : ''}`)
+    }
     if (options.verify) {
       const repairedVerdict = verifyOne(path, harness)
       console.log(`  verify repaired: ${repairedVerdict}`)
