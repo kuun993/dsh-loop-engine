@@ -91,6 +91,37 @@ export interface LoopEngineKey {
   closeLabel: string
   /** Notice shown while a hosted engine drives the session: the model seat is the engine's own business. */
   hostedEngineModelNotice: string
+  cliSetupTitle: string
+  cliSetupDescription: string
+  cliRefresh: string
+  cliChecking: string
+  cliClaude: string
+  cliCodex: string
+  cliPi: string
+  cliKimi: string
+  cliInstall: string
+  cliValidate: string
+  cliLaunch: string
+  cliLaunching: string
+  cliRunning: string
+  cliStatusUnknown: string
+  cliInstalled: string
+  cliNotInstalled: string
+  cliPath: string
+  cliVersion: string
+  cliValidationPassed: string
+  cliValidationFailed: string
+  cliInstallSuccess: string
+  cliInstallFailure: string
+  cliRemoteUnavailable: string
+  cliClaudeLogin: string
+  cliCodexLogin: string
+  cliPiLogin: string
+  cliKimiLogin: string
+  cliPrepareRestart: string
+  cliPreparingRestart: string
+  cliLauncherPath: string
+  cliExitToRestart: string
 }
 
 /** Simplified Chinese copy. */
@@ -137,6 +168,37 @@ export const zh: Record<keyof LoopEngineKey, string> = {
   switchReloadTitle: '切换已生效，正在重新载入页面',
   switchReloadBody: '已切到新引擎，正在重新载入页面并回到本会话…',
   switchUnavailable: '当前页面拿不到引擎切换服务，无法切换本会话的引擎。',
+  cliSetupTitle: 'CLI 安装与校验',
+  cliSetupDescription: '通过官方安装方式安装 Claude Code、Codex CLI、Pi 和 Kimi Code，并检查命令是否可运行。这里不检查登录状态，也不会读取或保存密钥；安装后请在 CLI 自己登录。准备重启会生成仅供当前 Windows 用户使用的启动脚本，把已发现的 CLI 路径加入官方 DSH 下次启动的环境，不修改系统 PATH。注意：DSH 的 Claude/Pi/Codex 驱动使用插件自带 SDK/包版本；Kimi 驱动直接使用本机 kimi 命令。',
+  cliRefresh: '刷新状态',
+  cliChecking: '正在检查…',
+  cliClaude: 'Claude Code',
+  cliCodex: 'Codex CLI',
+  cliPi: 'Pi',
+  cliKimi: 'Kimi Code',
+  cliInstall: '安装',
+  cliValidate: '校验版本',
+  cliLaunch: '启动 CLI',
+  cliLaunching: '正在启动…',
+  cliRunning: '安装中…',
+  cliStatusUnknown: '状态尚未读取。',
+  cliInstalled: '已安装',
+  cliNotInstalled: '未安装',
+  cliPath: '命令路径',
+  cliVersion: '版本',
+  cliValidationPassed: '命令启动和版本校验通过；登录状态未检查。',
+  cliValidationFailed: '版本校验失败',
+  cliInstallSuccess: '安装完成，请再运行一次版本校验。',
+  cliInstallFailure: '安装失败',
+  cliRemoteUnavailable: 'CLI 管理服务不可用',
+  cliClaudeLogin: '点击“启动 CLI”会打开终端并运行 Claude；按 CLI 提示完成登录。',
+  cliCodexLogin: '点击“启动 CLI”会打开终端并运行 Codex；按 CLI 提示完成登录。',
+  cliPiLogin: '点击“启动 CLI”会打开 Pi；在其中运行 /login，或配置所需的模型服务商。',
+  cliKimiLogin: '点击“启动 CLI”会打开终端并运行 Kimi；登录后可运行 /login。',
+  cliPrepareRestart: '校验环境并准备重启',
+  cliPreparingRestart: '正在校验并准备…',
+  cliLauncherPath: '已生成启动脚本',
+  cliExitToRestart: '准备完成后，请通过「应用 → 退出」正常退出 DSH；完全退出后官方版会自动重新打开。',
 }
 
 /** English copy. */
@@ -183,6 +245,37 @@ export const en: Record<keyof LoopEngineKey, string> = {
   switchReloadTitle: 'Switch applied — reloading the page',
   switchReloadBody: 'Switched. Reloading the page and returning to this session…',
   switchUnavailable: 'This page cannot reach the engine switch endpoint, so the session engine was not switched.',
+  cliSetupTitle: 'CLI installation and validation',
+  cliSetupDescription: 'Install Claude Code, Codex CLI, Pi, and Kimi Code using their official installers and check that each command runs. Login is not checked here; credentials are never read or saved. Sign in inside each CLI after installation. Restart preparation creates a per-user launcher that adds discovered CLI paths to the next official DSH process without changing system PATH. Note: DSH’s Claude/Pi/Codex drivers use plugin-pinned SDK/package versions; Kimi uses the local kimi command directly.',
+  cliRefresh: 'Refresh status',
+  cliChecking: 'Checking…',
+  cliClaude: 'Claude Code',
+  cliCodex: 'Codex CLI',
+  cliPi: 'Pi',
+  cliKimi: 'Kimi Code',
+  cliInstall: 'Install',
+  cliValidate: 'Validate version',
+  cliLaunch: 'Start CLI',
+  cliLaunching: 'Launching…',
+  cliRunning: 'Installing…',
+  cliStatusUnknown: 'Status has not been loaded.',
+  cliInstalled: 'Installed',
+  cliNotInstalled: 'Not installed',
+  cliPath: 'Command path',
+  cliVersion: 'Version',
+  cliValidationPassed: 'Command launch and version check passed; login was not checked.',
+  cliValidationFailed: 'Version check failed',
+  cliInstallSuccess: 'Installation complete. Run version validation next.',
+  cliInstallFailure: 'Installation failed',
+  cliRemoteUnavailable: 'CLI management service is unavailable',
+  cliClaudeLogin: 'Click “Start CLI” to open a terminal running Claude, then follow its sign-in prompt.',
+  cliCodexLogin: 'Click “Start CLI” to open a terminal running Codex, then follow its sign-in prompt.',
+  cliPiLogin: 'Click “Start CLI” to open Pi, then run /login or configure the required model provider.',
+  cliKimiLogin: 'Click “Start CLI” to open a terminal running Kimi; run /login after it starts.',
+  cliPrepareRestart: 'Validate environment and prepare restart',
+  cliPreparingRestart: 'Validating and preparing…',
+  cliLauncherPath: 'Launcher script',
+  cliExitToRestart: 'When preparation is complete, exit DSH normally through App → Quit. The official app will reopen after it fully exits.',
 }
 
 /**
