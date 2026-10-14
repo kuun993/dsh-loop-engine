@@ -156,7 +156,7 @@ function launcherScript(app: string, additions: readonly string[]): string {
   const pathPrefix = additions.map((path) => powershellLiteral(path)).join(" + ';' + ")
   return [
     "$ErrorActionPreference = 'Stop'",
-    "$env:DSH_HOME = Join-Path $env:USERPROFILE '.dsh'",
+    "if ([string]::IsNullOrWhiteSpace($env:DSH_HOME)) { $env:DSH_HOME = Join-Path $env:USERPROFILE '.dsh' }",
     additions.length === 0 ? "" : `$env:PATH = ${pathPrefix} + ';' + $env:PATH`,
     `$app = ${powershellLiteral(app)}`,
     "Start-Process -FilePath $app -WorkingDirectory (Split-Path -Parent $app)",
