@@ -114,6 +114,26 @@ function turnEnd(message?: PiMessage, toolResults?: readonly PiToolResult[]): Re
   }
 }
 
+/**
+ * The assistant message pi reports for a FAILED turn: no content, and its own
+ * verdict (`stopReason: 'error'`) plus the reason, which is where a failure that
+ * never reached the endpoint shows up (the RPC responses stay `success: true`).
+ */
+function failedMessage(errorMessage?: string): PiMessage {
+  return {
+    role: 'assistant',
+    content: [],
+    usage: USAGE,
+    stopReason: 'error',
+    ...errorMessage === undefined ? {} : { errorMessage },
+  }
+}
+
+/** The assistant message pi reports for a turn that succeeded, verdict included. */
+function succeededMessage(text: string): PiMessage {
+  return { role: 'assistant', content: [{ type: 'text', text }], usage: USAGE, stopReason: 'stop' }
+}
+
 async function harness(config: Record<string, unknown> = {}): Promise<Context> {
   const ctx = await mountHarness(loopPlugin, config)
   // The host's `modelSelection` fold, so a `model/selection` appended to the
@@ -706,6 +726,104 @@ describe('PiAgent turn mapping', () => {
     }
   })
 
+  it("ends the turn with pi's own failure when a settled run failed its turn", async () => {
+    // The user-visible half of GitHub issue #2: pi answers with an errored turn
+    // and then settles, so a driver that only watches for settlement reports a
+    // clean, empty turn and the reason never reaches the user.
+    const ctx = await harness()
+    try {
+      const failed = failedMessage('No API provider registered for api: anthropic')
+      mock.eventsYield.mockReturnValue([
+        { type: 'turn_start' },
+        { type: 'message_start', message: failed },
+        { type: 'message_end', message: failed },
+        turnEnd(failed),
+        { type: 'agent_end' },
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('turn-error-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: {
+          reason: {
+            kind: 'error',
+            error: { code: 'PI_TURN_ERROR', message: 'No API provider registered for api: anthropic' },
+          },
+        },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports the failure of an errored turn pi left without a reason', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue([
+        { type: 'message_start', message: failedMessage() },
+        turnEnd(failedMessage()),
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('turn-error-bare-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: {
+          reason: {
+            kind: 'error',
+            error: { code: 'PI_TURN_ERROR', message: 'pi ended the turn with an error and reported no message' },
+          },
+        },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a retried turn alive and completes when a later turn succeeds', async () => {
+    // Pi retries a failed turn by itself (`auto_retry_start`), and each attempt
+    // emits its own errored `turn_end` — a run that recovers must not be failed
+    // by the attempts it recovered from.
+    const ctx = await harness()
+    try {
+      const failed = failedMessage('Connection error.')
+      mock.eventsYield.mockReturnValue([
+        { type: 'turn_start' },
+        turnEnd(failed),
+        { type: 'auto_retry_start', attempt: 1 },
+        { type: 'auto_retry_end', success: true, attempt: 1 },
+        { type: 'message_start', message: succeededMessage('recovered') },
+        { type: 'message_end', message: succeededMessage('recovered') },
+        turnEnd(succeededMessage('recovered')),
+        { type: 'agent_end' },
+        { type: 'agent_settled' },
+      ])
+      const { agent } = await ctx.agents.create({
+        sessionId: SessionId('turn-error-retried-s'),
+        meta: { cwd: process.cwd() },
+      })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+      // And the reply the retry produced is what the user actually got.
+      expect(JSON.stringify(agent.session.snapshotEvents())).toContain('recovered')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('ignores transport and compaction events', async () => {
     const ctx = await harness()
     try {
@@ -1177,6 +1295,52 @@ describe('PiAgent dsh endpoint handover', () => {
       })
       // The credential reaches the child (its directory and argv), never the log.
       expect(JSON.stringify(agent.session.snapshotEvents())).not.toContain(DSH_ENDPOINT.apiKey)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('writes the protocol under the name pi knows when the profile spells it otherwise', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      // `anthropic` is a third-party provider plugin's spelling of the wire pi
+      // names `anthropic-messages`; written verbatim, pi refuses every turn of
+      // the session with "No API provider registered for api: anthropic".
+      provideDshEndpoint(ctx, { api: 'anthropic' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-alias-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      expect(modelsAt(0)).toMatchObject({
+        providers: { [DSH_ENDPOINT.provider]: { api: 'anthropic-messages' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses a handover pi cannot speak instead of letting pi run its own model', async () => {
+    const ctx = await harness()
+    try {
+      mock.eventsYield.mockReturnValue(okStream('ok'))
+      provideDshEndpoint(ctx, { api: 'totally-bogus-api' })
+      const { agent } = await ctx.agents.create({ sessionId: SessionId('handover-badproto-s'), meta: { cwd: process.cwd() } })
+      agent.session.append('model/selection', { provider: DSH_ENDPOINT.provider, model: DSH_ENDPOINT.model })
+      agent.followup(message('go'))
+      await agent.whenIdle()
+
+      // No child: dropping the handover instead would let pi answer on its own
+      // default model while the session claims the dsh model the user picked.
+      expect(mock.created).toHaveLength(0)
+      const ended = agent.session.snapshotEvents().at(-1)?.data as {
+        reason: { error: { code: string; message: string } }
+      }
+      expect(ended.reason.error.code).toBe('PI_UNSUPPORTED_API')
+      expect(ended.reason.error.message).toContain(`${DSH_ENDPOINT.provider}/${DSH_ENDPOINT.model}`)
+      expect(ended.reason.error.message).toContain('totally-bogus-api')
+      expect(ended.reason.error.message).toContain('external/default')
     } finally {
       await ctx.fiber.dispose()
     }
