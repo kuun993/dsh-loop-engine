@@ -109,6 +109,20 @@ export interface PiMessage {
   readonly content: string | readonly PiContent[]
   readonly usage?: PiUsage
   readonly isError?: boolean
+  /**
+   * Pi's own verdict on the turn this assistant message belongs to
+   * (`stop`, `toolUse`, `length`, `error`, …). Absent on the messages that
+   * state none — user and tool-result messages — so it is only read on the
+   * assistant message a `turn_end`/`message_end` carries.
+   */
+  readonly stopReason?: string
+  /**
+   * Pi's failure text, accompanying `stopReason: 'error'`: the reason the turn
+   * did not produce a reply (an unregistered `api`, a refused connection, …).
+   * This is the only place that reason exists — pi's RPC `response` envelope
+   * reports command success, not turn outcome.
+   */
+  readonly errorMessage?: string
   readonly toolCallId?: string
   readonly toolName?: string
   readonly timestamp?: number

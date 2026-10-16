@@ -39,7 +39,7 @@ import { closeStep, settleResult } from '../driver-core/step-close.ts'
 import { appendSystemHeadIfMissing } from '../driver-core/system-head.ts'
 import { sessionModelOverrideOf } from '../driver-core/session-model.ts'
 import { resolveModelHandover, type DshModelHandover } from '../driver-core/model-handover.ts'
-import { piAgentDir } from './model-handover.ts'
+import { piAgentDir, resolvePiApi, type PiSupportedHandover } from './model-handover.ts'
 import { DriverAssistantStream } from '../driver-core/assistant-stream.ts'
 import { stepImages } from '../driver-core/step-images.ts'
 import { normalizeHostedToolCall } from '../driver-core/hosted-tool-vocabulary.ts'
@@ -221,7 +221,7 @@ export class PiAgent implements Agent {
    * never reuses one: the step teardown disposes it and the next step respawns
    * a fresh child.
    */
-  private rpcClient(cwd: string, handover: DshModelHandover | undefined): PiRpcClient {
+  private rpcClient(cwd: string, handover: PiSupportedHandover | undefined): PiRpcClient {
     const client = PiRpcClient.create(this.spawnSpec(cwd, handover), this.spawn)
     this.rpc = client
     return client
@@ -562,9 +562,11 @@ export class PiAgent implements Agent {
    * carries the credential, and `PI_CODING_AGENT_DIR` redirects pi's agent
    * directory to the plugin-owned one holding that `models.json`
    * ({@link piAgentDir}) — so the child runs on dsh's endpoint instead of its
-   * own `~/.pi` configuration, which is never touched.
+   * own `~/.pi` configuration, which is never touched. The handover reaching here
+   * is already judged: {@link supportedHandover} dropped one that named no
+   * protocol and refused one pi cannot speak.
    */
-  private spawnSpec(cwd: string, handover: DshModelHandover | undefined): PiSpawnSpec {
+  private spawnSpec(cwd: string, handover: PiSupportedHandover | undefined): PiSpawnSpec {
     const argv: string[] = []
     const override = sessionModelOverrideOf(this.loopCtx, this.session)
     const model = override === undefined ? this.config.model : `${override.provider}/${override.model}`
@@ -592,6 +594,51 @@ export class PiAgent implements Agent {
       env: handover === undefined
         ? this.config.env
         : { ...this.config.env, PI_CODING_AGENT_DIR: piAgentDir(handover) },
+    }
+  }
+
+  /**
+   * The endpoint handover this step may point the child at, or `undefined` to
+   * leave pi on its own configuration.
+   *
+   * Pi is the one engine that cannot run a provider handed over without a wire
+   * protocol: its `models.json` rejects a provider without `api` (verified
+   * against pi 0.84.3 — `{"status":"invalid","reason":"invalid_state"}`), and the
+   * plugin will not write a document it knows pi refuses. So a handover that
+   * names no protocol is dropped here rather than materialized into a broken
+   * agent directory. It is unreachable for every route `SHIPPED_ROUTE_APIS`
+   * names, which today is the only way `api` goes missing.
+   *
+   * A protocol pi does not SPEAK is a different answer, and a refusal rather than
+   * a drop: dropping it would leave the user's dsh model selection in place while
+   * pi quietly ran its own default model — the exact silent degradation this
+   * driver exists not to produce, and the shape of GitHub issue #2 (a third-party
+   * provider plugin declaring `api: "anthropic"`, which pi has no implementation
+   * for). The step fails instead, naming the provider, the model, and the
+   * offending protocol — so the user can pick `external/default` or fix it.
+   *
+   * The returned handover carries the PI spelling of its protocol
+   * ({@link resolvePiApi}), so everything downstream — `models.json` above all —
+   * sees the one protocol pi will actually be configured with.
+   * @param resolved - the endpoint dsh disclosed for this step's model selection.
+   * @returns the handover to point the child at, or `undefined` for none.
+   */
+  private supportedHandover(resolved: DshModelHandover | undefined): PiSupportedHandover | undefined {
+    if (resolved === undefined) return undefined
+    const resolution = resolvePiApi(resolved.api)
+    switch (resolution.kind) {
+      case 'absent':
+        return undefined
+      case 'supported':
+        return { ...resolved, api: resolution.api }
+      case 'unsupported':
+        throw new LlmError(
+          `agent "${this.id}": the session selected the dsh model "${resolved.provider}/${resolved.model}", but its`
+          + ` wire protocol "${resolved.api}" is not one pi can speak; keep the session on the hosted`
+          + ` "external/default" model, or configure that provider with a protocol pi accepts (for example`
+          + ` "anthropic-messages" or "openai-completions")`,
+          'PI_UNSUPPORTED_API',
+        )
     }
   }
 
@@ -647,14 +694,9 @@ export class PiAgent implements Agent {
       this.loopCtx,
       sessionModelOverrideOf(this.loopCtx, this.session),
     )
-    // Pi is the one engine that cannot run a provider it was handed no wire
-    // protocol for: its `models.json` rejects a provider without `api` (verified
-    // against pi 0.84.3 — `{"status":"invalid","reason":"invalid_state"}`), and
-    // the plugin will not write a document it knows pi refuses. So a handover
-    // that names no protocol is dropped here rather than materialized into a
-    // broken agent directory. It is unreachable for every route
-    // `SHIPPED_ROUTE_APIS` names, which today is the only way `api` goes missing.
-    const handover = resolved?.api === undefined ? undefined : resolved
+    // Pi's own judgement of that protocol: a handover it cannot speak is
+    // refused here, before any child is spawned ({@link supportedHandover}).
+    const handover = this.supportedHandover(resolved)
 
     const controller = new AbortController()
     const cancel = (): void => {
@@ -748,6 +790,20 @@ export class PiAgent implements Agent {
       let lastUsage: TokenUsage | undefined
       /** Whether an assistant message already flushed for this turn (message_end). */
       let assistantFlushed = false
+      /**
+       * Pi's own report of a FAILED turn, as of the last turn that stated a
+       * verdict. Pi surfaces a failure as a `turn_end`/`message_end` whose
+       * assistant message carries `stopReason: 'error'` plus `errorMessage`, and
+       * the RPC `response` envelopes say nothing about turn outcome — so without
+       * this the driver never learns why a turn produced no reply.
+       *
+       * Recorded rather than thrown on sight, because pi RETRIES by itself
+       * (`auto_retry_start`): a retrying run emits one errored turn per attempt
+       * and can still succeed, so only the verdict still standing when the loop
+       * concludes is a failure. Reading it that way also keeps a mid-run errored
+       * turn from failing a step pi was about to recover.
+       */
+      let turnError: string | undefined
 
       /** Append the held assistant message, optionally carrying turn usage. */
       const flushHeld = (usage?: TokenUsage): void => {
@@ -868,6 +924,25 @@ export class PiAgent implements Agent {
         return blocks
       }
 
+      /**
+       * Record one assistant message's own verdict on its turn, if it states one.
+       * A message with no `stopReason` (pi's user/tool-result messages and its
+       * streaming events) leaves the record alone, and a turn whose verdict is
+       * anything but `'error'` clears it — that is what a successful retry looks
+       * like from here.
+       *
+       * An errored turn that carries no `errorMessage` still has to be
+       * reportable, so it records a generic line rather than leaving the record
+       * empty: "pi failed and did not say why" must not read as "the turn was
+       * fine".
+       */
+      const recordTurnVerdict = (message: PiMessage): void => {
+        if (message.stopReason === undefined) return
+        turnError = message.stopReason === 'error'
+          ? message.errorMessage ?? 'pi ended the turn with an error and reported no message'
+          : undefined
+      }
+
       signal.throwIfAborted()
       for await (const event of client.events()) {
         signal.throwIfAborted()
@@ -922,6 +997,9 @@ export class PiAgent implements Agent {
           }
           case 'message_end': {
             if (event.message.role === 'assistant') {
+              // An assistant message states its turn's verdict: the last one
+              // recorded before the run settles is what the step reports.
+              recordTurnVerdict(event.message)
               if (event.message.usage !== undefined) lastUsage = mapUsage(event.message.usage)
               flushHeld()
               held = { content: contentOf(event.message) }
@@ -951,6 +1029,9 @@ export class PiAgent implements Agent {
             }
             break
           case 'turn_end': {
+            // `turn_end` is where pi states a failed turn; a later turn that
+            // succeeds clears the record again (see {@link recordTurnVerdict}).
+            if (event.message !== undefined) recordTurnVerdict(event.message)
             if (!assistantFlushed && event.message !== undefined) {
               if (event.message.usage !== undefined) lastUsage = mapUsage(event.message.usage)
               held = { content: contentOf(event.message) }
@@ -992,6 +1073,15 @@ export class PiAgent implements Agent {
         if (settled) break
       }
       flushHeld(lastUsage)
+      // Pi's own verdict outranks the settle bookkeeping: a run can settle
+      // cleanly WITH every turn failed (issue #2's run sent no reply at all, then
+      // `agent_settled`), and reporting that as `completed` would hand the user a
+      // silent, empty turn. Checked before `finished` for the same reason: when a
+      // run both failed a turn and never settled, pi's reason is the more useful
+      // one to report.
+      if (turnError !== undefined) {
+        throw new LlmError(turnError, 'PI_TURN_ERROR')
+      }
       if (!finished) {
         throw new LlmError(
           `agent "${this.id}": pi query ended without an agent settle`,
