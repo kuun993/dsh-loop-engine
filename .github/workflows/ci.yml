@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# This plugin is deliberately NOT self-contained: `tsconfig.json` extends the
+# sibling harness checkout, and the unit suite resolves the vendored cordis and
+# cosmokit SOURCES from it. CI therefore provides a bare `git clone` of the
+# harness release the devDependencies/peerDependencies pin — no install and no
+# build, which is all `tsconfig.base.json` + `vendor/*/src` amount to.
+# Bump HARNESS_TAG in the same change as those version ranges.
+env:
+  HARNESS_TAG: dsh-v0.2.0-rc.2
+
+jobs:
+  gates:
+    # Windows on purpose. `src/cli-setup.ts` branches on `process.platform`, and
+    # the per-file 100% coverage gate cannot be satisfied where the win32 arm is
+    # unreachable.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # A sibling of the checkout, because that is the path both `tsconfig.json`
+      # (`../deepseek-harness/tsconfig.base.json`) and `vitest.config.ts`
+      # (`../deepseek-harness/vendor/...`) resolve against.
+      - name: Check out the harness release this build targets
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "$HARNESS_TAG" \
+            https://github.com/deepseek-ai/deepseek-harness.git ../deepseek-harness
+
+      # Reads `packageManager` from package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .compat/015/pnpm-lock.yaml
+            .compat/017/pnpm-lock.yaml
+            .compat/020/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: pnpm run test:coverage
+
+      # One build serves three harness lines, and each `.compat/0NN` set is its
+      # own install root with an untracked `node_modules`, so these install
+      # separately from the root workspace.
+      - run: pnpm run compat:install
+      - run: pnpm run test:compat

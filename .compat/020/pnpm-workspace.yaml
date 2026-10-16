@@ -1,9 +1,9 @@
 packages:
   - "."
 allowBuilds:
-  '@deepseek-ai/dsh-subprocess-local': set this to true or false
-  koffi: set this to true or false
-  node-pty: set this to true or false
+  '@deepseek-ai/dsh-subprocess-local': false
+  koffi: false
+  node-pty: false
 minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent-loop@0.2.0-rc.2'
   - '@deepseek-ai/dsh-agent@0.2.0-rc.2'

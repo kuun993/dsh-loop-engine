@@ -16,7 +16,15 @@ export default defineConfig({
       { find: /^react$/, replacement: fakeReact },
       { find: /^react\/jsx-runtime$/, replacement: fakeReact },
       { find: /^react\/jsx-dev-runtime$/, replacement: fakeReact },
+      // Both vendored packages resolve to SOURCE, so the suite needs no harness
+      // install and no built `lib/`. The checkout CI provides is a bare
+      // `git clone`: there is no `vendor/cordis/node_modules/@deepseek-ai/cosmokit`
+      // junction (pnpm only creates it on an install) and no built
+      // `vendor/cosmokit/lib/index.js` for it to point at. `vendor/cosmokit` has
+      // no dependencies of its own, and cordis's only other external import is
+      // type-only, so the sources are sufficient.
       { find: '@deepseek-ai/cordis', replacement: `${mono}vendor/cordis/src/index.ts` },
+      { find: '@deepseek-ai/cosmokit', replacement: `${mono}vendor/cosmokit/src/index.ts` },
     ],
   },
   test: {
