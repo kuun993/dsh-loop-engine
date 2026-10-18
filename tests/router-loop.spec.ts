@@ -25,7 +25,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from './helpers/harness-generation'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { RouterLoop, type RouterEngine } from '../src/router-loop.ts'
 import { HostedEngineRuntime, type HostedAgent } from '../src/driver-core/hosted-engine-runtime.ts'
@@ -260,7 +260,7 @@ async function boot(
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL }) })
   const query = opts.query === false ? undefined : fakeQuery()
   if (query !== undefined) ctx.provide('sessionQuery', query.service)
-  if (root !== undefined) await ctx.plugin(JsonlSessionPersistence, { root })
+  if (root !== undefined) await ctx.plugin(jsonlSessionPersistence, { root })
 
   const records = opts.records ?? fakeRecords()
   const engines = new Map<HostedEngineId, FakeEngine>()

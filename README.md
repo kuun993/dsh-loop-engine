@@ -52,12 +52,13 @@ Boot `dsh web` once (the router retries for a bounded window while the base bund
 
 ## Version compatibility
 
-One release serves the **0.1.5 line** (`>=0.1.5-rc.1 <0.1.6-0`), the **0.1.7 line** (`>=0.1.7-rc.1 <0.1.8-0`) and the **0.2.0 line** (`>=0.2.0-rc.1 <0.2.1-0`): the plugin detects the running generation at load and takes the matching code path. Those union ranges are what it declares in `peerDependencies`, and a harness outside them fails loudly at boot or session resume.
+One release serves the **0.1.5 line** (`>=0.1.5-rc.1 <0.1.6-0`), the **0.1.7 line** (`>=0.1.7-rc.1 <0.1.8-0`), the **0.2.0 line** (`>=0.2.0-rc.1 <0.2.1-0`) and the **0.2.1 line** (`>=0.2.1-rc.1 <0.2.2-0`): the plugin detects the running generation at load and takes the matching code path. Those union ranges are what it declares in `peerDependencies`, and a harness outside them fails loudly at boot or session resume.
 
 Read the version as `<harness line>-rcN`, where **`rcN` is this plugin's own release counter for that line** — not the harness's `rc` number. Within a covered line a new harness `rc` needs no plugin release unless an API surface moved; [docs/compatibility.md](docs/compatibility.md) §1 lists those surfaces and the diff command that decides it.
 
 | Plugin | Harness |
 |---|---|
+| `0.2.1-rc1` | `0.2.1-rc.1`, `0.2.1-rc.2` (and every earlier line it still covers) |
 | `0.2.0-rc1` | `0.2.0-rc.1`, `0.2.0-rc.2` |
 | `0.1.7-rc1` … `0.1.7-rc5` | `0.1.7-rc.1`, `0.1.7-rc.2` |
 | `0.1.5-rc3` … `0.1.5-rc5` | `0.1.5-rc.2` |
@@ -65,7 +66,7 @@ Read the version as `<harness line>-rcN`, where **`rcN` is this plugin's own rel
 | `1.0.0-rc8` … `1.0.0-rc15` | `0.1.2-rc.1` |
 | `1.0.0-rc7` and earlier | `0.1.1-rc.2` |
 
-`0.2.0-rc1` is the first release that serves three lines at once, and the first one published after the harness started enforcing a peer-range gate at boot: the plugin is still mounted alongside an incompatible one, but a harness outside the ranges above is now skipped by dsh itself rather than failing later.
+`0.2.1-rc1` is the first release that serves four lines at once. Two harness changes force it: the 0.2.1 line **deleted `@deepseek-ai/dsh-invariants` and every `<package>/invariant` subpath**, and it republished the JSONL durability backend as a namespace plugin with no default export. The plugin's `./invariant` companion now declares the host registry's shape locally, so one build mounts on every line — and, because dsh skips a whole bundle whose `@deepseek-ai/dsh-*` peers do not satisfy the running version, dropping that package from `peerDependencies` is what lets the plugin load on 0.2.1 at all.
 
 ## Known limitations
 

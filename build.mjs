@@ -40,7 +40,6 @@ const NODE_EXTERNALS = [
   '@deepseek-ai/schemastery',
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-home-paths',
-  '@deepseek-ai/dsh-invariants',
   // Claude Code engine peers: each must stay a single shared runtime instance.
   '@deepseek-ai/dsh-agent',
   // The router EXTENDS the harness loop; inlining it would create a second

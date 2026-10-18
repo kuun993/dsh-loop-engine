@@ -28,7 +28,7 @@ import AgentRegistry, {
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from '../helpers/harness-generation'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { loopPluginFor } from '../helpers/agent-harness.ts'
 
@@ -450,7 +450,7 @@ describe('resume cancellation and ownership', () => {
   async function persistentHarness(root: string): Promise<Context> {
     const ctx = await harness(false)
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 
@@ -641,7 +641,7 @@ describe('create persistence and cancellation', () => {
   async function persistentHarness(root: string): Promise<Context> {
     const ctx = await harness(false)
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 

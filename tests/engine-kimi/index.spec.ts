@@ -12,7 +12,7 @@ import { Context, symbols, type EffectMeta } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId, SessionLogOffset, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from '../helpers/harness-generation'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
@@ -276,7 +276,7 @@ describe('resume', () => {
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 
@@ -517,7 +517,7 @@ describe('persistence cancellation edges', () => {
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 

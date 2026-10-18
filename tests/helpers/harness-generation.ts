@@ -10,10 +10,16 @@
  * be written once. The probe mirrors `src/compat.ts`, which the browser half
  * cannot import; a spec may import this module freely.
  *
+ * The second adapter is not about message shapes but about how the durability
+ * backend is published: {@link jsonlSessionPersistence} hands `ctx.plugin` the
+ * module in whichever form the running generation mounts.
+ *
  * @module tests/helpers/harness-generation
  */
 
 import * as dshSettings from '@deepseek-ai/dsh-settings'
+import * as dshSessionPersistenceJsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
+import type { Plugin } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 /** Whether the running harness predates the profile-backed settings rewrite (the 0.1.5 line). */
@@ -68,3 +74,16 @@ export function toolResultView(message: unknown): ToolResultView {
     content: block?.content ?? [],
   }
 }
+
+/**
+ * The JSONL durability backend in the form the running generation mounts.
+ *
+ * Up to the 0.2.0 line the package default-exported a plugin class; from the
+ * 0.2.1 line it publishes the same plugin as the module's own `name` / `Config`
+ * / `apply` exports and has NO default export
+ * (`docs/upgrade-guide/v0.2.1-alpha.1/jsonl-persistence-plugin`). `ctx.plugin`
+ * accepts either, so the specs hand it this value and every generation mounts
+ * the same backend from the same spec text.
+ */
+export const jsonlSessionPersistence: Plugin =
+  (dshSessionPersistenceJsonl as { default?: Plugin }).default ?? dshSessionPersistenceJsonl

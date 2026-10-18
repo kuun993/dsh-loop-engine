@@ -47,7 +47,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from './helpers/harness-generation'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
@@ -422,7 +422,7 @@ async function boot(options: { records?: EngineRecordStore } = {}): Promise<App>
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(JsonlSessionPersistence, { root })
+  await ctx.plugin(jsonlSessionPersistence, { root })
   const projections = foldingProjections(ctx)
   ctx.provide('sessionProjections', projections)
   ctx.provide('sessionQuery', durableQuery(ctx))

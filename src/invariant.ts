@@ -10,11 +10,19 @@
  * against the pure transform, binding the writer's inverse to the reader
  * directly.
  *
+ * The host shapes below are declared locally, exactly as `driver-core/
+ * host-servers.ts` does, and for the same reason plus one more: the 0.2.1
+ * harness line DELETED `@deepseek-ai/dsh-invariants` outright
+ * (`docs/upgrade-guide/v0.2.0-rc.2/remove-runtime-invariants`), so this module
+ * cannot import the contractor's types and survive as one build across the
+ * generations. It still mounts on the lines that have the service — `inject`
+ * keeps it pending where the service is absent — and nothing in the plugin
+ * mounts it by itself.
+ *
  * @module dsh-loop-engine/invariant
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
+import type { Context, Inject } from '@deepseek-ai/cordis'
 import { LOOP_ENGINE_IDS } from './settings.ts'
 import {
   applyManagedBlock,
@@ -26,6 +34,22 @@ import {
 } from './patch-manager.ts'
 
 const PACKAGE_NAME = 'dsh-loop-engine'
+
+/** Throw a package-attributed invariant failure (`@deepseek-ai/dsh-invariants`). */
+type InvariantFailure = (message: string) => never
+
+/** One package's checks, as the invariant registry installs them. */
+interface InvariantInstaller {
+  (ctx: Context, fail: InvariantFailure): void | Promise<void>
+  /** Services the installer fiber may access. */
+  readonly inject?: Inject
+}
+
+/** The host invariant registry (`ctx.invariants`), as this plugin uses it. */
+interface InvariantRegistryLike {
+  /** Register one package's checks; the returned disposer withdraws them. */
+  register(packageName: string, install: InvariantInstaller): () => void
+}
 
 /** Cordis companion plugin name. */
 export const name = 'loop-engine-invariant'
@@ -79,4 +103,4 @@ const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure): void
  * @returns the installed registration's disposer after setup succeeds.
  */
 export const apply = (ctx: Context): Promise<() => void> =>
-  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
+  Promise.resolve((ctx as Context & { invariants: InvariantRegistryLike }).invariants.register(PACKAGE_NAME, install))

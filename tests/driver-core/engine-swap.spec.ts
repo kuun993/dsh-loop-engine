@@ -28,7 +28,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from '../helpers/harness-generation'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import { ClaudeCodeAgent } from '../../src/engine-claude/agent.ts'
@@ -62,7 +62,7 @@ async function harness(): Promise<Context> {
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(JsonlSessionPersistence, { root })
+  await ctx.plugin(jsonlSessionPersistence, { root })
   const fiber = ctx.plugin({
     name: 'loop-engine-engines-under-test',
     inject: ENGINE_SERVICES,

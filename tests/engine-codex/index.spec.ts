@@ -12,7 +12,7 @@ import { Context, symbols, type EffectMeta, type Fiber } from '@deepseek-ai/cord
 import SessionStore, { SessionId, SessionLogOffset, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from '../helpers/harness-generation'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
@@ -305,7 +305,7 @@ describe('resume', () => {
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 
@@ -545,7 +545,7 @@ describe('persistence cancellation edges', () => {
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 

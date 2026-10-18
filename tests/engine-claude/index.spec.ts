@@ -21,7 +21,7 @@ import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from '../helpers/harness-generation'
 import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { loopPluginFor } from '../helpers/agent-harness.ts'
 
@@ -216,7 +216,7 @@ describe('resume', () => {
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(LocalSubprocessRuntime)
     await ctx.plugin(loopPlugin, {})
-    await ctx.plugin(JsonlSessionPersistence, { root })
+    await ctx.plugin(jsonlSessionPersistence, { root })
     return ctx
   }
 

@@ -34,7 +34,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, SessionSeq, canonicalHeader, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { jsonlSessionPersistence } from './helpers/harness-generation'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import {
@@ -259,7 +259,7 @@ async function boot(opts: {
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(LlmRuntime)
   // The real durability backend: the sessions below own a real write handle.
-  await ctx.plugin(JsonlSessionPersistence, { root: await tempDir() })
+  await ctx.plugin(jsonlSessionPersistence, { root: await tempDir() })
   ctx.provide('sessionProjections', hostProjections(ctx))
   ctx.provide('tools', fakeToolRuntime())
   if (opts.defaultModel !== 'missing') {

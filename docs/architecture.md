@@ -52,7 +52,7 @@ harness 进程内**只允许一个** `AgentFactory`：`AgentRegistry.setFactory`
 - `legacyBlockEngineOf(text)` 用 `^# -- dsh-loop-engine managed block: (\S+) --$`（`src/patch-manager.ts:91`）读出旧块里的引擎 id，且**只在本版本认识该 id 时**返回它；新块、无块、以及尚未认识的 id 一律 `undefined`（`src/patch-manager.ts:99-104`）。
 - `apply()` 在启动时先读这个 id 作为 settings 段的初始 seed（`src/index.ts:271`、`:531`），因此**升级后默认引擎不丢**；随后把旧块重写为常量块（`:272-285`）。写失败记 error 而不是抛出：没有块时基础行继续占槽，路由器的注册会被拒，每个会话都会 loud 失败，所以这一条按 error 级别上报（`:276-284`）。
 
-`src/invariant.ts` 把这条关系登记为运行时不变量：任意引擎的 legacy 块都必须仍读回该引擎、且迁移后的文本与"同一层从未有过块"逐字节相同（`src/invariant.ts:57-69`）；当前块不得读成 legacy pin（`:56`）。
+`src/invariant.ts` 把这条关系登记为运行时不变量：任意引擎的 legacy 块都必须仍读回该引擎、且迁移后的文本与"同一层从未有过块"逐字节相同（`src/invariant.ts:86-93`）；当前块不得读成 legacy pin（`:80`）。
 
 ### 2.3 `applyManagedBlock` 的语义
 
@@ -61,7 +61,7 @@ harness 进程内**只允许一个** `AgentFactory`：`AgentRegistry.setFactory`
 - **块不存在**：追加块；空文本直接返回块本身，非空则先补一个空行分隔（`src/patch-manager.ts:165-168`）。
 - **块存在**（含 legacy 形态）：原位替换，保留 begin 标记前的空行（`src/patch-manager.ts:170`、`managedSpan` 的 `blankBefore` 记账 `:107-127`）。旧格式的 begin 标记只是更长的一行首，真正界定区间的是 end 标记（`:113-116`）。
 - **无 end 标记的块**被视为延伸到文件末尾（`:116`）。用户若手删了 end 标记，块尾之后的自有内容会在下次重写时被吞掉——改这里要慎重。
-- 块外字节逐一保留。往返（重写后再重写）是不动点，且 legacy 迁移与"无块 + 追加"得到同一结果（`src/invariant.ts:52-53`、`:66-68`）。
+- 块外字节逐一保留。往返（重写后再重写）是不动点，且 legacy 迁移与"无块 + 追加"得到同一结果（`src/invariant.ts:77-78`、`:91-92`）。
 
 ### 2.4 YAML 可加载性修复
 
@@ -459,15 +459,15 @@ chip 与 composer 要读的标准座位成员——session scope 的 `sessionId`
 
 ## 5. invariant 入口
 
-`src/invariant.ts` 是独立的 companion 插件（`loop-engine-invariant`，`inject = ['invariants']`，`src/invariant.ts:31-33`），向 harness 的 invariant 注册表登记本包拥有的不变量——patch-manager 的写-读往返与 legacy 迁移：
+`src/invariant.ts` 是独立的 companion 插件（`loop-engine-invariant`，`inject = ['invariants']`，`src/invariant.ts:57-60`），向 harness 的 invariant 注册表登记本包拥有的不变量——patch-manager 的写-读往返与 legacy 迁移：
 
-- `applyManagedBlock` 必须是不动点（`src/invariant.ts:52-53`）。
-- 渲染出的块必须被 `hasManagedBlock` 认出来，且必须禁用基础 `agent-loop` 行（`:54-55`）。
-- 当前块不得读成 legacy pin（`:56`）。
-- 任意引擎的 legacy 块都必须仍读回该引擎（含本版本不认识的 id，标记里仍有它），且迁移结果与"同一层从未有过块"的变换结果逐字节相同（`:57-69`）。
-- 纯注释文件必须被修复为带块的可加载顶层数组（`:70-72`）。
+- `applyManagedBlock` 必须是不动点（`src/invariant.ts:77`）。
+- 渲染出的块必须被 `hasManagedBlock` 认出来，且必须禁用基础 `agent-loop` 行（`:78-79`）。
+- 当前块不得读成 legacy pin（`:80`）。
+- 任意引擎的 legacy 块都必须仍读回该引擎（含本版本不认识的 id，标记里仍有它），且迁移结果与"同一层从未有过块"的变换结果逐字节相同（`:86-93`）。
+- 纯注释文件必须被修复为带块的可加载顶层数组（`:94-96`）。
 
-它单独占一个 `./invariant` 出口（`package.json` 的 `exports`，`package.json:17-20`），由部署侧按需 compose 进 invariant 检查通道；检查本身是对纯变换的再断言，失败通过 `fail` 上报并挂在包名下（`src/invariant.ts:42-73`）。价值在于：写方与读方的互逆关系被绑定在同一次注册里，任一侧回归都会在部署的 invariant 轮里立刻炸出来。
+它单独占一个 `./invariant` 出口（`package.json` 的 `exports`，`package.json:17-20`），由部署侧按需 compose 进 invariant 检查通道；**宿主的两个类型不 import，而是就近声明**（`InvariantInstaller` / `InvariantRegistryLike`）：0.2.1 线删掉了 `@deepseek-ai/dsh-invariants` 整包，继续 import 它会让这一份产物无法同时服务四代（`docs/compatibility.md` §4.5）；`inject = ['invariants']` 保持不变，所以在没有该服务的代际上这个 companion 自动保持 pending，而插件本身从不挂载它；检查本身是对纯变换的再断言，失败通过 `fail` 上报并挂在包名下（`src/invariant.ts:66-97`）。价值在于：写方与读方的互逆关系被绑定在同一次注册里，任一侧回归都会在部署的 invariant 轮里立刻炸出来。
 
 ## 6. 构建产物与外部化策略
 
