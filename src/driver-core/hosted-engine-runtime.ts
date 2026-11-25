@@ -70,6 +70,51 @@ export interface HostedAgent extends Agent {
 }
 
 /**
+ * The live parent agent a factory caller passed, on the lines whose options still
+ * carry one.
+ *
+ * The 0.2.2 line removed the create/resume runtime-owner parameter: a delegated
+ * session's runtime tree membership now belongs to its subagent Activation rather
+ * than to the factory (see `docs/upgrade-guide/v0.2.1-rc.3/subagent-runtime-ownership`
+ * in the harness). The property is still what every earlier line hands in, so it
+ * is read through a widening cast instead of being dropped — on 0.2.2 it is
+ * simply absent, and the router answers from the durable `parentSession` lineage.
+ * @param options - the create or resume options a caller assembled.
+ * @returns the parent agent those options named, if the shape still carries one.
+ */
+export function legacyParentAgent(options: CreateAgentOptions | ResumeAgentOptions): Agent | undefined {
+  return (options as { parentAgent?: Agent }).parentAgent
+}
+
+/**
+ * Enter one agent into the host registry, with its runtime owner where the build
+ * still takes one.
+ *
+ * `AgentRegistry.enter()` lost its owner argument on the 0.2.2 line, so the two
+ * generations differ in arity rather than in behaviour: the older signature
+ * enrolls the agent in its owner's runtime tree, the newer one has no argument to
+ * accept and the subagent service owns that tree instead. Arity is the probe —
+ * `enter.length` is 2 on the lines that take an owner and 1 on the line that does
+ * not — so one build serves both without parsing a version.
+ * @param agents - the host registry.
+ * @param agent - the published agent.
+ * @param owner - the caller's parent agent, when there is one.
+ * @returns the detach capability for this entry.
+ */
+function enterAgent(
+  agents: { enter(agent: Agent): () => void },
+  agent: Agent,
+  owner: Agent | undefined,
+): () => void {
+  // `enter` is a registry method: it must keep its receiver, so the arity probe
+  // reads the method and the call goes back through the object.
+  const enter = agents.enter as unknown as (agent: Agent, owner?: Agent) => () => void
+  /* v8 ignore start -- the owner-carrying arm is unreachable on the coverage line, whose `enter` takes one argument; vitest.config.compat015.ts / compat017.ts / compat020.ts / compat021.ts take it */
+  return owner === undefined || enter.length < 2 ? agents.enter(agent) : enter.call(agents, agent, owner)
+  /* v8 ignore stop */
+}
+
+/**
  * The plugin's own handle for one published hosted agent: the harness contract
  * plus the two facts an in-place engine swap needs.
  *
@@ -288,14 +333,10 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
         signal: abort.signal,
         publish: async (source) => {
           assertLive()
-          // A swap JOINS a session another machine already entered and
-          // announced, so it owes only the agent half of the publication:
-          // `sessions.enter` refuses a live id and `sessions.announce` refuses a
-          // second announcement, and the entry travels in the lifetime instead.
-          const joining = lifetime.entered
-          if (!joining) lifetime.bind(agent.ctx.sessions.enter(session))
-          detachAgent = loopCtx.agents.enter(agent, parentAgent)
-          if (!joining) agent.ctx.sessions.announce(session)
+          // The session was entered and announced before setup — a fresh build's
+          // own transaction does it there, and a swap JOINS a lifetime that
+          // already carries both facts — so publication owes only the agent half.
+          detachAgent = enterAgent(loopCtx.agents, agent, parentAgent)
           assertLive()
           /* v8 ignore start -- legacy 0.1.5 announcement; the coverage job runs on 0.1.7 and vitest.config.compat015.ts takes this arm */
           if (LEGACY_HARNESS) {
@@ -351,9 +392,27 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
       throw error
     }
     try {
+      // Store the constructor seed BEFORE the session is entered, then enter and
+      // announce it before the caller's setup — the order the harness's own
+      // factory uses, and the order this line requires:
+      //
+      //  - the seed carries seq numbers the write handle has not seen, and it can
+      //    only be flushed while nothing else has written;
+      //  - 0.2.2 refuses an append to a store-owned session that was never
+      //    entered, and again until `session/created` completes, while setup is
+      //    exactly where a composition appends (the router's model-selection
+      //    guard does);
+      //  - from announcement on, the backend routes live session events into the
+      //    active write handle by session id, so flushing again after setup would
+      //    re-send what it already stored.
+      await this.appendUnstoredSuffix(stored, session)
+      if (!lifetime.entered) lifetime.bind(prepared.agent.ctx.sessions.enter(session))
+      if (!lifetime.announced) {
+        prepared.agent.ctx.sessions.announce(session)
+        lifetime.markAnnounced()
+      }
       const setupCommit = await raceAbort(setup?.(prepared.agent.ctx, prepared.agent), prepared.signal, id)
       setupCommit?.commit()
-      await this.appendUnstoredSuffix(stored, session)
       return prepared.publish(source)
     } catch (error: unknown) {
       // Rollback swallows a disposal rejection (a failing final handle close):
@@ -399,7 +458,7 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
           options.signal,
           'startup',
           new SessionLifetime(preparation.session, stored?.handle),
-          options.parentAgent,
+          legacyParentAgent(options),
           stored,
         )
       } finally {
@@ -561,7 +620,7 @@ export abstract class HostedEngineRuntime<TConfig, TAgent extends HostedAgent> i
           options.signal,
           'resume',
           new SessionLifetime(preparation.session, owned?.handle),
-          options.parentAgent,
+          legacyParentAgent(options),
           owned,
         )
       } finally {

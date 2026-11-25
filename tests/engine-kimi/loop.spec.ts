@@ -15,6 +15,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { KimiLoop, KIMI_DISPOSE_GRACE_MS } from '../../src/engine-kimi/loop.ts'
 import { fromSubprocess, kimiAcpArgv, kimiBinResolver, kimiHomeDir, kimiSubprocessSpec } from '../../src/engine-kimi/process.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** A subprocess handle shaped like the seam returns one. */
 function fakeHandle(): SubprocessHandle {
@@ -35,6 +36,7 @@ function fakeHandle(): SubprocessHandle {
 async function loopCtx(spawn: (spec: unknown) => unknown): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   ctx.provide('subprocess', { spawn })
   return ctx

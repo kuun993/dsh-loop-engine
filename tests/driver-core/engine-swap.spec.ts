@@ -33,6 +33,7 @@ import { ClaudeCodeLoop } from '../../src/engine-claude/loop.ts'
 import { KimiLoop } from '../../src/engine-kimi/loop.ts'
 import { ClaudeCodeAgent } from '../../src/engine-claude/agent.ts'
 import { KimiAgent } from '../../src/engine-kimi/agent.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Cleanup hooks for the contexts and temp roots one test created. */
 const cleanups: (() => Promise<void>)[] = []
@@ -60,6 +61,7 @@ async function harness(): Promise<Context> {
   cleanups.push(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(jsonlSessionPersistence, { root })

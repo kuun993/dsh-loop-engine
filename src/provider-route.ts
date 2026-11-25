@@ -46,8 +46,9 @@ import type {
   ModelModality,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL, HOSTED_ROUTE_NAME } from './agent-preset-ids.ts'
+import { llmFailure } from './driver-core/llm-failure.ts'
 import type { HostedEngineId } from './settings.ts'
 
 /**
@@ -249,7 +250,7 @@ export class HostedEngineRouteAdapter extends LlmAdapter {
   }
 
   stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
-    throw new LlmError(
+    throw llmFailure(
       `provider "${HOSTED_ROUTE_LABEL}" is a hosted loop engine route, not a model endpoint`,
       'HOSTED_ENGINE_ROUTE',
     )

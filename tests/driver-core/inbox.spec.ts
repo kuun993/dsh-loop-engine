@@ -40,7 +40,12 @@ function recorder(): { notifications: InboxNotifications; recorded: Recorded } {
 async function freshSession(): Promise<{ ctx: Context; session: Session }> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
-  return { ctx, session: ctx.sessions.prepare(SessionId('inbox-s'), { meta: { cwd: process.cwd() } }) }
+  const session = ctx.sessions.prepare(SessionId('inbox-s'), { meta: { cwd: process.cwd() } })
+  // The 0.2.2 line refuses an append to a store-owned session that was never entered.
+  ctx.sessions.enter(session)
+  // Appends are refused until `session/created` completes on the 0.2.2 line.
+  ctx.sessions.announce(session)
+  return { ctx, session }
 }
 
 describe('DriverInbox pending lists', () => {

@@ -19,6 +19,7 @@ import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { Readable, Writable } from 'node:stream'
 
 import { loopPluginFor } from '../helpers/agent-harness.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(KimiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
@@ -42,6 +43,7 @@ async function harness(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
   await ctx.plugin(loopPlugin, {})
@@ -70,6 +72,7 @@ describe('factory registration and HMR-safe disposal', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     const loopFiber = await ctx.plugin(loopPlugin, {})
@@ -230,6 +233,7 @@ describe('createAgent options', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     try {
@@ -273,6 +277,7 @@ describe('resume', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     await ctx.plugin(loopPlugin, {})
@@ -514,6 +519,7 @@ describe('persistence cancellation edges', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     ctx.provide('subprocess', { spawn: vi.fn(() => fakeHandle()) })
     await ctx.plugin(loopPlugin, {})

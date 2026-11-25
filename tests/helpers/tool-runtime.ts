@@ -21,5 +21,15 @@ export function fakeToolRuntime() {
   return {
     get: (): undefined => undefined,
     schemas: (): readonly never[] => [],
+    /**
+     * Admit an empty tool set for one step, the shape the 0.2.2 loop machinery
+     * reads: `resolve()` once per step, then `view()` for the admitted
+     * registrations.
+     * @returns an empty, closable tool set.
+     */
+    resolve: async (): Promise<{ dispose(): void; view(): ReadonlyMap<string, never> }> => ({
+      dispose: (): void => {},
+      view: (): ReadonlyMap<string, never> => new Map(),
+    }),
   }
 }

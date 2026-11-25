@@ -39,6 +39,8 @@ export class SessionLifetime {
   private readonly handle: SessionHandle | undefined
   /** The store's detacher; `undefined` until the entry is bound by the transaction that entered the session. */
   private detach: (() => void) | undefined
+  /** Whether the session has already been announced (see {@link announced}). */
+  private announcedOnce = false
 
   /**
    * @param session - the live session whose entry and write handle these are.
@@ -65,6 +67,25 @@ export class SessionLifetime {
    */
   bind(detach: () => void): void {
     this.detach = detach
+  }
+
+  /**
+   * Whether this lifetime's session has been ANNOUNCED to the host
+   * (`sessions.announce`, which publishes `session/created`).
+   *
+   * Distinct from {@link entered}: the 0.2.2 line refuses an append to a
+   * store-owned session that was never entered, so the transaction enters the
+   * session BEFORE the caller's setup runs — and only announces it once the agent
+   * is published. A machine that joins a live session's lifetime inherits both
+   * facts, which is what tells it to announce nothing.
+   */
+  get announced(): boolean {
+    return this.announcedOnce
+  }
+
+  /** Record that this lifetime's session has been announced. */
+  markAnnounced(): void {
+    this.announcedOnce = true
   }
 
   /** Drain and close the write handle — the durability barrier that precedes leaving the store. */

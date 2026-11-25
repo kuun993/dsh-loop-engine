@@ -18,6 +18,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES } from '../../src/engine-claude/loop.ts'
 import { loopPluginFor } from '../helpers/agent-harness.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
@@ -132,6 +133,7 @@ async function harness(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(loopPlugin, {})

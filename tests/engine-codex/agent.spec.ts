@@ -14,8 +14,9 @@ import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor, mountHarness, userMessage as message } from '../helpers/agent-harness.ts'
 import { toolResultRole, toolResultView } from '../helpers/harness-generation.ts'
-import { modelSelectionProjections } from '../helpers/model-selection-projection.ts'
+import { seedModelSelectionOn } from '../helpers/model-selection-projection.ts'
 import { DSH_ENDPOINT, provideDshEndpoint } from '../helpers/dsh-model-endpoint.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
 
@@ -187,7 +188,7 @@ async function harness(config: Record<string, unknown> = {}): Promise<Context> {
   // The host's `modelSelection` fold, so a `model/selection` appended to the
   // session is read back as the pending selection the driver resolves a model
   // from — the same read the host's own `selectionFor` makes.
-  ctx.provide('sessionProjections', modelSelectionProjections(ctx))
+  seedModelSelectionOn(ctx)
   return ctx
 }
 
@@ -222,6 +223,7 @@ describe('CodexLoop factory registration', () => {
   it('rejects create when no factory is registered', async () => {
     const fresh = new Context()
     await fresh.plugin(SessionStore)
+    provideSessionProjections(fresh)
     await fresh.plugin(AgentRegistry)
     try {
       await expect(fresh.agents.create({

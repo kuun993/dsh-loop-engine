@@ -17,6 +17,7 @@ import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { CodexLoop } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor } from '../helpers/agent-harness.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
@@ -78,6 +79,7 @@ async function harness(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(loopPlugin, {})
   return ctx
@@ -101,6 +103,7 @@ describe('factory registration and HMR-safe disposal', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     const loopFiber = await ctx.plugin(loopPlugin, {})
     try {
@@ -261,6 +264,7 @@ describe('createAgent options', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     try {
       const loopFiber = await ctx.plugin(loopPlugin, {})
@@ -303,6 +307,7 @@ describe('resume', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(loopPlugin, {})
     await ctx.plugin(jsonlSessionPersistence, { root })
@@ -543,6 +548,7 @@ describe('persistence cancellation edges', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+    provideSessionProjections(ctx)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(loopPlugin, {})
     await ctx.plugin(jsonlSessionPersistence, { root })

@@ -15,6 +15,7 @@ import { PiLoop, PI_SANDBOX_MODES } from '../../src/engine-pi/loop.ts'
 import type { PiMessage } from '../../src/engine-pi/rpc/types.ts'
 
 import { loopPluginFor } from '../helpers/agent-harness.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(PiLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
@@ -78,6 +79,7 @@ async function harness(withLoop = true): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   if (withLoop) await ctx.plugin(loopPlugin, {})

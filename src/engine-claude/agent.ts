@@ -42,6 +42,8 @@ import {
   meaningfulUsage,
   type StreamToolCall,
 } from './mapping.ts'
+import { llmFailure } from '../driver-core/llm-failure.ts'
+import { HostedAgentModel } from '../driver-core/agent-model.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { createImageAccessResolver } from '../driver-core/image-access.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
@@ -164,6 +166,8 @@ function imagePromptStream(text: string, images: readonly StepImage[]): AsyncIte
 /** Drives one session through turn and step boundaries on Claude Code. */
 export class ClaudeCodeAgent implements Agent {
   readonly inbox: DriverInbox
+  /** Agent-owned access to durable model selection for future steps (the 0.2.2 `Agent` contract). */
+  readonly model: HostedAgentModel
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -236,6 +240,7 @@ export class ClaudeCodeAgent implements Agent {
     private readonly spawn: SpawnCapability,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
+    this.model = new HostedAgentModel(loopCtx, session, options)
     this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
@@ -394,7 +399,7 @@ export class ClaudeCodeAgent implements Agent {
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
     const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
+      'agent/pre-step', { messages: claimed, ...position, signal, modelSelection: this.model.forStep() },
       (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({ kind: 'enter', messages: claimed }),
     )
     signal.throwIfAborted()
@@ -907,7 +912,7 @@ export class ClaudeCodeAgent implements Agent {
               finished = true
             } else {
               const summary = message.errors[0] ?? `claude code query failed (${message.subtype})`
-              throw new LlmError(summary, failureCode(message.subtype))
+              throw llmFailure(summary, failureCode(message.subtype))
             }
             break
           }
@@ -918,7 +923,7 @@ export class ClaudeCodeAgent implements Agent {
         }
       }
       if (!finished) {
-        throw new LlmError(
+        throw llmFailure(
           `agent "${this.id}": claude-code query ended without a result message`,
           'CLAUDE_CODE_NO_RESULT',
         )

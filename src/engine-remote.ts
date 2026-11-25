@@ -117,6 +117,14 @@ export interface RouterSurface {
   reportEngine(sessionId: SessionId): Promise<SessionEngineReport>
   /** Move one session to another engine, or answer why it was not moved. */
   selectEngine(sessionId: SessionId, engine: LoopEngineId): Promise<LoopEngineSelectResult>
+  /**
+   * Settles once the base loop's own registrations are in place.
+   *
+   * On the 0.2.2 line the single `AgentFactory` slot is claimed from an
+   * asynchronous service-initialisation hook, so a caller that mounts the plugin
+   * must await this before creating a session.
+   */
+  readonly routerReady: Promise<void>
 }
 
 /**

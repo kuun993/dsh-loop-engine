@@ -55,10 +55,41 @@ interface SessionQuery {
   ): Promise<SessionObservationLease>
 }
 
-/** A leased observation carrying the session's projection snapshot. */
+/** A leased observation carrying the session's projection snapshot and header. */
 interface SessionObservationLease {
   readonly projections?: { readonly values: { readonly agentPreset?: unknown } }
+  readonly header?: { readonly parentSession?: unknown }
   [Symbol.dispose](): void
+}
+
+/**
+ * The session that created one persisted session, when the durable log records
+ * one.
+ *
+ * This is the replacement for the create/resume runtime-owner parameter the
+ * 0.2.2 line removed: a resumed child session carries no live parent agent, so
+ * the parent's identity has to come from the session's own header
+ * (`docs/upgrade-guide/v0.2.1-rc.3/subagent-runtime-ownership` — "Read
+ * `session.header.parentSession` for the direct creator"). Every failure reads
+ * as "no parent": the answer only ever widens which engine may be inherited, and
+ * a session must never fail to open because this read did.
+ * @param ctx - the context carrying the session-query seam.
+ * @param sessionId - the persisted session whose creator is asked for.
+ * @returns the creating session's id, or undefined when none is recorded.
+ */
+export async function parentSessionOf(ctx: Context, sessionId: SessionId): Promise<SessionId | undefined> {
+  const query = ctx.get('sessionQuery') as SessionQuery | undefined
+  if (query === undefined) return undefined
+  try {
+    using observation = await query.observeSession(sessionId, { projectionMode: 'none' })
+    const parent = observation.header?.parentSession
+    return typeof parent === 'string' ? parent as SessionId : undefined
+  } catch {
+    // A refused lease, an unreadable log, or a session that does not exist yet
+    // are all the same answer here: this session's creator is not knowable, so
+    // no engine is inherited from it.
+    return undefined
+  }
 }
 
 /**

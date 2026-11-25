@@ -36,39 +36,8 @@ import { RouterLoop } from '../src/router-loop.ts'
 import { createLiveLoopConfig } from './helpers/fake-settings.ts'
 import { LEGACY_HARNESS } from './helpers/harness-generation.ts'
 import { fakeToolRuntime } from './helpers/tool-runtime.ts'
+import { fakeSessionProjections } from './helpers/session-projections.ts'
 
-/**
- * Minimal stand-in for the host session-projection registry.
- *
- * `AgentLoop`'s constructor registers its `turnBoundary` unit through
- * `ctx.sessionProjections`, so the base loop and the router both need the
- * service to be present; registrations are recorded and a session's cell folds
- * to the definition's `init`. The registry takes no build-time dependency on
- * the projection package, hence the structural stand-in.
- */
-function fakeSessionProjections() {
-  const definitions = new Map<string, { init: () => unknown }>()
-  const cells = new WeakMap<object, Map<string, unknown>>()
-  return {
-    register: vi.fn((definition: { key: string; init: () => unknown }) => {
-      definitions.set(definition.key, definition)
-      return () => { definitions.delete(definition.key) }
-    }),
-    stateOf: (session: object, key: string): unknown => {
-      let byKey = cells.get(session)
-      if (byKey === undefined) {
-        byKey = new Map()
-        cells.set(session, byKey)
-      }
-      if (!byKey.has(key)) {
-        const definition = definitions.get(key)
-        if (definition === undefined) return undefined
-        byKey.set(key, definition.init())
-      }
-      return byKey.get(key)
-    },
-  }
-}
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -101,13 +70,16 @@ async function boot(): Promise<Context> {
   cleanups.push(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(LocalSubprocessRuntime)
-  await ctx.plugin(LlmRuntime)
-  ctx.provide('sessionProjections', fakeSessionProjections())
+  // Before `AgentRegistry`: cordis resolves a plugin's static `inject` at mount
+  // time and does not re-activate a pending fiber when a service arrives later,
+  // and the 0.2.2 registry injects the projection registry.
+  ctx.provide('sessionProjections', fakeSessionProjections(ctx))
   // The router's inject gate is the harness loop's own dependency set, which
   // includes the tool registry its turn machinery reads.
   ctx.provide('tools', fakeToolRuntime())
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(LocalSubprocessRuntime)
+  await ctx.plugin(LlmRuntime)
   return ctx
 }
 
@@ -121,7 +93,7 @@ async function boot(): Promise<Context> {
 async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
+    apply: (pluginCtx: Context) => apply(pluginCtx, config),
   })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })
@@ -137,11 +109,10 @@ async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
  * exactly what the harness's live patch reload does to the base row.
  */
 async function mountBaseLoop(ctx: Context): Promise<Fiber> {
-  const fiber = ctx.plugin({
-    name: 'base-agent-loop',
-    inject: ['agents', 'sessions', 'systemPrompt', 'sessionProjections'],
-    apply: (baseCtx: Context) => { new AgentLoop(baseCtx, { agents: [] }) },
-  })
+  // Mount the class itself, not a hand-rolled `new`: the 0.2.2 line registers the
+  // loop's service and factory from `[Service.init]`, which cordis runs for a
+  // class plugin and never runs for a bare construction.
+  const fiber = ctx.plugin(AgentLoop, { agents: [] })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })
   return fiber

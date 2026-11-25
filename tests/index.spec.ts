@@ -50,6 +50,7 @@ import { PiSkillProvider } from '../src/engine-pi/skills.ts'
 import { KimiSkillProvider } from '../src/engine-kimi/skills.ts'
 import { LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL, LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../src/namespace.ts'
 import { LEGACY_HARNESS } from './helpers/harness-generation.ts'
+import { fakeSessionProjections } from './helpers/session-projections.ts'
 import {
   COMPOSITION_FILE,
   enginePresetId,
@@ -131,40 +132,6 @@ function rosterDefault(settings: FakeSettings): string | undefined {
 }
 
 /**
- * Minimal stand-in for the host session-projection registry.
- *
- * The router extends the harness `AgentLoop`, whose constructor and agent
- * register `turnBoundary`/`inbox` units through `ctx.sessionProjections`. That
- * registry is not a dependency of this package (a minimal profile may compose
- * none), so the suite supplies a structural stand-in: registrations are
- * recorded and a session's cell is folded to the definition's `init`, which is
- * all the loop reads back before a turn runs.
- */
-function fakeSessionProjections() {
-  const definitions = new Map<string, { init: () => unknown }>()
-  const cells = new WeakMap<object, Map<string, unknown>>()
-  return {
-    register: vi.fn((definition: { key: string; init: () => unknown }) => {
-      definitions.set(definition.key, definition)
-      return () => { definitions.delete(definition.key) }
-    }),
-    stateOf: (session: object, key: string): unknown => {
-      let byKey = cells.get(session)
-      if (byKey === undefined) {
-        byKey = new Map()
-        cells.set(session, byKey)
-      }
-      if (!byKey.has(key)) {
-        const definition = definitions.get(key)
-        if (definition === undefined) return undefined
-        byKey.set(key, definition.init())
-      }
-      return byKey.get(key)
-    },
-  }
-}
-
-/**
  * Boot the services the plugin's composition assumes.
  *
  * The `doc` the tests used to pass as the loop-engine settings section is
@@ -187,6 +154,10 @@ async function boot(
   cleanups.push(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  // Before `AgentRegistry`: the 0.2.2 registry injects the projection registry, so
+  // one provided afterwards never activates it and every create fails with "no
+  // agent factory registered".
+  if (opts?.projections === true) ctx.provide('sessionProjections', fakeSessionProjections(ctx))
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   // The real llm registry, present in the web profile: the plugin serves its
@@ -198,7 +169,6 @@ async function boot(
   // its turn machinery reads. Every other test leaves both out, so no factory
   // slot is taken and the test drives one concern at a time.
   if (opts?.projections === true) {
-    ctx.provide('sessionProjections', fakeSessionProjections())
     ctx.provide('tools', fakeToolRuntime())
   }
 
@@ -258,7 +228,7 @@ async function tempDir(): Promise<string> {
 async function mountPlugin(ctx: Context, config: Config): Promise<Fiber> {
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, { ...config, ...live.config }) },
+    apply: (pluginCtx: Context) => apply(pluginCtx, { ...config, ...live.config }),
   })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })
@@ -353,11 +323,11 @@ describe('summarizer configuration', () => {
     const dir = await tempDir()
     const path = join(dir, 'cordis.patch.yml')
     const { ctx } = await boot()
-    expect(() => apply(ctx, {
+    await expect(apply(ctx, {
       patchPath: path,
       summarizerModel: 'deepseek-flash',
       ...live.config,
-    })).toThrow('must be set together')
+    })).rejects.toThrow('must be set together')
     // The check runs before the managed block, so a bad profile leaves no file.
     await expect(readFile(path, 'utf8')).rejects.toThrow()
   })
@@ -673,7 +643,7 @@ describe('apply managed block', () => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
     })
     const { ctx } = await boot()
-    expect(() => apply(ctx, { patchPath: path, ...live.config })).toThrow('EACCES')
+    await expect(apply(ctx, { patchPath: path, ...live.config })).rejects.toThrow('EACCES')
   })
 })
 

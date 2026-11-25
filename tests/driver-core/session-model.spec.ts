@@ -38,6 +38,10 @@ async function boot(withProjections = true): Promise<Fixture> {
   const projections = withProjections ? modelSelectionProjections(ctx) : undefined
   if (projections !== undefined) ctx.provide('sessionProjections', projections)
   const session = ctx.sessions.prepare(SessionId('session-model-s'), { meta: { cwd: process.cwd() } })
+  // The 0.2.2 line refuses an append to a store-owned session that was never entered.
+  ctx.sessions.enter(session)
+  // Appends are refused until `session/created` completes on the 0.2.2 line.
+  ctx.sessions.announce(session)
   return { ctx, session, projections }
 }
 

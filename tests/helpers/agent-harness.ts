@@ -21,6 +21,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { provideSessionProjections } from './session-projections.ts'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 
 /** A loop class as the specs construct it: `new Loop(ctx, config)`. */
@@ -74,6 +75,11 @@ export async function mountHarness(
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  // The 0.2.2 `AgentRegistry` injects `sessionProjections`, so a stack without
+  // one leaves the registry pending and every `ctx.agents.create(...)` fails with
+  // "no agent factory registered". Providing it is inert on the older lines: only
+  // the harness loop and this plugin read the service.
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   if (subprocess === 'runtime') await ctx.plugin(LocalSubprocessRuntime)
   if (subprocess === 'stub') ctx.provide('subprocess', { spawn: vi.fn() })

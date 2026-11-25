@@ -37,6 +37,8 @@ import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
+import { llmFailure } from '../driver-core/llm-failure.ts'
+import { HostedAgentModel } from '../driver-core/agent-model.ts'
 import { serializeHistory } from '../driver-core/prompt.ts'
 import { createImageAccessResolver } from '../driver-core/image-access.ts'
 import { stepImagePaths } from '../driver-core/step-images.ts'
@@ -143,6 +145,8 @@ function nonEmptyText(parts: readonly string[] | undefined): string | undefined 
 /** Drives one session through turn and step boundaries on Codex. */
 export class CodexAgent implements Agent {
   readonly inbox: DriverInbox
+  /** Agent-owned access to durable model selection for future steps (the 0.2.2 `Agent` contract). */
+  readonly model: HostedAgentModel
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -237,6 +241,7 @@ export class CodexAgent implements Agent {
     private readonly config: ResolvedConfig,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
+    this.model = new HostedAgentModel(loopCtx, session, options)
     this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
@@ -510,7 +515,7 @@ export class CodexAgent implements Agent {
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
     const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
+      'agent/pre-step', { messages: claimed, ...position, signal, modelSelection: this.model.forStep() },
       (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({ kind: 'enter', messages: claimed }),
     )
     signal.throwIfAborted()
@@ -1019,7 +1024,7 @@ export class CodexAgent implements Agent {
             }
             case 'error':
               flushHeld()
-              throw new LlmError(event.error.message, 'CODEX_ERROR')
+              throw llmFailure(event.error.message, 'CODEX_ERROR')
             /* v8 ignore next -- AppServerEvent is a closed union; no unknown kinds */
             default:
               break
@@ -1027,7 +1032,7 @@ export class CodexAgent implements Agent {
         }
         flushHeld()
         if (!finished) {
-          throw new LlmError(
+          throw llmFailure(
             `agent "${this.id}": codex query ended without a completed turn`,
             'CODEX_NO_RESULT',
           )

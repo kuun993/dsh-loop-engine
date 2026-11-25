@@ -51,6 +51,7 @@
  * @module dsh-loop-engine/router-loop
  */
 
+import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import AgentLoop, { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from '@deepseek-ai/dsh-agent-loop'
 import type {
@@ -65,16 +66,26 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { LEGACY_HARNESS } from './compat.ts'
 import { HOSTED_DEFAULT_MODEL } from './agent-preset-ids.ts'
 import type { LoopEngineRefusalCode, LoopEngineSelectResult, SessionEngineReport } from './agent-preset-ids.ts'
+import { legacyParentAgent } from './driver-core/hosted-engine-runtime.ts'
 import type { HostedAgent, HostedAgentHandle, HostedEngineRuntime } from './driver-core/hosted-engine-runtime.ts'
 import type { SessionLifetime } from './driver-core/session-lifetime.ts'
 import type { SessionProjectionsService } from './driver-core/host-servers.ts'
-import { engineOfSession, engineReportOfSession } from './engine-of-session.ts'
+import { engineOfSession, engineReportOfSession, parentSessionOf } from './engine-of-session.ts'
 import { ModelSelectionReset } from './model-selection-reset.ts'
 import { engineOfPreset, hostedEngineOf } from './preset.ts'
 import { hostedRouteLabelOf } from './provider-route.ts'
 import { registerEngineSurface } from './engine-surface.ts'
 import type { EngineRecordStore } from './session-engine-store.ts'
 import type { HostedEngineId, LoopEngineId } from './settings.ts'
+
+/**
+ * Cordis's service-initialisation hook key.
+ *
+ * Written as `Service.init` so it is the very symbol cordis invokes and the
+ * harness's own `[Service.init]` methods are declared under; a string key would
+ * silently never match.
+ */
+const deferredInit = Service.init
 
 /**
  * The preset roster announces a committed per-session preset change on the
@@ -190,6 +201,17 @@ export class RouterLoop extends AgentLoop {
    * ({@link RouterLoop.engineOptions}). Owned here because each warning it owes
    * is owed once per process, not once per session.
    */
+  /**
+   * Settles once the base loop's own registrations are in place.
+   *
+   * On the 0.2.2 line those run in `[Service.init]` (see
+   * {@link RouterLoop.runDeferredServiceInit}), which is asynchronous: the single
+   * factory slot appears one microtask after this constructor returns. The plugin
+   * awaits this before its own apply settles, so a caller that mounts the plugin
+   * and then creates a session never races the registration.
+   */
+  readonly routerReady: Promise<void>
+
   private readonly selectionReset: ModelSelectionReset
 
   /**
@@ -226,17 +248,54 @@ export class RouterLoop extends AgentLoop {
     this.warn = warn
     this.selectionReset = new ModelSelectionReset(ctx, warn)
     this.rebuildOnEngineChange()
+    this.routerReady = this.runDeferredServiceInit()
+  }
+
+  /**
+   * Run the base loop's service-initialisation hook when this build defers its
+   * own registrations to it.
+   *
+   * The 0.2.2 line moved everything the base loop contributes — its projection
+   * units, the single `AgentFactory` slot, its prompt variables, and its
+   * declarative `agents` list — out of the constructor and into
+   * `[Service.init]`, which cordis calls only for a service it mounts itself.
+   * The router is constructed by hand (`new RouterLoop(...)`) because it owns
+   * that slot itself, so cordis never calls the hook for it: without this, 0.2.2
+   * would mount a router that registers nothing and every session would fail
+   * with "no agent factory registered". The hook is INHERITED, so this calls the
+   * harness's own implementation rather than a copy of it, and the probe is its
+   * presence — the lines before 0.2.2 do all of this work in the constructor and
+   * have nothing to call.
+   *
+   * A failure here is reported rather than thrown: the caller's mount retry
+   * already handles the synchronous collisions (the service name, the factory
+   * slot), and an asynchronous rejection has no caller left to rethrow into.
+   */
+  private runDeferredServiceInit(): Promise<void> {
+    const init = (this as unknown as { [deferredInit]?: () => Promise<void> })[deferredInit]
+    /* v8 ignore start -- the absent-hook arm is unreachable on the coverage line, which defers to `[Service.init]`; vitest.config.compat015.ts / compat017.ts / compat020.ts / compat021.ts take it */
+    if (init === undefined) return Promise.resolve()
+    /* v8 ignore stop */
+    return init.call(this).catch((error: unknown) => {
+      // Same sentence the synchronous mount path uses: on this line the factory
+      // registration is what the deferred hook performs, so a taken slot surfaces
+      // here rather than from the constructor, and an operator reading the log
+      // must not have to learn a second wording for it.
+      this.ctx.logger.error(`loop-engine: could not start the loop router: ${String(error)}`)
+    })
   }
 
   /** The engine that drives one session's agent. */
-  private async engineFor(presetId: string | undefined, parent?: Agent): Promise<LoopEngineId> {
+  private async engineFor(presetId: string | undefined, parentSessionId?: SessionId): Promise<LoopEngineId> {
     const named = engineOfPreset(presetId)
     if (named !== undefined) return named
     // A preset this plugin does not own: a deployment-authored preset, or none
     // at all. A child agent inherits the engine its parent is running, so a
-    // delegated session never silently changes engines.
-    if (parent !== undefined) {
-      const inherited = hostedEngineOf(await engineOfSession(this.ctx, parent.id, this.records))
+    // delegated session never silently changes engines. The inheritance is read
+    // from the parent SESSION, not from the parent agent object the 0.2.2 line
+    // stopped passing: the durable lineage is the answer that survives a resume.
+    if (parentSessionId !== undefined) {
+      const inherited = hostedEngineOf(await engineOfSession(this.ctx, parentSessionId, this.records))
       if (inherited !== undefined) return inherited
     }
     return 'in-process'
@@ -254,16 +313,16 @@ export class RouterLoop extends AgentLoop {
    * this plugin were not installed at all.
    * @param sessionId - the session being created.
    * @param presetId - the preset the caller composed with, when it named one.
-   * @param parent - the live parent agent, for a child session's inheritance.
+   * @param parentSessionId - the creating session, for a child session's inheritance.
    * @returns the engine, or the harness loop when the answer could not be read.
    */
   private async engineForCreate(
     sessionId: SessionId,
     presetId: string | undefined,
-    parent: Agent | undefined,
+    parentSessionId: SessionId | undefined,
   ): Promise<LoopEngineId> {
     try {
-      return this.records.engineOf(sessionId) ?? await this.engineFor(presetId, parent)
+      return this.records.engineOf(sessionId) ?? await this.engineFor(presetId, parentSessionId)
     } catch (error) {
       return this.degradeToHarnessLoop(sessionId, error)
     }
@@ -279,13 +338,16 @@ export class RouterLoop extends AgentLoop {
    * where a read failure is most likely and least acceptable to surface as
    * "this session will not open".
    * @param sessionId - the persisted session being resumed.
-   * @param parent - the live parent agent, for a child session's inheritance.
+   * @param parentSessionId - the creating session, for a child session's inheritance.
    * @returns the engine, or the harness loop when the answer could not be read.
    */
-  private async engineForResume(sessionId: SessionId, parent: Agent | undefined): Promise<LoopEngineId> {
+  private async engineForResume(sessionId: SessionId, parentSessionId: SessionId | undefined): Promise<LoopEngineId> {
     try {
-      return hostedEngineOf(await engineOfSession(this.ctx, sessionId, this.records))
-        ?? await this.engineFor(undefined, parent)
+      const recorded = hostedEngineOf(await engineOfSession(this.ctx, sessionId, this.records))
+      if (recorded !== undefined) return recorded
+      // Only the fallback owes the durable lineage read: a session whose own
+      // record or preset answers must not pay a second observation for it.
+      return await this.engineFor(undefined, parentSessionId ?? await parentSessionOf(this.ctx, sessionId))
     } catch (error) {
       return this.degradeToHarnessLoop(sessionId, error)
     }
@@ -377,7 +439,7 @@ export class RouterLoop extends AgentLoop {
    */
   override async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     const recipe = recipeOf(ownerCtx, options)
-    const engine = await this.engineForCreate(options.sessionId, options.meta?.agentPreset, options.parentAgent)
+    const engine = await this.engineForCreate(options.sessionId, options.meta?.agentPreset, parentSessionIdOf(options))
     if (engine === 'in-process') {
       return this.adopt(engine, await super.createAgent(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
@@ -408,7 +470,7 @@ export class RouterLoop extends AgentLoop {
    */
   override async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
     const recipe = recipeOf(ownerCtx, options)
-    const engine = await this.engineForResume(options.resumeSessionId, options.parentAgent)
+    const engine = await this.engineForResume(options.resumeSessionId, legacyParentAgent(options)?.id)
     if (engine === 'in-process') {
       return this.adopt(engine, await super.resume(ownerCtx, this.engineOptions(options, engine)), recipe)
     }
@@ -816,6 +878,20 @@ function refuse(code: LoopEngineRefusalCode, reason: string): LoopEngineSelectRe
   return { ok: false, code, reason }
 }
 
+/**
+ * The creating session of a create call, for a child session's engine
+ * inheritance.
+ *
+ * \`meta.parentSession\` is the durable lineage every covered line accepts; the
+ * legacy runtime-owner parameter is the fallback for a caller that only has the
+ * live agent, which is what the lines before 0.2.2 hand in.
+ * @param options - the create options being served.
+ * @returns the creating session's id, or undefined for a session with no parent.
+ */
+function parentSessionIdOf(options: CreateAgentOptions): SessionId | undefined {
+  return options.meta?.parentSession ?? legacyParentAgent(options)?.id
+}
+
 /** The rebuild recipe of one create or resume call. */
 function recipeOf(
   ownerCtx: Context,
@@ -825,7 +901,7 @@ function recipeOf(
     ownerCtx,
     agentOptions: options.agentOptions ?? {},
     setup: options.setup,
-    parentAgent: options.parentAgent,
+    parentAgent: legacyParentAgent(options),
   }
 }
 

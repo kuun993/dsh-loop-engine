@@ -13,6 +13,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** One projection unit as the loop registers it, accepted structurally. */
 interface RegisteredUnit {
@@ -85,18 +86,56 @@ export function fakeSessionProjections(ctx: Context) {
     fold(session, event)
   })
 
-  return {
-    register: (definition: RegisteredUnit): (() => void) => {
-      units.set(definition.key, {
-        init: () => definition.init(),
-        // The real registry erases the per-key state type the same way.
-        apply: (state, event) => definition.apply(state as never, event),
-      })
-      return () => { units.delete(definition.key) }
-    },
-    stateOf: (session: Session, key: string): unknown => {
-      catchUp(session)
-      return stateFor(session, key)
-    },
+  const read = (session: Session, key: string): unknown => {
+    catchUp(session)
+    return stateFor(session, key)
   }
+
+  /**
+   * Register one unit, answering in the shape the RUNNING harness awaits.
+   *
+   * The 0.2.2 registry returns `Promise<ProjectionHandle>` (handle: `stateOf`,
+   * `readerFor`, `dispose`), while the lines before it returned the disposer
+   * function itself and were used as `yield unregister`. Both callers exist — the
+   * harness loop of one line or the other is what registers through this stand-in
+   * during a spec — so the answer is one object that is callable, carries the
+   * handle surface, and resolves to the handle surface when awaited.
+   */
+  const register = (definition: RegisteredUnit): unknown => {
+    units.set(definition.key, {
+      init: () => definition.init(),
+      // The real registry erases the per-key state type the same way.
+      apply: (state, event) => definition.apply(state as never, event),
+    })
+    const release = (): void => { units.delete(definition.key) }
+    const handle = {
+      stateOf: (session: Session): unknown => read(session, definition.key),
+      readerFor: (session: Session): (() => unknown) => () => read(session, definition.key),
+      dispose: async (): Promise<void> => { release() },
+    }
+    // Resolve to the plain handle, never to this callable: a thenable that
+    // resolves to itself would be awaited forever.
+    return Object.assign(release, handle, {
+      then: (resolve: (value: unknown) => unknown): unknown => Promise.resolve(handle).then(resolve),
+    })
+  }
+
+  return {
+    register,
+    stateOf: (session: Session, key: string): unknown => read(session, key),
+  }
+}
+
+/**
+ * Provide the stand-in on a context that is about to mount `AgentRegistry`.
+ *
+ * The 0.2.2 `AgentRegistry` injects `sessionProjections`, so a spec that boots
+ * the real registry without one leaves the service pending and every
+ * `ctx.agents.create(...)` fails with "no agent factory registered". The lines
+ * before 0.2.2 do not inject it, where providing it is inert: nothing reads the
+ * service unless the harness loop or this plugin composes it.
+ * @param ctx - the context before `AgentRegistry` is plugged.
+ */
+export function provideSessionProjections(ctx: Context): void {
+  ctx.provide('sessionProjections', fakeSessionProjections(ctx))
 }

@@ -13,6 +13,7 @@ import AgentRegistry, { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES } from '../../src/engine-codex/loop.ts'
 import type { AppServerEvent } from '../../src/engine-codex/appserver/thread.ts'
 import { loopPluginFor } from '../helpers/agent-harness.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(CodexLoop, ['agents', 'sessions', 'systemPrompt'])
@@ -85,6 +86,7 @@ async function harness(withLoop = true): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   if (withLoop) await ctx.plugin(loopPlugin, {})
   return ctx

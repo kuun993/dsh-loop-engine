@@ -458,7 +458,7 @@ function kimiConfig(config: Config): KimiConfig {
  * @param ctx - the composing context.
  * @param config - composition entry for the managed patch file and engine knobs.
  */
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   // Resolved first: a half-set pair is a compose-time misconfiguration, and it
   // must fail before anything is written.
   const summarizer = resolveSummarizerTarget(config)
@@ -870,6 +870,12 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
   mountRouter()
+  // The 0.2.2 line defers the base loop's own registrations to its
+  // service-initialisation hook, so the single `AgentFactory` slot appears a
+  // microtask after the router is constructed. Awaiting it here keeps "the
+  // plugin is loaded" and "a session can be created" the same moment, which is
+  // the guarantee cordis gives for a loop it mounts itself.
+  await routerHolder.current?.routerReady
 
   /**
    * Publish "which engine does this session run?" and "move it to another" to

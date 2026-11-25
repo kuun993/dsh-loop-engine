@@ -24,13 +24,13 @@ the scope key is what joins an agent to its preset
 
 ## 怎么做
 
-把 `HARNESS` 设为 harness checkout 的 **`file://` URL**，然后把 `VERSION` 设为**当前 harness 版本**（`deepseek-harness/package.json` 的 `version`，例如 `0.2.1-rc.2`），在 profile 目录里执行：
+把 `HARNESS` 设为 harness checkout 的 **`file://` URL**，然后把 `VERSION` 设为**当前 harness 版本**（`deepseek-harness/package.json` 的 `version`，例如 `0.2.2-rc.5`），在 profile 目录里执行：
 
 > shim 的 `version` **不能随便写**：它要满足本插件 `peerDependencies` 里那条并集范围（`>=0.1.7-rc.1 <0.1.8-0 || >=0.2.1-rc.1 <0.2.2-0`）。写成 `0.0.0` 之类的占位值，pnpm 会判定 peer 不满足，**再装一份 harness 包**——于是 profile 里出现两份模块实例，`agent-presets: refusing to compose an unscoped context` 那类失败就回来了。这些 shim 的存在意义正是"只留一份"。因此每次升级 harness 后跟着改这里的版本号。
 
 ```sh
 HARNESS=file:///path/to/deepseek-harness   # 例如 file:///D:/repos/deepseek-harness
-VERSION=0.2.1-rc.2                          # deepseek-harness/package.json 的 version
+VERSION=0.2.2-rc.5                          # deepseek-harness/package.json 的 version
 cd "$DSH_HOME/profiles/web" && mkdir -p shims
 while IFS='|' read -r name rel; do
   mkdir -p "shims/$name"

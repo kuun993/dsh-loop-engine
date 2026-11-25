@@ -92,6 +92,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { HOSTED_DEFAULT_MODEL } from './agent-preset-ids.ts'
 import { currentSelection } from './driver-core/session-model.ts'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionModelSelection, SessionProjectionsService, SettingsMutator } from './driver-core/host-servers.ts'
 import { hostedRouteLabelOf, isHostedProviderRoute } from './provider-route.ts'
 import type { LoopEngineId } from './settings.ts'
@@ -105,29 +106,14 @@ import type { LoopEngineId } from './settings.ts'
  */
 const AGENT_DEFAULT_MODEL_NS = 'agent-default-model'
 
-// The `model/selection` event's one home is
-// `@deepseek-ai/dsh-api-session-controller` (`src/types.ts`), which is not one of
-// this plugin's peers: the plugin appends the event but never imports the
-// package. Mirroring the shape here types the append without taking a
-// dependency, exactly as `driver-core/hosted-tool-vocabulary.ts` does for
-// `todo/write`; a profile always composes the real package, and the two
-// identical declarations merge into one interface.
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    /**
-     * Complete validated model selection requested for subsequent prompt
-     * assembly. Log-only: it never enters derived model history.
-     */
-    'model/selection': {
-      /** Registered provider route. */
-      readonly provider: string
-      /** Provider-owned model id. */
-      readonly model: string
-      /** Adapter-owned reasoning effort, or provider/default behavior when absent. */
-      readonly reasoningEffort?: string
-    }
-  }
-}
+// The `model/selection` event is declared by the harness itself
+// (`@deepseek-ai/dsh-agent`'s `SessionEventMap` augmentation, which a runnable
+// profile always composes and this plugin already imports), so it is NOT mirrored
+// here. A local mirror must be type-identical to merge, and the 0.2.2 line
+// branded the effort field (`ReasoningEffortId`): a plain-`string` mirror stopped
+// merging, which is the compiler's way of saying the shape has one home.
+// Settings hold plain strings, so {@link ModelSelectionReset.appendSeat} brands at
+// the single append.
 
 /** The host's `agentDefaultModel` service (`packages/core/agent-default-model`), as this read needs it. */
 export interface AgentDefaultModelService {
@@ -243,11 +229,23 @@ export class ModelSelectionReset {
       if (!isHostedProviderRoute(current.provider)) return false
       if (current.provider === target.provider && current.model === target.model) return false
     }
-    session.append('model/selection', {
-      provider: target.provider,
-      model: target.model,
-      ...target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort },
-    })
+    try {
+      session.append('model/selection', {
+        provider: target.provider,
+        model: target.model,
+        // Settings carry plain strings; the log's field is the llm brand.
+        ...target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort as ReasoningEffortId },
+      })
+    } catch {
+      // A session no longer open for appends — its lifetime was released, or it
+      // belongs to a transaction that has not entered it — keeps whatever seat it
+      // already has, and that is the right outcome: the machine that would read
+      // the seat is gone, and the switch has already chosen the engine. Reported
+      // as "nothing written" rather than as a warning, because this is an expected
+      // step of a rebuild rather than a deployment problem; the 0.2.2 line is what
+      // turned it from a quiet append into a throw.
+      return false
+    }
     return true
   }
 

@@ -208,7 +208,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         onSelect={onSelect}
         align="start"
         portal
-        getAnchorRect={() => triggerRef.current?.getBoundingClientRect() ?? null}
+        anchorRef={triggerRef}
         anchor={(
           <button
             type="button"

@@ -78,7 +78,7 @@ async function boot(): Promise<Context> {
   const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml'), ...live.config }
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
+    apply: (pluginCtx: Context) => apply(pluginCtx, config),
   })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })

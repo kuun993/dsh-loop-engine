@@ -45,7 +45,20 @@ function sameSelection(left: FoldedSelection | null, right: FoldedSelection | nu
  */
 export function modelSelectionProjections(ctx: Context) {
   const projections = fakeSessionProjections(ctx)
-  projections.register({
+  seedModelSelection(projections)
+  return projections
+}
+
+/**
+ * Register the `modelSelection` fold on a registry that is already provided.
+ *
+ * `mountHarness` provides a bare registry so the 0.2.2 `AgentRegistry` can
+ * mount; a suite that also needs the host's model-selection read seeds it here
+ * instead of providing a second service, which the container refuses.
+ * @param registry - the provided `sessionProjections` registry.
+ */
+export function seedModelSelection(registry: ReturnType<typeof fakeSessionProjections>): void {
+  registry.register({
     key: 'modelSelection',
     init: (): FoldedState => ({ lastUsed: null, pending: null }),
     apply: (state: FoldedState, event: SessionEvent): FoldedState => {
@@ -68,5 +81,15 @@ export function modelSelectionProjections(ctx: Context) {
         : { lastUsed, pending }
     },
   })
-  return projections
+}
+
+/**
+ * Seed the host's `modelSelection` fold onto the registry a harness already
+ * provided.
+ * @param ctx - the booted context.
+ */
+export function seedModelSelectionOn(ctx: Context): void {
+  const registry = ctx.get('sessionProjections') as ReturnType<typeof fakeSessionProjections> | undefined
+  if (registry === undefined) throw new Error('seedModelSelectionOn requires a provided sessionProjections registry')
+  seedModelSelection(registry)
 }

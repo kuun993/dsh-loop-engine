@@ -23,7 +23,7 @@ import {
   HOSTED_PRESET_PREFIX, LEGACY_HOSTED_PRESET_ID, LOOP_ENGINE_IDS, SOURCE_PRESET_ID,
   enginePresetId, hostedEngineOf, sessionEngineOf, type LoopEngineId,
 } from '../src/agent-preset-ids.ts'
-import { engineOfSession, engineReportOfSession } from '../src/engine-of-session.ts'
+import { engineOfSession, engineReportOfSession, parentSessionOf } from '../src/engine-of-session.ts'
 import type { EngineRecordSource } from '../src/session-engine-store.ts'
 
 /** One session's projection snapshot, as the observation lease carries it. */
@@ -291,5 +291,44 @@ describe('engineReportOfSession', () => {
     await expect(engineReportOfSession(ctx, SessionId('unknown'), NO_RECORDS, () => undefined))
       .resolves.toEqual({ engine: { kind: 'unset' } })
     await ctx.fiber.dispose()
+  })
+})
+
+describe('parentSessionOf', () => {
+  it('answers nothing when the deployment composes no session query', async () => {
+    const ctx = new Context()
+    await expect(parentSessionOf(ctx, SessionId('orphan'))).resolves.toBeUndefined()
+  })
+
+  it('reads the creating session the header records', async () => {
+    const ctx = new Context()
+    const observeSession = vi.fn(async () => ({
+      header: { parentSession: 'creator' },
+      [Symbol.dispose]: vi.fn(),
+    }))
+    ctx.provide('sessionQuery', { observeSession })
+
+    await expect(parentSessionOf(ctx, SessionId('child'))).resolves.toBe(SessionId('creator'))
+    // `projectionMode: 'none'`: the lineage lives in the header, so no fold is
+    // computed for a read that only needs the creation fact.
+    expect(observeSession).toHaveBeenCalledWith(SessionId('child'), { projectionMode: 'none' })
+  })
+
+  it('answers nothing when the header records no creator, or a value that is not an id', async () => {
+    for (const parentSession of [undefined, null, 42] as const) {
+      const ctx = new Context()
+      ctx.provide('sessionQuery', {
+        observeSession: vi.fn(async () => ({ header: { parentSession }, [Symbol.dispose]: vi.fn() })),
+      })
+      await expect(parentSessionOf(ctx, SessionId('plain'))).resolves.toBeUndefined()
+    }
+  })
+
+  it('answers nothing when the query refuses the lease instead of failing the caller', async () => {
+    const ctx = new Context()
+    ctx.provide('sessionQuery', {
+      observeSession: vi.fn(async () => { throw new Error('SESSION_QUERY_SESSION_NOT_FOUND') }),
+    })
+    await expect(parentSessionOf(ctx, SessionId('missing'))).resolves.toBeUndefined()
   })
 })

@@ -12,6 +12,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { PiLoop, PI_SANDBOX_MODES, PI_DISPOSE_GRACE_MS } from '../../src/engine-pi/loop.ts'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { PiProcess } from '../../src/engine-pi/rpc/client.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 /** A subprocess handle shaped like the seam returns one. */
 function fakeHandle(): SubprocessHandle {
@@ -32,6 +33,7 @@ function fakeHandle(): SubprocessHandle {
 async function loopCtx(spawn: (spec: unknown) => unknown): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   ctx.provide('subprocess', { spawn })
   return ctx

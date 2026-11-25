@@ -31,6 +31,8 @@ import { canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { HOSTED_DEFAULT_MODEL, HOSTED_ROUTE_LABEL } from '../agent-preset-ids.ts'
 import type { ResolvedConfig } from './types.ts'
+import { llmFailure } from '../driver-core/llm-failure.ts'
+import { HostedAgentModel } from '../driver-core/agent-model.ts'
 import { engineSlashPrompt, serializeHistory } from '../driver-core/prompt.ts'
 import { createImageAccessResolver } from '../driver-core/image-access.ts'
 import { DriverInbox } from '../driver-core/inbox.ts'
@@ -113,6 +115,8 @@ interface HeldMessage {
 /** Drives one session through turn and step boundaries on Pi. */
 export class PiAgent implements Agent {
   readonly inbox: DriverInbox
+  /** Agent-owned access to durable model selection for future steps (the 0.2.2 `Agent` contract). */
+  readonly model: HostedAgentModel
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -199,6 +203,7 @@ export class PiAgent implements Agent {
     private readonly bin: string,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
+    this.model = new HostedAgentModel(loopCtx, session, options)
     this.inbox = new DriverInbox(session, {
       inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
       discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
@@ -373,7 +378,7 @@ export class PiAgent implements Agent {
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
     const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
+      'agent/pre-step', { messages: claimed, ...position, signal, modelSelection: this.model.forStep() },
       (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({ kind: 'enter', messages: claimed }),
     )
     signal.throwIfAborted()
@@ -632,7 +637,7 @@ export class PiAgent implements Agent {
       case 'supported':
         return { ...resolved, api: resolution.api }
       case 'unsupported':
-        throw new LlmError(
+        throw llmFailure(
           `agent "${this.id}": the session selected the dsh model "${resolved.provider}/${resolved.model}", but its`
           + ` wire protocol "${resolved.api}" is not one pi can speak; keep the session on the hosted`
           + ` "external/default" model, or configure that provider with a protocol pi accepts (for example`
@@ -1080,10 +1085,10 @@ export class PiAgent implements Agent {
       // run both failed a turn and never settled, pi's reason is the more useful
       // one to report.
       if (turnError !== undefined) {
-        throw new LlmError(turnError, 'PI_TURN_ERROR')
+        throw llmFailure(turnError, 'PI_TURN_ERROR')
       }
       if (!finished) {
-        throw new LlmError(
+        throw llmFailure(
           `agent "${this.id}": pi query ended without an agent settle`,
           'PI_NO_RESULT',
         )

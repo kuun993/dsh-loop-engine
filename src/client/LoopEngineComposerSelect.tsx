@@ -504,7 +504,7 @@ export function LoopEngineComposerSelect(props: LoopEngineComposerSelectProps): 
         onSelect={onSelect}
         align="start"
         portal
-        getAnchorRect={() => triggerRef.current?.getBoundingClientRect() ?? null}
+        anchorRef={triggerRef}
         anchor={(
           <button
             type="button"

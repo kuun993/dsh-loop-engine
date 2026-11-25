@@ -287,7 +287,7 @@ async function boot(opts: {
   const config: Config = { patchPath: join(await tempDir(), 'cordis.patch.yml'), ...live.config }
   const fiber = ctx.plugin({
     name: 'loop-engine-under-test',
-    apply: (pluginCtx: Context) => { apply(pluginCtx, config) },
+    apply: (pluginCtx: Context) => apply(pluginCtx, config),
   })
   await fiber
   cleanups.push(async () => { await fiber.dispose() })
@@ -624,6 +624,10 @@ describe('an engine change for a session this plugin never built', () => {
     // Driven through the writer itself, because the router cannot produce this
     // state: every build of a session on a hosted engine writes a seat.
     const session = app.ctx.sessions.prepare(SessionId('legacy'))
+    // 0.2.2 refuses an append to a store-owned session that was never entered and
+    // announced; the fixture stands in for the transaction that does both.
+    app.ctx.sessions.enter(session)
+    app.ctx.sessions.announce(session)
     const warnings: string[] = []
     const reset = new ModelSelectionReset(app.ctx, (message: string) => { warnings.push(message) })
 
@@ -643,6 +647,8 @@ describe('a session whose log selects a legacy per-engine provider label', () =>
   /** A session whose only selection is the header an earlier build logged. */
   function legacySession(app: App, id: string): Session {
     const session = app.ctx.sessions.prepare(SessionId(id))
+    app.ctx.sessions.enter(session)
+    app.ctx.sessions.announce(session)
     logEngineHeader(session, LEGACY_ENGINE_LABEL)
     return session
   }

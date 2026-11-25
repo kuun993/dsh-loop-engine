@@ -173,12 +173,24 @@ function fakeQuery(): FakeQuery {
  */
 function fakeProjections() {
   const definitions = new Map<string, { init: () => unknown }>()
+  const stateOf = vi.fn((_session: object, key: string): unknown => definitions.get(key)?.init())
   return {
+    // The 0.2.2 registries await a `ProjectionHandle`; the lines before it took
+    // the returned disposer itself. One answer serves both: callable, carrying
+    // the handle surface, and resolving to it when awaited.
     register: vi.fn((definition: { key: string; init: () => unknown }) => {
       definitions.set(definition.key, definition)
-      return () => { definitions.delete(definition.key) }
+      const release = (): void => { definitions.delete(definition.key) }
+      const handle = {
+        stateOf: (session: object): unknown => stateOf(session, definition.key),
+        readerFor: (session: object): (() => unknown) => () => stateOf(session, definition.key),
+        dispose: async (): Promise<void> => { release() },
+      }
+      return Object.assign(release, handle, {
+        then: (resolve: (value: unknown) => unknown): unknown => Promise.resolve(handle).then(resolve),
+      })
     }),
-    stateOf: vi.fn((_session: object, key: string): unknown => definitions.get(key)?.init()),
+    stateOf,
   }
 }
 
@@ -526,7 +538,10 @@ describe('resume routing', () => {
         .rejects.toThrow('session persistence is not configured')
     }
     expect(app.build).not.toHaveBeenCalled()
-    expect(app.query!.dispose).toHaveBeenCalledTimes(4)
+    // Two observations per fallback: the preset fold, then the durable lineage
+    // the parent inherits through — the 0.2.2 line stopped handing the factory a
+    // live parent agent, so a child's creator is read from the session header.
+    expect(app.query!.dispose).toHaveBeenCalledTimes(8)
   })
 
   it('resumes an in-process session through the harness loop', async () => {

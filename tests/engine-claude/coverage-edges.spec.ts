@@ -35,6 +35,7 @@ import { loopPluginFor } from '../helpers/agent-harness.ts'
 /** Local plugin wrapper: mount constructs the loop factory and hands it the agent-factory slot, as the router does in production. */
 const loopPlugin = loopPluginFor(ClaudeCodeLoop, ['agents', 'sessions', 'systemPrompt', 'subprocess'])
 import { DEFAULT_DISPOSE_GRACE_MS } from '../../src/engine-claude/sdk.ts'
+import { provideSessionProjections } from '../helpers/session-projections.ts'
 
 type QueryFactory = (params: { prompt: string; options: Options }) => Query
 
@@ -118,6 +119,7 @@ async function harness(withLoop = true): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: 'You are the deployment.' })
+  provideSessionProjections(ctx)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalSubprocessRuntime)
   if (withLoop) await ctx.plugin(loopPlugin, {})

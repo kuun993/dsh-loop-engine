@@ -7,13 +7,14 @@
 
 ---
 
-## 1. 现状：一个产物服务四代
+## 1. 现状：一个产物服务五代
 
-从 `0.2.1-rc1` 起，**同一个已发布产物**同时跑在四代 harness 上：
+从 `0.2.2-rc1` 起，**同一个已发布产物**同时跑在五代 harness 上：
 
 | 插件版本 | 目标 harness | 说明 |
 |---|---|---|
-| `0.2.1-rc1`（当前） | `>=0.1.5-rc.1 <0.1.6-0` **或** `>=0.1.7-rc.1 <0.1.8-0` **或** `>=0.2.0-rc.1 <0.2.1-0` **或** `>=0.2.1-rc.1 <0.2.2-0` | 四代由运行期探测分流；每条线内的新 `rc` 由同一段并集范围覆盖，**插件无需改版** |
+| `0.2.2-rc1`（当前） | `>=0.1.5-rc.1 <0.1.6-0` **或** `>=0.1.7-rc.1 <0.1.8-0` **或** `>=0.2.0-rc.1 <0.2.1-0` **或** `>=0.2.1-rc.1 <0.2.2-0` **或** `>=0.2.2-rc.1 <0.2.3-0` | 五代由运行期探测分流；每条线内的新 `rc` 由同一段并集范围覆盖，**插件无需改版** |
+| `0.2.1-rc1` | 前四代（0.1.5 / 0.1.7 / 0.2.0 / 0.2.1） | 同一套规则；0.2.2 上会被 peer 闸门跳过（并集范围里没有那条线），必须用 `0.2.2-rc1` |
 | `0.2.0-rc1` | 前三代（0.1.5 / 0.1.7 / 0.2.0） | 同一套规则 |
 | `0.1.7-rc1` … `0.1.7-rc5` | 0.1.5 线 + 0.1.7 线 | 同一套规则，各自对应这一份工作区的一次发布 |
 | `0.1.5-rc3` … `0.1.5-rc5` | `0.1.5-rc.2` | 单代 |
@@ -22,7 +23,7 @@
 
 > **`rcN` 的读法**：**核心版本**（如 `0.2.1`）对齐的是 harness 的**线**，不是 harness 的某个 `rc`——并集范围 `>=0.2.1-rc.1 <0.2.2-0` 本来就覆盖整条线，所以 `0.2.1-rc1`、`0.2.1-rc2`… 全都服务 `0.2.1-rc.1` 及这条线上后来的 `rc`。**`rcN` 是本插件对这条线的第 N 次发布号**，与 harness 自己的 `rc.N`（如 `0.2.1-rc.2`）**没有编号对应关系**：它们撞名只是历史写法，别把它读成"这个插件只对 harness `rc2` 有效"。
 
-**支持一条线 = 一份隔离依赖集 + 一条 vitest 配置**（`§4.4`）：本仓 devDependencies 跟最新线（0.2.1），另外三条线各占一个 `.compat/0xx/`。加一代的成本主要在这里。
+**支持一条线 = 一份隔离依赖集 + 一条 vitest 配置**（`§4.4`）：本仓 devDependencies 跟最新线（0.2.2），另外四条线各占一个 `.compat/0xx/`。加一代的成本主要在这里。
 
 **已逐个核对过的 harness 小版本**（"支持"= 跑过 `typecheck` + 全部线的测试，**且启动过一次 `dsh web` 看启动日志**）：
 
@@ -32,7 +33,9 @@
 | `0.1.7-rc.1` | 支持 | `.compat/017/` 兼容作业；启动日志无插件报错 |
 | `0.1.7-rc.2` | 支持 | 同上。曾有「preset 载体写错代际」的缺陷（见下面那段），已修 |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | 支持 | `.compat/020/` 兼容作业。**这一代唯一的形状漂移是 turn-status 行**（见 §4.3 与 §5），其余节点半差异都是增量 |
-| `0.2.1-rc.1` / `0.2.1-rc.2` | 支持（当前工作区所对） | 本仓 devDependencies + `.compat/021/` 兼容作业；启动日志无插件报错。**这一代是跨代史上第一次出现"整包删除"**：`@deepseek-ai/dsh-invariants` 与所有 `<package>/invariant` 子路径消失，逼出插件自己的两处结构性改动（§4.5）；浏览器半与 preset 载体没有形状漂移 |
+| `0.2.1-rc.1` / `0.2.1-rc.2` | 支持（`.compat/021/` 钉的那一端） | 本仓 `.compat/021/` 兼容作业；启动日志无插件报错。**这一代是跨代史上第一次出现"整包删除"**：`@deepseek-ai/dsh-invariants` 与所有 `<package>/invariant` 子路径消失，逼出插件自己的两处结构性改动（§4.5）；浏览器半与 preset 载体没有形状漂移 |
+| `0.2.1-rc.3` … `0.2.1-rc.5` | 支持 | 同一条线内的小版本：只提 devDependencies，插件代码零改动（细节见 §4.6 末「0.2.1 尾段」） |
+| `0.2.2-rc.1` … `0.2.2-rc.5` | 支持（`0.2.2-rc.5` 已核对） | **跨 minor，是 0.1.7 以来改动最大的一次**：`Agent` 加 `model` 句柄、`agent/pre-step` 必带 `modelSelection`、`LlmError` 只收内置 code、`AgentLoop` 的注册搬进 `[Service.init]`、`parentAgent`/`enter` 的 owner 参数删除、会话 append 要求先 enter+announce。插件侧六处结构性改动见 §4.6；`.compat/022/` 兼容作业 + devDependencies 都钉 `0.2.2-rc.5`。验证：五线 1312/1312/1312/1312/1312 全绿（0.1.5 线其中 2 条是那条线上本就 skip 的用例）、覆盖率逐文件 100%；源码 `dsh web`（`engine: pi`）启动日志无本插件报错、路由器挂上（无 `could not start the loop router`）、浏览器半实测 composer 引擎座位正常渲染且无 `读取中`/slot crash |
 
 > **`0.1.7-rc.2` 上修掉的缺陷：preset 的载体写错了代际（2026-09-25 定位）**。插件把四个托管 preset 写成
 > **目录** `$DSH_HOME/.agent-presets/loop-engine-<engine>/{agent.cordis.yml,preset.yml}`——那是 **0.1.5 的
@@ -139,6 +142,7 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | `.compat/017/` | 同上，装 **0.1.7 线**（`0.1.7-rc.2`）那一套 |
 | `.compat/020/` | 同上，装 **0.2.0 线**（`0.2.0-rc.2`）那一套 |
 | `.compat/021/` | 同上，装 **0.2.1 线**（`0.2.1-rc.2`）那一套。**没有 `@deepseek-ai/dsh-invariants`**：这条线不再发布它，装它会让整份 `pnpm install` 直接失败（`ERR_PNPM_NO_MATCHING_VERSION`） |
+| `.compat/022/` | 同上，装 **0.2.2 线**（`0.2.2-rc.5`）那一套。同样没有 `@deepseek-ai/dsh-invariants` |
 | `vitest.config.compat0NN.ts` | 把每个 `@deepseek-ai/*` 别名到 `.compat/0NN/node_modules/@deepseek-ai/`，跑**同一批 spec**（**不跑覆盖率**，是功能性验证）：`npx vitest run --config vitest.config.compat017.ts` 等。只别名该集合里**存在**的包，所以嵌套传递依赖仍走 pnpm 自己的布局 |
 | `package.json` `peerDependencies` | 联合范围 `">=0.1.5-rc.1 <0.1.6-0 \|\| >=0.1.7-rc.1 <0.1.8-0 \|\| >=0.2.0-rc.1 <0.2.1-0 \|\| >=0.2.1-rc.1 <0.2.2-0"`；`@deepseek-ai/cordis` 放宽到 `^4.0.1`（`Volatile` 只在**构建期**用）；`schemastery` 钉 `3.18.4`。**`@deepseek-ai/dsh-invariants` 已从 peer 里删掉**——理由见 §4.5 第 1 条 |
 | `pnpm-workspace.yaml` `minimumReleaseAgeExclude` | pnpm "最小发布年龄"供应链护栏的豁免名单。本仓库**没有开启** `minimumReleaseAge`（`pnpm config get minimumReleaseAge` = `undefined`），所以这项目前是前瞻性的；但 `pnpm install` 会**自动**把刚装上的版本追加进去，因此每次提版后这个文件都会自己变长——跟着提交即可，不要手删。 |
@@ -155,10 +159,26 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | **运行期 invariants 整体删除** | `@deepseek-ai/dsh-invariants` 不再发布；`InvariantRegistry` / `InvariantInstaller` / `InvariantFailure` / `InvariantError` 与每个包的 `<pkg>/invariant` 子路径全部消失（harness `docs/upgrade-guide/v0.2.0-rc.2/remove-runtime-invariants`）。`llm/adapters-updated` 等四个发射点也不再单独重抛 `code: 'INVARIANT'` 的失败 | `src/invariant.ts` 不再 import 宿主的**类型**，改为就近声明 `InvariantInstaller` / `InvariantRegistryLike` 两个形状（与 `src/driver-core/host-servers.ts` 同一手法）；`inject = ['invariants']` 保持不变，所以在没有该服务的代际上它自然保持 pending。**`peerDependencies` 里删掉这个包** | **两个层次都死**：`tsc` 报 module-not-found；而即使绕过它，dsh 的 peer 闸门（`packages/boot/app-boot/src/plugin-compatibility.ts` 的 `unmetRequirements`，只查 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 开头的 peer）判定不满足，启动日志直接 `skipping profile bundle "dsh-loop-engine"` ——**整个插件**不加载，不是某个功能退化 |
 | **JSONL 持久化后端改成命名空间插件** | `@deepseek-ai/dsh-session-persistence-jsonl` 从"默认导出类"变成具名 `name` / `Config` / `apply`，**没有 default export**（harness `docs/upgrade-guide/v0.2.1-alpha.1/jsonl-persistence-plugin`） | 插件源码不 import 它，所以只有 spec 受影响：`tests/helpers/harness-generation.ts` 的 `jsonlSessionPersistence` 取 `default ?? namespace`，九个 spec 统一用它挂载 | 108 条 spec 全红，报 `invalid plugin, expect function or object with an "apply" method, received undefined` ——**单测红、运行期其实没事**，正是 §5 那一类"静态检查看不见"的反向例子 |
 
-> 为什么 `dsh-invariants` 必须从 **peer 里删掉**，而不是"留着但放宽范围"：闸门对**每一个** `@deepseek-ai/dsh-*` peer 都独立判定，任一不满足就跳过**整个 bundle**。删掉 peer、把形状就近声明，是让一份产物同时服务四代唯一不需要代际分支的写法（§3 手法 B）。
+> 为什么 `dsh-invariants` 必须从 **peer 里删掉**，而不是"留着但放宽范围"：闸门对**每一个** `@deepseek-ai/dsh-*` peer 都独立判定，任一不满足就跳过**整个 bundle**。删掉 peer、把形状就近声明，是让一份产物同时服务五代唯一不需要代际分支的写法（§3 手法 B）。
 
 > 顺带记一条**不是**插件问题的现象：0.2.1 起启动日志里的 `skipping profile bundle "<别的插件>"` 是**那个插件**的 peer 范围没跟上这一代，与本插件无关。本插件被跳过只可能是它自己的 peer 范围没写上新线。
 
+### 4.6 0.2.2 线：六处**结构性**改动（跨 minor，插件代码真的动了）
+
+0.2.2 没有改任何一个服务名，但把"谁来注册"和"谁在什么时候能写"重排了。以下六条各自都能让整条会话路径失效，且**类型检查只抓得住前三条**：
+
+| 改动 | harness 侧 | 插件侧怎么改 | 不改会怎样 |
+|---|---|---|---|
+| **`Agent` 多了 `model` 句柄** | `Agent` 接口新增 `readonly model: Model`（`current()` / `select()`），harness 的工具解析与 system-prompt 装配都读它 | 新增 `src/driver-core/agent-model.ts`（`HostedAgentModel`）：记录的选择（`currentSelection`，pending → header）优先于 `agent.options`；`select()` 追加 log-only 的 `model/selection`，相同则不重复写。四个托管 agent 各挂一个，并在 `agent/pre-step` 里用 `forStep()` 给出**必填**的 `modelSelection` | `tsc` 报 `Property 'model' is missing`；绕过后每轮 `agent/pre-step` 的载荷不满足契约 |
+| **自定义 llm 失败码** | `new LlmError(message, code)` 的 `code` 收窄成 `BuiltinLlmFailureCode`，其余走 `LlmError.fromFailure`（harness `docs/upgrade-guide/v0.2.2-alpha.2/llm-error-builtin-codes`） | 新增 `src/driver-core/llm-failure.ts`：**探测 `fromFailure` 是否存在**（0.2.1 及更早没有），在就用它、不在就退回构造函数。九处引擎自有失败码（`PI_*` / `CODEX_*` / `KIMI_NO_RESULT` / `HOSTED_ENGINE_ROUTE`）统一走它 | 九处 `tsc` 报 `not assignable to BuiltinLlmFailureCode` |
+| **`AgentLoop` 的注册搬进 `[Service.init]`** | 投影单元、`AgentFactory` 槽位、两条 prompt 变量、声明式 `agents` 列表全部从构造函数搬到 `protected async [Service.init]()`——**cordis 只对类插件调用它** | `RouterLoop` 是**手写构造**的（它自己占那个槽位），所以新增 `runDeferredServiceInit()`：探到继承来的 `[Service.init]` 就调一次（探针即"这个方法在不在"），并把它暴露成 `routerReady`；插件 `apply` 改成 async 并在末尾 `await routerReady`，这样"插件加载完"与"工厂已注册"是同一时刻。init 失败按原来的话术 `could not start the loop router` 记 error | **不报错、但所有会话 `create` 都失败**：`no agent factory registered (load an agent-loop plugin)`——路由器挂起来了却什么都没注册 |
+| **`parentAgent` / `enter(agent, owner)` 删除** | 工厂选项不再带运行时 owner；`AgentRegistry.enter(agent)` 只收一个参数，子 agent 的树归属改由 subagent Activation 负责 | 引擎继承改为读**durable lineage**：create 用 `meta.parentSession`（回退到旧字段的宽松读取），resume 用会话头的 `parentSession`（`engine-of-session.ts` 的 `parentSessionOf`，且只在"record + preset 都没答案"这条回退路径上多读一次）；`enter` 按 `Function.length` 探针传不传 owner | `tsc` 报 `Property 'parentAgent' does not exist` / `Expected 1 arguments, but got 2` |
+| **会话写入的先决条件** | `Session.append` 现在拒绝"未 enter 的 store 会话"和"`session/created` 未完成的会话"；同时自 announce 起，后端把会话事件按 id 路由进活动写句柄 | 托管运行时把事务顺序改成 harness 工厂那一套：**先 flush 种子 → enter → announce → setup → publish**（`hosted-engine-runtime.ts` 的 `setupAndPublish`）。`SessionLifetime` 因此区分 `entered` 与 `announced`（swap 继承两者、不再重复 announce）；`ModelSelectionReset` 的座位写入把"会话已不可写"当成"没写"而不是抛错 | 路由器在 setup 里写的 `model/selection` 座位直接抛 `cannot append outside a SessionStore`；而"setup 之后再 flush 一次"会让写句柄重发已由后端路由存储的事件（`append seq mismatch ... expected 1 ... got 0`） |
+| **客户端 `Menu` 的锚点** | `getAnchorRect` 删除，改 `anchorRef`（外部触发器）或 `anchorPoint`（指针手势）；菜单定位改用 CSS anchor positioning（harness `docs/upgrade-guide/v0.2.2-alpha.2/css-anchored-menus`） | 设置页与 composer 两处选择器改传 `anchorRef={triggerRef}`；更早的线上该属性被忽略，退回它们自己的锚点测量（包住触发器的 wrapper 与触发器同尺寸） | `tsc` 报 `Property 'getAnchorRect' does not exist` |
+
+**测试夹具也跟着变了**（`§4.4`）：`AgentRegistry` 在 0.2.2 也 `inject: ['sessionProjections']`，所以每个挂它的测试栈都要**先** provide 投影注册表（cordis 不会为迟到的服务激活已 pending 的 fiber）；注册表假实现的 `register()` 要同时满足两代——0.2.1 把返回值当 disposer 调、0.2.2 `await` 出一个 `ProjectionHandle`，因此返回一个**可调用且可 then** 的对象。
+
+**0.2.1 尾段**（`0.2.1-rc.3` … `0.2.1-rc.5`）不需要动代码：三跳的源码改动分别是 llm 提供方的模型列表、客户端入口自定义（新增 More 菜单两槽）、tooltip/View tab 修整、`ui-chat` 推理块渲染，本插件占用的三处槽位与 turn-status 挂点都没动。
 ---
 
 ## 5. 编译器看不见的兼容点（最容易漏，升级时优先怀疑）
@@ -176,6 +196,9 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
 | `dataset` 键拼写 | `dataset['data-loop-engine']` 会被 `DOMStringMap` 的命名 setter 拒绝并抛 `SyntaxError` | 整条反射路径带塌（只能写 camelCase 的 `dataset.loopEngine`） |
 | 事件名 / 方法签名 | `agent/session-start`、`sessions.enter/announce`、`agents.announce(agent)` vs `announce(agent, source, signal)` | 会话创建公告缺失，或 `announce` 被当作同步调用 |
 | 图标/原语名 | `IconChevronDownOutline14` → `IconChevronDownOutlineRegular` | 图标不渲染 |
+| **基础 loop 的注册时机** | 构造函数里的 `setFactory` / 投影注册 → `[Service.init]`（只对类插件调用） | 手写构造的路由器**什么都不注册**：所有会话 `no agent factory registered`，而类型、构建、单测（用 class 插件挂的夹具）全绿 |
+| **会话 append 的先决条件** | 任意时刻可写 → 先 `enter`、再 `announce`（`session/created`）才可写；announce 之后事件由后端路由进活动写句柄 | setup 期的座位写入抛 `cannot append outside a SessionStore`；或在 setup 后再手动 flush 一次 → `append seq mismatch ... expected 1 ... got 0` |
+| **服务注入的时机** | 静态 `inject` 在挂载时解析，**迟到的 `provide` 不会激活已 pending 的 fiber** | 夹具里先挂 `AgentRegistry` 再 provide 投影注册表 → 注册表 pending，`ctx.agents` 全程 `undefined` |
 
 **挑锚点的优先级**（对 harness 内部 DOM/类名）：**稳定属性**（`data-*`）> **类名后缀**（`[class$="_x"]`）> **类名字面量**（`.label`，基本必错）。0.1.7 的 turn-status 行就是靠 `data-turn-process` + `[class$="_label"]` 才站住的，0.2.0 的则是**直接用 harness 自己写在在跑那行上的 `data-chat-running`**（插件只往内容行 `[class$="_runningContent"]` 上挂字形）；**自己写的 `data-*` 属性比 harness 的状态属性更可靠**——`data-loop-engine-live` 由插件在"文档里最后一行"上盖出来，而不是去解读 ui-chat 的 `disabled` 想表达什么（§5 turn-status 行挂点那条）。
 
@@ -223,8 +246,9 @@ export const LEGACY_HARNESS: boolean = 'SettingsProvider' in (dshSettings as obj
    npx vitest run --config vitest.config.compat017.ts    # 0.1.7 线
    npx vitest run --config vitest.config.compat020.ts    # 0.2.0 线
    npx vitest run --config vitest.config.compat021.ts    # 0.2.1 线
+   npx vitest run --config vitest.config.compat022.ts    # 0.2.2 线
    ```
-   四条线的 spec 数是 1296/1298/1298/1298（0.1.5 少两条，是那条线上本就 skip 的用例）。
+   五条线的 spec 数都是 1312（0.1.5 线里 2 条是那条线上本就 skip 的用例，报 1310 passed | 2 skipped）。
 6. **更新声明与文档**：`package.json` 每个 `@deepseek-ai/dsh-*` peer 范围加上新一代（`|| >=0.2.2-rc.1 <0.2.3-0` 之类），**并删掉新线不再发布的包**（0.2.1 删了 `dsh-invariants`；留着会让 dsh 跳过整个 bundle），devDependencies 与 `.compat/0NN/package.json` 一起提；`pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 跟着加；**源码启动的 profile 里那些 `file:` shim 声明的版本也要跟着改**（`docs/source-checkout.md`，否则 pnpm 会再装一份 harness 包）；然后更新本篇 §1 的矩阵、§4/§5 的清单，以及 `docs/architecture.md` §8 与两个 README 的版本对应段落。
 7. **版本号**：插件版本跟 harness 走 `<harness version>-rcN`（`0.2.1-rc.2` → `0.2.1-rc1`，`rcN` 是本插件那条线的发布号）。
 8. **真机冒烟**：源码 harness + 发行版 harness 各起一个 `dsh web`，跑 in-process 与托管引擎各一轮对话，并**硬刷新**核对 turn-status 行（进行中要有字形+扫光、结束后要回朴素）。0.2.0 起还要多看一件事：**dsh 自己会在开机时按 peer 范围跳过不兼容的插件**（`dsh plugin allow-version` 可显式放行），所以启动日志里出现的 `skipping profile bundle` 是**别的插件**没跟上这一代，不是本插件的问题——本插件被跳过只可能因为它自己的 peer 范围没写上新线。

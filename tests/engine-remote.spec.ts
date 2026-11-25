@@ -295,12 +295,23 @@ function foldingProjections(ctx: Context) {
   })
 
   return {
-    register: (definition: { key: string } & ErasedUnit): (() => void) => {
+    // The 0.2.2 registries await a `ProjectionHandle`; the lines before it took
+    // the returned disposer itself. One answer serves both: callable, carrying
+    // the handle surface, and resolving to it when awaited.
+    register: (definition: { key: string } & ErasedUnit): unknown => {
       units.set(definition.key, {
         init: header => definition.init(header),
         apply: (state, event) => definition.apply(state, event),
       })
-      return () => { units.delete(definition.key) }
+      const release = (): void => { units.delete(definition.key) }
+      const handle = {
+        stateOf: (session: Session): unknown => stateFor(session, definition.key),
+        readerFor: (session: Session): (() => unknown) => () => stateFor(session, definition.key),
+        dispose: async (): Promise<void> => { release() },
+      }
+      return Object.assign(release, handle, {
+        then: (resolve: (value: unknown) => unknown): unknown => Promise.resolve(handle).then(resolve),
+      })
     },
     stateOf: (session: Session, key: string): unknown => stateFor(session, key),
   }
@@ -509,7 +520,13 @@ async function durableSession(
     seed: [...SEED],
     ...headerPreset === undefined ? {} : { meta: { agentPreset: headerPreset } },
   })
+  // 0.2.2 refuses an append to a store-owned session that was never entered and
+  // announced, so the fixture joins the store for the one write and leaves again:
+  // what it publishes below is a stored log, not a live session.
+  const detach = app.ctx.sessions.enter(session)
+  app.ctx.sessions.announce(session)
   if (selected !== undefined) session.append('agent-preset/selected', { agentPreset: selected })
+  detach()
   const handle = await app.ctx.sessionPersistence.create(session.header, {
     inheritedEventCount: session.inheritedEventCount,
   })
