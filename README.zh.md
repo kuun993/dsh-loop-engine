@@ -47,6 +47,7 @@ dsh plugin --profile web add dsh-loop-engine
 - **模型**——所有托管引擎共用 **一个** `external` 分组,里面只有一条 `default`,含义是"交给引擎自己决定"。选一条**真实的 dsh 模型**会把模型连同它的端点与凭据一起交给引擎;引擎能不能用是引擎的事,**被拒会如实报错而不是悄悄吞掉**。`in-process` 会话照常用 dsh 的模型。
 - **`childIdleMs`**(组合条目,毫秒,默认 `0` = 不启用)——Kimi 与 Codex **每条会话保有一个常驻子进程**跨 step 复用;设了它就在空闲这么久之后把子进程关掉,下一步再重新拉起。只关子进程,所以不会触发任何重载。Pi 与 Claude Code 每步各起一次,不受影响。
 - **dsh 自己的命令**(`/export`、`/feedback`、`/permission`)在托管引擎下照常可用。托管引擎的 preset 是 `standard` 的副本,去掉了被外部引擎接管的那几行(dsh 的 `/plan`、`/compact`、goal 工具与 `/goal`、以及技能相关行)。
+- **Windows CLI 安装**——`Settings → Loop engine` 可安装、启动并校验 Claude Code、Codex CLI、Pi 和 Kimi Code。安装只使用固定的官方命令；页面不会读取或保存登录凭据，请在各 CLI 自己登录。重启准备会校验已安装的 CLI，并生成当前用户专用启动脚本，把 CLI 所在目录加入官方 DSH 下次启动环境，不修改系统 `PATH`。
 
 ## 版本兼容
 

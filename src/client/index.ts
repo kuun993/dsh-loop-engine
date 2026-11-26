@@ -28,6 +28,7 @@ import { decodeLoopEngine, LoopEngineStore, type LoopEngineSettingsSnapshot, typ
 import { createSessionEngineCache, sessionEngineSwitcher } from './session-engine.ts'
 import { installReloadReturn } from './reload.ts'
 import { installTurnStatusStyles } from './turn-status.ts'
+import { createCliSetupClient } from './cli-setup.ts'
 import { en, zh, type LoopEngineKey } from './locales.ts'
 import { LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL, LEGACY_LOOP_ENGINE_SETTINGS_NAMESPACE_LITERAL } from '../namespace.ts'
 import type { LoopEngineSettings } from '../settings.ts'
@@ -89,13 +90,15 @@ export function apply(ctx: ClientContext): void {
   // focus guard a document-level attribute needs.
   installTurnStatusStyles(ctx)
 
+  const cliSetup = createCliSetupClient(ctx)
+
   // The authoritative per-session engine read: the plugin's own Remote namespace
   // (`remote.loopEngine.engine`), mounted here and cached per session. Both the
   // header chip and the composer render from it, and the composer's switch
   // invalidates it — the client session list's `agentPreset` hint is deliberately
   // NOT read anywhere any more: it is a partial cache and it lags the durable log
   // on exactly the sessions (engine switched while blank) users noticed it on.
-  const sessionEngines = createSessionEngineCache(ctx)
+  const sessionEngines = createSessionEngineCache(ctx, (remote) => cliSetup.attach(remote))
 
   // Switch a session's engine onto the harness loop and the host releases that
   // session's agent, which leaves THIS page holding a session the controller
@@ -142,6 +145,7 @@ export function apply(ctx: ClientContext): void {
     controller,
     hooks: { snapshot: controller.store },
     t,
+    cliSetup,
   })
 
   // Register the page once the `settings.section` declaration is on the ledger.

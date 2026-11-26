@@ -62,6 +62,7 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import { CLI_SETUP_REMOTE_DESCRIPTORS, type CliSetupRemoteFace } from './cli-setup.ts'
 import {
   LOOP_ENGINE_IDS, isLoopEngineId, isLoopEngineRefusalCode,
   type LoopEngineId, type LoopEngineRefusalCode, type LoopEngineSelectResult, type SessionEngine, type SessionEngineReport,
@@ -514,6 +515,7 @@ export const LOOP_ENGINE_REMOTE_CONTRIBUTION: RemoteContribution = {
       { parse: parseSessionEngineReport },
     ),
     descriptor(LOOP_ENGINE_REMOTE_SELECT_METHOD, { parse: parseSelectRequest }, { parse: parseSelectResult }),
+    ...CLI_SETUP_REMOTE_DESCRIPTORS,
   ],
 }
 
@@ -757,7 +759,10 @@ export class SessionEngineCache {
  * @param ctx - the client root context.
  * @returns the cache both session surfaces and the switcher share.
  */
-export function createSessionEngineCache(ctx: ClientContext): SessionEngineCache {
+export function createSessionEngineCache(
+  ctx: ClientContext,
+  onCliSetupRemote?: (remote: CliSetupRemoteFace | undefined) => void,
+): SessionEngineCache {
   const cache = new SessionEngineCache()
   ctx.inject(['remote'], (remoteCtx: ClientContext) => {
     const remote = remoteCtx.get('remote') as EngineRemoteHost | undefined
@@ -765,6 +770,7 @@ export function createSessionEngineCache(ctx: ClientContext): SessionEngineCache
     remote.$mount(LOOP_ENGINE_REMOTE_CONTRIBUTION).then(
       () => {
         cache.attach(remoteCtx.get(`remote.${LOOP_ENGINE_REMOTE_NAMESPACE}`) as SessionEngineRemote | undefined)
+        onCliSetupRemote?.(remoteCtx.get('remote.cliSetup') as CliSetupRemoteFace | undefined)
       },
       (error: unknown) => {
         ctx.logger.warn(`loop-engine: could not mount the session engine Remote: ${String(error)}`)

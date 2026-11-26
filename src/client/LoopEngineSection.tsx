@@ -25,6 +25,8 @@ import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { LoopEngineStore, LoopEngineState } from './store.ts'
 import type { LoopEngineId } from '../agent-preset-ids.ts'
 import { isHostedEngine } from '../agent-preset-ids.ts'
+import { CliSetupSection } from './CliSetupSection.tsx'
+import type { CliSetupClient } from './cli-setup.ts'
 import type { en } from './locales.ts'
 
 /** Injected dependencies of {@link LoopEngineSection} (slot `inject`). */
@@ -37,6 +39,8 @@ export interface LoopEngineSectionInjected {
   }
   /** Section copy. */
   t: (key: keyof typeof en) => string
+  /** Fixed-command CLI setup facade. */
+  cliSetup: CliSetupClient
 }
 
 /** Props delivered by the slot outlet (the renderer erases the share boundary). */
@@ -158,7 +162,7 @@ const confirmBody: CSSProperties = {
 
 /** Render the engine dropdown plus the interrupt notice and the switch confirmation. */
 export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
-  const { controller, useSnapshot, t } = props as SectionFace
+  const { controller, useSnapshot, t, cliSetup } = props as SectionFace
   const { status, engine, showInComposer, showEngineBadge, writable } = useSnapshot((snapshot: LoopEngineState) => snapshot)
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState<LoopEngineId | null>(null)
@@ -171,6 +175,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         <h3 id={navId} style={titleStyle}>{t('nav')}</h3>
         <p style={intro}>{t('description')}</p>
         <p role="alert" style={error}>{t('unavailable')}</p>
+        <CliSetupSection client={cliSetup} t={t} />
       </section>
     )
   }
@@ -246,6 +251,7 @@ export function LoopEngineSection(props: LoopEngineSectionProps): JSX.Element {
         />
         {t('showEngineBadgeLabel')}
       </label>
+      <CliSetupSection client={cliSetup} t={t} />
       <Modal
         open={pending !== null}
         onClose={cancelSwitch}

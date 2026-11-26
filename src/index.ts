@@ -54,6 +54,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { AgentPresetsService, LlmRegistry, SettingsMutator } from './driver-core/host-servers.ts'
 import { engineOfSession } from './engine-of-session.ts'
 import { LoopEngineRemote } from './engine-remote.ts'
+import { CliSetupManager, CliSetupRemote } from './cli-setup.ts'
 import { ClaudeCodeLoop, CLAUDE_CODE_PERMISSION_MODES, type Config as ClaudeCodeConfig } from './engine-claude/loop.ts'
 import { CodexLoop, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, type Config as CodexConfig } from './engine-codex/loop.ts'
 import { PiLoop, type Config as PiConfig } from './engine-pi/loop.ts'
@@ -906,6 +907,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     )
   }
   mountEngineRemote()
+
+  // Keep CLI setup commands fixed and plugin-owned; browser requests select
+  // only one known CLI and never supply shell text or paths.
+  const cliSetup = new CliSetupManager()
+  new CliSetupRemote(ctx, cliSetup)
+  ctx.effect(() => () => cliSetup.dispose(), 'loop-engine: CLI setup lifecycle')
 
   mountProviderRoutes()
   authorEnginePresets()
